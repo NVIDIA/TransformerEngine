@@ -928,7 +928,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
-        lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size] = config;
+        lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size, rhs_interleaved,
+        out_interleaved] = config;
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
                  scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING,
@@ -1013,6 +1014,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   gemmConfig.set_avg_m(avg_m);
   gemmConfig.set_avg_n(avg_n);
   gemmConfig.set_avg_k(avg_k_lhs);
+  // rhs is cuBLAS A and the output is D (see the operand swap above).
+  gemmConfig.set_a_interleaved(rhs_interleaved);
+  gemmConfig.set_d_interleaved(out_interleaved);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),

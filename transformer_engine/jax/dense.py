@@ -341,6 +341,7 @@ def grouped_dense(
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
     kernel_fsdp_info: Tuple[str, int] = (None, -1),
+    kernel_group_axis: int = 0,
 ):
     """
     Perform grouped dense (linear) layer transformation with optional quantization.
@@ -360,10 +361,23 @@ def grouped_dense(
                           represented in the format (str, int). The first element is the
                           FSDP mesh axis, and the second element is the dimension along
                           which the weight is sharded.
+        kernel_group_axis: Axis of `kernel` that indexes the groups: 0 for (G, K, N), or 1 for
+                           an interleaved (K, G, N) kernel, e.g. one all-gathered along K. With
+                           1, the kernel is used without a transpose and its gradient is
+                           returned as (K, G, N). Only supported without quantization
+                           or bias.
 
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
     """
+    if kernel_group_axis not in (0, 1):
+        raise ValueError(f"kernel_group_axis must be 0 or 1, got {kernel_group_axis}.")
+    if kernel_group_axis == 1 and (
+        kernel.ndim != 3 or quantizer_set != noop_quantizer_set or bias is not None
+    ):
+        raise ValueError(
+            "kernel_group_axis=1 requires an unquantized 3D (K, G, N) kernel and no bias."
+        )
     output = _grouped_dense(
         x,
         kernel,
@@ -375,11 +389,12 @@ def grouped_dense(
         group_offset,
         quantizer_set,
         kernel_fsdp_info,
+        kernel_group_axis,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 9, 10))
 def _grouped_dense(
     x,
     kernel,
@@ -391,6 +406,7 @@ def _grouped_dense(
     group_offset,
     quantizer_set,
     kernel_fsdp_info,
+    kernel_group_axis,
 ):
     output, _ = _grouped_dense_fwd_rule(
         x,
@@ -403,6 +419,7 @@ def _grouped_dense(
         group_offset,
         quantizer_set,
         kernel_fsdp_info,
+        kernel_group_axis,
     )
     return output
 
@@ -418,6 +435,7 @@ def _grouped_dense_fwd_rule(
     group_offset,
     quantizer_set,
     kernel_fsdp_info,
+    kernel_group_axis,
 ):
     use_bias = bias is not None
 
@@ -471,6 +489,7 @@ def _grouped_dense_fwd_rule(
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
+        rhs_interleaved=kernel_group_axis == 1,
     )
 
     ctx = (
@@ -491,7 +510,14 @@ def _grouped_dense_fwd_rule(
 
 
 def _grouped_dense_bwd_rule(
-    contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
+    contracting_dims,
+    precision,
+    preferred_element_type,
+    group_offset,
+    kernel_fsdp_info,
+    kernel_group_axis,
+    ctx,
+    grad,
 ):
     kernel_fsdp_mesh_axis, _ = kernel_fsdp_info
     kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
@@ -544,6 +570,7 @@ def _grouped_dense_bwd_rule(
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
+        rhs_interleaved=kernel_group_axis == 1,
     )
 
     wgrad = tex.grouped_gemm(
@@ -553,6 +580,7 @@ def _grouped_dense_bwd_rule(
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
+        out_interleaved=kernel_group_axis == 1,
     )
 
     group_sizes_grad = None
