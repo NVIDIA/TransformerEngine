@@ -187,7 +187,7 @@ def _require_dense_indexer_training():
     return cudnn
 
 
-def _dense_teacher_logits(query, local_kv, compressed_kv, sink, *, ratio, window, scale):
+def _dense_teacher_logits(query, uncompressed_kv, compressed_kv, sink, *, ratio, window, scale):
     query = query.float()
     pos = torch.arange(query.shape[1], device=query.device)
     valid = (torch.arange(compressed_kv.shape[1], device=query.device) + 1) * ratio <= (
@@ -197,9 +197,9 @@ def _dense_teacher_logits(query, local_kv, compressed_kv, sink, *, ratio, window
     comp_logits = (
         torch.einsum("bshd,bkd->bshk", query, compressed_kv.float()) * scale
     ).masked_fill(~valid[None, :, None, :], -torch.inf)
-    local_logits = (torch.einsum("bshd,kd->bshk", query, local_kv.float()) * scale).masked_fill(
-        ~local_mask[None, :, None, :], -torch.inf
-    )
+    local_logits = (
+        torch.einsum("bshd,kd->bshk", query, uncompressed_kv.float()) * scale
+    ).masked_fill(~local_mask[None, :, None, :], -torch.inf)
     # The denominator covers the local window, all eligible compressed KV, and the sink.
     full_lse = torch.logaddexp(
         torch.logaddexp(local_logits.logsumexp(-1), comp_logits.logsumexp(-1)),
@@ -235,11 +235,11 @@ def test_dsa_indexer_backward(index_heads):
     qi, ki, wi = (t.unsqueeze(0) for t in (query, key, weights))
     qa = (torch.randn(1, seq, 64, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
     kc = (torch.randn(1, seq // ratio, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
-    local_kv = (torch.randn(seq, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
+    uncompressed_kv = (torch.randn(seq, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
     sink = torch.randn(64, device=x.device)
     scale_i, scale_a = (index_heads * 128) ** -0.5, 512**-0.5
     comp_logits, full_lse, valid = _dense_teacher_logits(
-        qa, local_kv, kc, sink, ratio=ratio, window=window, scale=scale_a
+        qa, uncompressed_kv, kc, sink, ratio=ratio, window=window, scale=scale_a
     )
     target = (comp_logits - full_lse[..., None]).exp().sum(2)
     target = target / target.sum(-1, keepdim=True).clamp_min(1e-30)
@@ -343,7 +343,13 @@ def test_dsv4_indexer_auxiliary_backward():
     qa, kc = (context[name].unsqueeze(0) for name in ("attn_q", "compressed_kv"))
     scale_i, scale_a = (qi.shape[-2] * qi.shape[-1]) ** -0.5, qa.shape[-1] ** -0.5
     _, full_lse, _ = _dense_teacher_logits(
-        qa, context["local_kv"], kc, context["sink"], ratio=ratio, window=window, scale=scale_a
+        qa,
+        context["uncompressed_kv"],
+        kc,
+        context["sink"],
+        ratio=ratio,
+        window=window,
+        scale=scale_a,
     )
     index_score, attn_score = dense_indexer_loss_scores(
         qi, ki, wi, qa, kc, full_lse, ratio=ratio, index_scale=scale_i, attention_scale=scale_a
@@ -491,7 +497,7 @@ def test_dsv4_attention_thd(variant, ratio):
             assert all(context[name].requires_grad for name in ("index_q", "index_k", "index_w"))
             assert not any(
                 context[name].requires_grad
-                for name in ("attn_q", "local_kv", "compressed_kv", "sink")
+                for name in ("attn_q", "uncompressed_kv", "compressed_kv", "sink")
             )
         else:
             output = layer(part.unsqueeze(batch_axis))

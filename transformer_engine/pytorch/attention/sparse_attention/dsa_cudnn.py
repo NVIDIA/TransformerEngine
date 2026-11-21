@@ -226,7 +226,7 @@ def select_indices(
     torch.Tensor
         CUDA INT32 ``[T,top_k]`` global indices into packed compressed_key, one
         list per query token; -1 marks invalid entries. Indices address compressed
-        KV only, before adding the local KV offset. Selection has no autograd;
+        KV only, before adding the uncompressed KV offset. Selection has no autograd;
         train the indexer with a separate caller-owned auxiliary loss.
     """
     if query.ndim != 3 or query.shape[1] not in (32, 64) or query.shape[2] != 128:
@@ -412,11 +412,11 @@ def _prepare_sparse_kv_indices(
 
     Query is already in packed thd format [T,H,D]; only its token count and device are used.
     This helper does not flatten it. Return INT32 [T,window_size+compressed_slots]
-    indices into torch.cat((local_kv, compressed_kv), dim=0).
+    indices into torch.cat((uncompressed_kv, compressed_kv), dim=0).
 
-    Local KV has T tokens. Compressed indices count from the start of the entire
+    Uncompressed KV has T tokens. Compressed indices count from the start of the entire
     packed compressed tensor, including preceding sequences. Add T to address
-    compressed KV after local KV in the concatenated tensor. Invalid entries are -1.
+    compressed KV after uncompressed KV in the concatenated tensor. Invalid entries are -1.
     CSA supplies top-k indices from select_indices; HCA supplies indices=None and
     this helper includes every eligible compressed token.
     """
@@ -476,7 +476,7 @@ def _prepare_sparse_kv_indices(
     # CSA fills unused top-k slots with -1 when fewer than top_k entries are eligible.
     compressed = torch.where(valid, compressed + query.shape[0], -1)
     # cuDNN accepts an arbitrary logical width and pads its internal kernel
-    # layout, so preserve only the model-visible local + compressed slots.
+    # layout, so preserve only the model-visible sliding-window + compressed slots.
     return torch.cat((local, compressed), dim=1).to(torch.int32).contiguous()
 
 
@@ -486,7 +486,7 @@ class _SparseAttention(torch.autograd.Function):
         """Attend query [T,64,D] to concatenated KV [T+Tc,D] using INT32 KV token indices.
 
         indices [T,window_size+compressed_slots] contains one list per query token
-        addressing concatenated local + compressed KV, with -1 for invalid entries.
+        addressing concatenated uncompressed + compressed KV, with -1 for invalid entries.
         No compressed query is constructed.
         """
         result = _dsa_op("sparse_attention_forward_wrapper")(
@@ -523,7 +523,7 @@ class _SparseAttention(torch.autograd.Function):
 
 def sparse_attention(
     query: torch.Tensor,
-    local_kv: torch.Tensor,
+    uncompressed_kv: torch.Tensor,
     compressed_kv: torch.Tensor,
     sink: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -535,9 +535,9 @@ def sparse_attention(
     scale: Optional[float] = None,
     max_compressed_seqlen: Optional[int] = None,
 ) -> torch.Tensor:
-    """Run joint local and compressed KV attention with autograd.
+    """Run joint sliding-window and compressed KV attention with autograd.
 
-    This full-sequence interface requires one local KV token for each query token.
+    This full-sequence interface requires one uncompressed KV token for each query token.
     The caller prepares projected, normalized and rotated Q/KV. DSv4Attention
     converts batched inputs to packed token order before calling this function.
     See the sparse_attention README for supported dtypes and devices.
@@ -546,15 +546,15 @@ def sparse_attention(
     ----------
     query : torch.Tensor
         Contiguous packed ``thd`` queries ``[T,64,D]``, with D=512 or 576.
-    local_kv : torch.Tensor
-        Contiguous local KV ``[T,D]``, in the same sequence/token order as query.
+    uncompressed_kv : torch.Tensor
+        Contiguous uncompressed KV ``[T,D]``, in the same sequence/token order as query.
     compressed_kv : torch.Tensor
         Contiguous packed compressed KV ``[Tc,D]``. Only indices below
         ``cu_seqlens_comp[-1]`` are valid; any remaining output is padding.
     sink : torch.Tensor
         FP32 sink logits ``[64]``, one per attention head.
     cu_seqlens, cu_seqlens_comp : torch.Tensor
-        Contiguous CUDA INT32 ``[B+1]`` cumulative query/local KV and compressed KV
+        Contiguous CUDA INT32 ``[B+1]`` cumulative query/uncompressed KV and compressed KV
         token counts. Start at zero; adjacent differences give sequence lengths.
     window_size : int
         Positive local window size including the current query token: local
@@ -565,7 +565,7 @@ def sparse_attention(
     indices : torch.Tensor, optional
         CSA: CUDA INT32 ``[T,K]`` global token indices into packed compressed_kv
         only, with -1 for invalid entries. The helper checks sequence bounds and
-        causality, then adds T for concatenated local + compressed KV. None selects
+        causality, then adds T for concatenated uncompressed + compressed KV. None selects
         HCA behavior: include all eligible compressed tokens. See the example in
         ``_prepare_sparse_kv_indices`` for the index spaces.
     scale : float, optional
@@ -587,13 +587,13 @@ def sparse_attention(
         raise ValueError("cuDNN sparse attention requires query [T,64,D].")
     if query.shape[-1] not in (512, 576):
         raise ValueError("attention head dimension must be 512 or 576.")
-    if local_kv.ndim != 2 or compressed_kv.ndim != 2:
-        raise ValueError("local_kv and compressed_kv must be 2D packed tensors.")
-    if local_kv.shape[-1] != query.shape[-1] or compressed_kv.shape[-1] != query.shape[-1]:
+    if uncompressed_kv.ndim != 2 or compressed_kv.ndim != 2:
+        raise ValueError("uncompressed_kv and compressed_kv must be 2D packed tensors.")
+    if uncompressed_kv.shape[-1] != query.shape[-1] or compressed_kv.shape[-1] != query.shape[-1]:
         raise ValueError("Q and both KV tensors must have the same QK dimension.")
-    if local_kv.shape[0] != query.shape[0]:
+    if uncompressed_kv.shape[0] != query.shape[0]:
         raise ValueError(
-            "Full-sequence DSv4 attention requires equal query and local KV token counts."
+            "Full-sequence DSv4 attention requires equal query and uncompressed KV token counts."
         )
     if sink.shape != (query.shape[1],):
         raise ValueError("sink must have shape [64].")
@@ -601,7 +601,7 @@ def sparse_attention(
         raise ValueError("window_size and ratio must be positive.")
     if indices is None and (max_compressed_seqlen is None or max_compressed_seqlen < 0):
         raise ValueError("HCA requires a nonnegative max_compressed_seqlen.")
-    _validate_tensors(query, (local_kv, compressed_kv), (sink,), cu_seqlens, cu_seqlens_comp)
+    _validate_tensors(query, (uncompressed_kv, compressed_kv), (sink,), cu_seqlens, cu_seqlens_comp)
     if indices is not None:
         if indices.dtype != torch.int32 or indices.device != query.device:
             raise ValueError("CSA indices must be CUDA INT32 on the query device.")
@@ -618,7 +618,7 @@ def sparse_attention(
     )
     return _SparseAttention.apply(
         query.contiguous(),
-        torch.cat((local_kv, compressed_kv), dim=0),
+        torch.cat((uncompressed_kv, compressed_kv), dim=0),
         selected,
         sink.contiguous(),
         scale,

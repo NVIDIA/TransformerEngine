@@ -16,7 +16,7 @@ discrete. The layer maps hidden states to hidden states with the same shape.
 
 ```text
 DSv4Attention
-├── TE query/local-KV projections + norms
+├── TE query/uncompressed-KV projections + norms
 ├── Compressor (HCA or CSA)
 │   ├── TE KV/gate projections + learned additive position embedding (APE)
 │   ├── dsa_cudnn.compress -> cuDNN compressor
@@ -34,7 +34,7 @@ DSv4Attention
 ## Inside DSv4Attention
 
 The following sketch expands the cuDNN calls underneath Compressor, Indexer, and attention.
-Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA, with FP32 APE/sink and CUDA INT32 sequence prefixes.
+Query and uncompressed KV are already projected, normalized, and rotated; tensors are contiguous CUDA, with FP32 APE/sink and CUDA INT32 sequence prefixes.
 
 ```python
 import transformer_engine.pytorch.attention.sparse_attention.dsa_cudnn as dsa_cudnn
@@ -60,7 +60,7 @@ if is_csa:
     )
 
 output = dsa_cudnn.sparse_attention(
-    query, local_kv, compressed_kv, sink.float(), cu, cu_comp,
+    query, uncompressed_kv, compressed_kv, sink.float(), cu, cu_comp,
     window_size=window_size, ratio=ratio, indices=indices,
     max_compressed_seqlen=max_compressed_seqlen if indices is None else None,
 )
@@ -74,16 +74,16 @@ concatenate sequences, with cumulative token counts identifying their boundaries
 Standalone `Compressor` and `Indexer` accept only batched `[B,S,D]` or packed
 `thd` `[T,D]` input; callers must transpose sequence-major inputs first. Hidden
 states have no explicit head axis; prepared queries have shape `[T,H,D]`.
-Attention uses the original query `[T,64,D]` and concatenated local/compressed
-KV `[T+Tc,D]`; there is no compressed query. `T` is the total query/local KV
+Attention uses the original query `[T,64,D]` and concatenated uncompressed/compressed
+KV `[T+Tc,D]`; there is no compressed query. `T` is the total query/uncompressed KV
 token count.
 `_prepare_sparse_kv_indices` creates a list of KV token indices for each query token,
-combining causal local KV token indices with compressed KV token indices offset
+combining causal sliding-window KV token indices with compressed KV token indices offset
 by `T`; invalid entries are `-1`. CSA supplies global compressed KV token indices
 from `select_indices`; HCA passes `indices=None` and includes all eligible
 compressed tokens. `_prepare_sparse_kv_indices` documents a small example of these
 index spaces. Selection indices address only packed compressed KV before the
-local KV offset is applied.
+uncompressed KV offset is applied.
 
 `transformer_engine.pytorch.attention.rope` provides the rotary utilities.
 `rope.DSv4RotaryEmbedding` caches token/compressed-position embeddings.
@@ -196,7 +196,7 @@ projections or detached attention teacher. The dense-reference example in
 
 `DSv4Attention` fuses projections that share an input. Each weight tensor stores output channels in the following order.
 
-- `q_a_kv_proj.weight` stores query-down channels followed by local KV channels.
+- `q_a_kv_proj.weight` stores query-down channels followed by uncompressed KV channels.
 - `compressor.fused_proj.weight` stores KV channels followed by gate channels.
 - `indexer.compressor.fused_proj.weight` (CSA) stores KV, gate, then head-weight channels.
 

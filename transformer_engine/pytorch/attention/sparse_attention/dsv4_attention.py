@@ -166,7 +166,7 @@ class DSv4Attention(torch.nn.Module):
             )
 
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
-        # Query-down and local-KV projections read the same hidden states.
+        # Query-down and uncompressed-KV projections read the same hidden states.
         # Keep slices explicit below while one contiguous weight feeds the GEMM.
         self.q_a_kv_proj = Linear(
             hidden_size,
@@ -256,8 +256,8 @@ class DSv4Attention(torch.nn.Module):
             Output with the input shape, or ``(output, context)``. Context contains
             live ``index_q[T,H,128]``, ``index_k[Tc,128]``, ``index_w[T,H]`` and
             discrete compressed KV token indices ``indices[T,K]``, before adding
-            the local KV offset; H is ``index_n_heads``.
-            Teacher ``attn_q[T,64,512]``, ``local_kv[T,512]``,
+            the uncompressed KV offset; H is ``index_n_heads``.
+            Teacher ``attn_q[T,64,512]``, ``uncompressed_kv[T,512]``,
             ``compressed_kv[Tc,512]`` and ``sink[64]`` are detached. Indexer inputs
             are detached from the shared hidden/query projections, so auxiliary
             gradients train only the indexer tower. See the README loss example.
@@ -304,7 +304,7 @@ class DSv4Attention(torch.nn.Module):
 
         token_rope, compressed_rope = self.rope(seq, hidden_states.device)
 
-        q_a, local_kv_projected = self.q_a_kv_proj(hidden_states).split(
+        q_a, uncompressed_kv_projected = self.q_a_kv_proj(hidden_states).split(
             (self.q_lora_rank, self.head_dim), dim=-1
         )
         q_residual = self.q_a_norm(q_a)
@@ -316,8 +316,10 @@ class DSv4Attention(torch.nn.Module):
             .reshape(-1, self.num_heads, self.head_dim)
             .contiguous()
         )
-        local_kv = apply_dsa_rope(self.kv_norm(local_kv_projected).unsqueeze(-2), *token_rope, cu)
-        local_kv = local_kv.reshape(-1, self.head_dim).contiguous()
+        uncompressed_kv = apply_dsa_rope(
+            self.kv_norm(uncompressed_kv_projected).unsqueeze(-2), *token_rope, cu
+        )
+        uncompressed_kv = uncompressed_kv.reshape(-1, self.head_dim).contiguous()
         compressed_kv = apply_dsa_rope(
             self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp).reshape(
                 *comp_shape, 1, self.head_dim
@@ -350,7 +352,7 @@ class DSv4Attention(torch.nn.Module):
 
         output = _sparse_attention(
             q,
-            local_kv,
+            uncompressed_kv,
             compressed_kv,
             self.sinks.float(),
             cu,
@@ -374,7 +376,7 @@ class DSv4Attention(torch.nn.Module):
                 "index_w": index_w,
                 "indices": indices,
                 "attn_q": q.detach(),
-                "local_kv": local_kv.detach(),
+                "uncompressed_kv": uncompressed_kv.detach(),
                 "compressed_kv": compressed_kv.detach(),
                 "sink": self.sinks.float().detach(),
             }
