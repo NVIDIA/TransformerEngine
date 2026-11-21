@@ -1191,6 +1191,14 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                "First logical dimension of a grouped tensor must be divisible by ", tile_dim_y,
                ".");
   }
+  // SAME_BOTH_DIMS tiles each tensor and reduces its dbias in whole chunks, so a chunk must not
+  // span two tensors. The per-tensor rows are known on the host only for this representation.
+  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+    NVTE_CHECK(
+        first_logical_dim % num_tensors == 0 && (first_logical_dim / num_tensors) % tile_dim_y == 0,
+        "First dimension of each tensor in a group must be divisible by ", tile_dim_y, ", got ",
+        first_logical_dim, " rows split across ", num_tensors, " tensors.");
+  }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
