@@ -1217,7 +1217,12 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
 
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
+    if (block_scaling_dim == 1 &&
+        rowwise_scale_option == transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
+      rowwise_scale_inv = at::empty({logical_first_dim, blocks_X}, float_opts);
+    } else {
+      rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
+    }
   }
 
   if (columnwise_usage) {

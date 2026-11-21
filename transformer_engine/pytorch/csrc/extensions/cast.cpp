@@ -525,6 +525,8 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       QuantizationConfigWrapper quant_config_cpp;
       quant_config_cpp.set_force_pow_2_scales(fp8_block_quantizer_cpp->force_pow_2_scales);
       quant_config_cpp.set_amax_epsilon(fp8_block_quantizer_cpp->amax_epsilon);
+      quant_config_cpp.set_block_scaling_1d_rowwise_option(
+          static_cast<uint8_t>(fp8_block_quantizer_cpp->rowwise_scale_option));
       if (noop_flag_cpp.has_value()) {
         quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
       }

@@ -477,7 +477,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                     const int64_t* __restrict__ tensor_offsets_ptr,
                                     const size_t num_tensors, const size_t common_first_dim_blocks,
                                     const size_t K, const size_t total_row_blocks,
-                                    const size_t R_total, const float epsilon,
+                                    const size_t R_total, const bool compact_scales,
+                                    const float epsilon,
                                     const bool pow_2_scales, const float* __restrict__ noop_ptr) {
 #if __CUDA_ARCH__ >= 900
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
@@ -545,7 +546,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       const size_t per_expert_stride = DIVUP_TO_MULTIPLE(tensor_M, kScaleColAlign);
       const size_t tensor_row_base = tensor_block_y_base * kTileDim;
       const size_t r_local = r_global - tensor_row_base;
-      scale_inv_base[expert_offset + tile_x * per_expert_stride + r_local] = scale_inv;
+      if (compact_scales) {
+        scale_inv_base[r_global * blocks_X + tile_x] = scale_inv;
+      } else {
+        scale_inv_base[expert_offset + tile_x * per_expert_stride + r_local] = scale_inv;
+      }
     }
 
     if (r_global < R_total) {
@@ -574,7 +579,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     CType* __restrict__ scale_inv_t_base, const int64_t* __restrict__ tensor_offsets_ptr,
     const size_t num_tensors, const size_t common_first_dim_blocks, const size_t K,
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_t_stride_aligned_K,
-    const size_t R_total, const float epsilon, const bool pow_2_scales,
+    const size_t R_total, const bool compact_scales, const float epsilon,
+    const bool pow_2_scales,
     const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900
   // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
@@ -676,7 +682,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
         const size_t per_expert_stride = DIVUP_TO_MULTIPLE(tensor_M, kScaleColAlign);
         const size_t tensor_row_base = tensor_block_y_base * kTileDim;
         const size_t r_local = r_global - tensor_row_base;
-        scale_inv_base[expert_offset + tile_x * per_expert_stride + r_local] = scale_inv;
+        if (compact_scales) {
+          scale_inv_base[r_global * blocks_X_eff + tile_x] = scale_inv;
+        } else {
+          scale_inv_base[expert_offset + tile_x * per_expert_stride + r_local] = scale_inv;
+        }
       }
 
       if (row_in_bounds) {
@@ -913,7 +923,8 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
 // per-tile column partial can be computed.
 inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
-                                        const bool pow_2_scales, cudaStream_t stream,
+                                        const bool pow_2_scales, const bool compact_scales,
+                                        cudaStream_t stream,
                                         GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
@@ -976,7 +987,7 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                   reinterpret_cast<CType*>(output->scale_inv.dptr),
                                   info.tensor_offsets_d, info.num_tensors,
                                   info.common_first_dim_blocks, info.K, info.total_row_blocks,
-                                  info.R_total, epsilon, pow_2_scales, noop_ptr);
+                                  info.R_total, compact_scales, epsilon, pow_2_scales, noop_ptr);
                         }
                       } else if constexpr (kRowwise || kColwise) {
                         // CW-only, BOTH, or RW-only WITH dbias: smem-cached TMA kernel.
@@ -1007,7 +1018,8 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                      : nullptr,
                             info.tensor_offsets_d, info.num_tensors, info.common_first_dim_blocks,
                             info.K, info.total_row_blocks, info.blocks_X, scale_t_stride_aligned_K,
-                            info.R_total, epsilon, pow_2_scales, noop_ptr, dbias_workspace);
+                            info.R_total, compact_scales, epsilon, pow_2_scales, noop_ptr,
+                            dbias_workspace);
                         if (dbias_workspace != nullptr) {
                           const ShapeRepresentation shape_rep =
                               info.same_both_dims ? ShapeRepresentation::SAME_BOTH_DIMS

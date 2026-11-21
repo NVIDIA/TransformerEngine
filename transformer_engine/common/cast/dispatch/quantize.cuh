@@ -550,7 +550,10 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
       fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
                                                  quant_config_cpp.amax_epsilon,
-                                                 quant_config_cpp.force_pow_2_scales, stream);
+                                                 quant_config_cpp.force_pow_2_scales,
+                                                 quant_config_cpp.block_scaling_1d_rowwise_option ==
+                                                     FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
+                                                 stream);
       break;
     }
     case NVTE_BLOCK_SCALING_2D: {
@@ -674,7 +677,10 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
         fp8_blockwise::group_quantize_blockwise_1d(
             grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
-            quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
+            quant_config_cpp.force_pow_2_scales,
+            quant_config_cpp.block_scaling_1d_rowwise_option ==
+                FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
+            stream, dbias_arg, workspace_arg);
       } else {
         fp8_blockwise::group_quantize_blockwise_2d(
             grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
