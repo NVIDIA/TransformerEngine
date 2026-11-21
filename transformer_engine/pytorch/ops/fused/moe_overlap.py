@@ -186,7 +186,7 @@ class FusedMoE(FusedOperation):
         topk_idx = _require_contiguous(topk_idx, "topk_idx")
         topk_weights = _require_contiguous(topk_weights, "topk_weights")
 
-        tokens_per_expert = buffer.overlap_tokens_per_expert
+        tokens_per_expert = buffer.tokens_per_expert_i32
         if buffer.eager:
             # The binding runs the prepare, reads the recv total on the host and allocates the
             # recv rows in whole buckets, so the number of compiled GEMMs stays bounded.
@@ -194,7 +194,7 @@ class FusedMoE(FusedOperation):
                 tex.ep_dispatch_gemm_fwd(
                     buffer.handle_mem, topk_idx, tokens, topk_weights, w1, None, None,
                     tokens_per_expert, None, None, buffer.top_k, buffer.alignment,
-                    buffer.overlap_total_recv_tokens, _EAGER_ROW_BUCKET,
+                    buffer.total_recv_tokens_i32, _EAGER_ROW_BUCKET,
                 )
             )  # fmt: skip
             rows = recv_tokens.shape[0]
@@ -208,7 +208,7 @@ class FusedMoE(FusedOperation):
             expert_token_offsets = tex.ep_dispatch_gemm_fwd(
                 buffer.handle_mem, topk_idx, tokens, topk_weights, w1, recv_tokens, recv_weights,
                 tokens_per_expert, gemm_out, act_out, buffer.top_k, buffer.alignment,
-                buffer.overlap_total_recv_tokens,
+                buffer.total_recv_tokens_i32,
             )[4]  # fmt: skip
         expert_out = torch.empty(rows, hidden, dtype=torch.bfloat16, device=device)
         result = torch.empty(buffer.num_local_tokens, hidden, dtype=torch.bfloat16, device=device)
@@ -240,13 +240,14 @@ class FusedMoE(FusedOperation):
             # counts them, except in eager mode (a host total) and when rows past the capacity drop.
             mark_grouped_tensor(*row_tensors)
             if buffer.eager or get_ep_drop_on_overflow():
-                num_tokens = buffer.overlap_tokens_per_expert.sum(
-                    0, keepdim=True, dtype=torch.int32
-                )
+                num_tokens = buffer.tokens_per_expert_i32.sum(0, keepdim=True, dtype=torch.int32)
             else:
                 num_tokens = recv_total
             for tensor in row_tensors:
                 tensor.grouped_tensor_num_tokens = num_tokens
+            # Publish the kept recv total to the buffer's shared counter, as the unfused dispatch
+            # does, so paged stashing reads the right row count under FusedMoE.
+            buffer.total_recv_tokens.copy_(num_tokens.reshape(1))
             # CPU offload takes the activations, as the unfused ops do, not the routing weights.
             # The weight copies saved for backward stay on the GPU, as in TE modules.
             if is_cpu_offload_enabled():
@@ -270,7 +271,7 @@ class FusedMoE(FusedOperation):
         )
         topk_idx = _require_contiguous(topk_idx, "topk_idx")
         topk_weights = _require_contiguous(topk_weights, "topk_weights")
-        tokens_per_expert = buffer.overlap_tokens_per_expert
+        tokens_per_expert = buffer.tokens_per_expert_i32
         if buffer.eager:
             (
                 recv_tokens, recv_weights, gemm_out, act_out, expert_token_offsets, recv_scale,
@@ -279,7 +280,7 @@ class FusedMoE(FusedOperation):
                 tex.ep_dispatch_gemm_fwd(
                     buffer.handle_mem, topk_idx, tokens, topk_weights, w1.data, None, None,
                     tokens_per_expert, None, None, buffer.top_k, buffer.alignment,
-                    buffer.overlap_total_recv_tokens, _EAGER_ROW_BUCKET,
+                    buffer.total_recv_tokens_i32, _EAGER_ROW_BUCKET,
                     tokens_scale_inv=tokens_scale, weight_scale_inv=w1.scale_inv, symm_input=symm_input,
                 )
             )  # fmt: skip
@@ -296,7 +297,7 @@ class FusedMoE(FusedOperation):
             expert_token_offsets = tex.ep_dispatch_gemm_fwd(
                 buffer.handle_mem, topk_idx, tokens, topk_weights, w1.data, recv_tokens,
                 recv_weights, tokens_per_expert, gemm_out, act_out, buffer.top_k,
-                buffer.alignment, buffer.overlap_total_recv_tokens, tokens_scale_inv=tokens_scale,
+                buffer.alignment, buffer.total_recv_tokens_i32, tokens_scale_inv=tokens_scale,
                 recv_scale_inv=recv_scale, weight_scale_inv=w1.scale_inv, act_out_scale_inv=act_scale,
                 symm_input=symm_input,
             )[4]  # fmt: skip
@@ -351,7 +352,7 @@ class FusedMoE(FusedOperation):
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         rows = gemm_out.shape[0]
-        tokens_per_expert = buffer.overlap_tokens_per_expert
+        tokens_per_expert = buffer.tokens_per_expert_i32
         w1 = w1[0] if w1 else _bf16_weight(fc1_op, num_groups)
         w2 = _bf16_weight(fc2_op, num_groups)
         grad_result = _bf16_grad_output(grad_output)
@@ -458,7 +459,7 @@ class FusedMoE(FusedOperation):
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         rows = gemm_out.shape[0]
-        tokens_per_expert = buffer.overlap_tokens_per_expert
+        tokens_per_expert = buffer.tokens_per_expert_i32
         # GroupedTensor group sizes are int64.
         first_dims = tokens_per_expert.long()
         grad_result = _bf16_grad_output(grad_output)
@@ -590,7 +591,7 @@ def _recv_total_from_offsets(buffer, expert_token_offsets) -> torch.Tensor:
     """The int32 [1] recv total: in capacity mode the last element of the expert token offsets.
     Eager and overflow-drop modes get it from the routing prepare instead."""
     if buffer.eager or get_ep_drop_on_overflow():
-        return buffer.overlap_total_recv_tokens
+        return buffer.total_recv_tokens_i32
     return expert_token_offsets[-1:]
 
 

@@ -386,8 +386,8 @@ class EpBuffer:
         "zero_copy",
         "eager",
         "total_recv_tokens",
-        "overlap_tokens_per_expert",
-        "overlap_total_recv_tokens",
+        "tokens_per_expert_i32",
+        "total_recv_tokens_i32",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
     )
@@ -452,15 +452,17 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
-        # The int32 counts and recv total of the fused MoE overlap, placed as above.
-        self.overlap_tokens_per_expert = torch.empty(
+        # Int32 per-expert counts and recv total for the fused MoE overlap, placed as above.
+        # TODO(phuonguyen): drop these int32 mirrors of tokens_per_expert and total_recv_tokens,
+        # and write those directly, once the CuTeDSL signal GEMMs accept int64 counts/offsets.
+        self.tokens_per_expert_i32 = torch.empty(
             self.num_local_experts, dtype=torch.int32, device=device
         )
         if self.eager:
-            self.overlap_total_recv_tokens = torch.empty(1, dtype=torch.int32, pin_memory=True)
+            self.total_recv_tokens_i32 = torch.empty(1, dtype=torch.int32, pin_memory=True)
         else:
-            self.overlap_total_recv_tokens = torch.empty(1, dtype=torch.int32, device=device)
-            mark_not_offload(self.overlap_total_recv_tokens)
+            self.total_recv_tokens_i32 = torch.empty(1, dtype=torch.int32, device=device)
+            mark_not_offload(self.total_recv_tokens_i32)
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)

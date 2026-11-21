@@ -854,8 +854,9 @@ class TestEP(_EpTestCase):
             dispatch.recv_tokens_peak = torch.zeros(1, dtype=torch.int64, device=device)
             if fused:
                 # The fused op uses its own counts and recv total, not the reference's.
-                buffer.overlap_tokens_per_expert.fill_(-1)
-                buffer.overlap_total_recv_tokens.fill_(-1)
+                buffer.tokens_per_expert_i32.fill_(-1)
+                buffer.total_recv_tokens_i32.fill_(-1)
+                buffer.total_recv_tokens.fill_(-1)
             # Paged stashing pages the tensors that carry a token count.
             stashable = []
             num_tokens = []
@@ -919,8 +920,10 @@ class TestEP(_EpTestCase):
         if out[4]:
             self.assertEqual(len(out[6]), 4, "the fused op saves four stashable tensors")
             # Their token count is the number of received rows kept.
-            kept = int(buffer.overlap_tokens_per_expert.sum())
+            kept = int(buffer.tokens_per_expert_i32.sum())
             self.assertEqual(out[7], [kept] * 4, "stashed token counts")
+            # The fused op publishes that kept total to the buffer counter paged stashing reads.
+            self.assertEqual(int(buffer.total_recv_tokens.item()), kept, "published recv total")
             if recipe is not None:
                 # The FC2 dgrad recomputes the SwiGLU output, so no [rows, ffn] tensor is saved:
                 # the recv tokens and scales, the FC1 output and the recv routing weights.
