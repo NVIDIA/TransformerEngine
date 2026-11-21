@@ -1943,6 +1943,53 @@ def test_permutation_mask_map_alongside_probs_empty_input(te_dtype, use_torch_co
     )
 
 
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float32, torch.float16] + ([torch.bfloat16] if te.is_bf16_available() else []),
+)
+@pytest.mark.parametrize("padded_row_grad", ["finite", "inf", "nan"])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_permutation_mask_map_with_zero_probs_backward(dtype, padded_row_grad, use_torch_compile):
+    """Routed entries with zero prob are written as zero rows, so they get no input gradient."""
+    num_tokens, num_expert, hidden_size, topK = 64, 8, 128, 3
+    routing_map = torch.zeros(num_tokens, num_expert, dtype=torch.int32, device="cuda")
+    topk_idx = torch.rand(num_tokens, num_expert, device="cuda").topk(topK, dim=-1).indices
+    routing_map.scatter_(1, topk_idx, 1)
+    probs = torch.rand(num_tokens, num_expert, device="cuda") * routing_map
+    # Zero the prob of a third of the routed entries (used for routing-map padding).
+    probs[(torch.rand_like(probs) < 1 / 3) & routing_map.bool()] = 0
+    num_out_tokens = int(routing_map.sum())
+
+    # Small integers keep every value and gradient sum exact in all tested dtypes.
+    inp = torch.randint(-8, 8, (num_tokens, hidden_size), device="cuda").to(dtype)
+    grad = torch.randint(-8, 8, (num_out_tokens, hidden_size), device="cuda").to(dtype)
+    # Zero-prob entries are copied to the permuted probs, so they still receive a prob gradient.
+    probs_grad = torch.randint(-8, 8, (num_out_tokens,), device="cuda").to(probs.dtype)
+    padded_rows = probs.T.contiguous().masked_select(routing_map.T.bool()) == 0
+    # A non-finite gradient on a padded row must not leak into any input gradient.
+    if padded_row_grad != "finite":
+        grad[padded_rows] = float(padded_row_grad)
+
+    ref_inp = inp.detach().clone().requires_grad_(True)
+    ref_probs_in = probs.detach().clone().requires_grad_(True)
+    ref_output, _ = pytorch_permute_mask_map(ref_inp, routing_map)
+    ref_probs = ref_probs_in.T.contiguous().masked_select(routing_map.T.bool())
+    ref_output = torch.where(padded_rows.unsqueeze(-1), 0, ref_output)
+    torch.autograd.backward([ref_output, ref_probs], [grad, probs_grad])
+    assert ref_inp.grad.isfinite().all()
+
+    te_inp = inp.detach().clone().requires_grad_(True)
+    te_probs_in = probs.detach().clone().requires_grad_(True)
+    permute_fn = _maybe_compile(te_permute_with_probs, use_torch_compile)
+    te_output, te_probs, _ = permute_fn(te_inp, te_probs_in, routing_map, num_out_tokens)
+    torch.autograd.backward([te_output, te_probs], [grad, probs_grad])
+
+    torch.testing.assert_close(te_probs, ref_probs, rtol=0, atol=0)
+    torch.testing.assert_close(te_output, ref_output, rtol=0, atol=0)
+    torch.testing.assert_close(te_inp.grad, ref_inp.grad, rtol=0, atol=0)
+    torch.testing.assert_close(te_probs_in.grad, ref_probs_in.grad, rtol=0, atol=0)
+
+
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
