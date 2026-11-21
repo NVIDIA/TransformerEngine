@@ -12,6 +12,7 @@ import torch
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer
+from ...distributed import allreduce, _validate_reduction_dtype
 
 
 class AllReduce(BasicOperation):
@@ -26,6 +27,9 @@ class AllReduce(BasicOperation):
     ----------
     process_group : torch.distributed.ProcessGroup, default = world group
         Process group for communication
+    reduction_dtype : torch.dtype, default = None
+        Forward communication dtype: float16, bfloat16, float32 or float64.
+        Output dtype and backward behavior are unchanged.
 
     """
 
@@ -33,10 +37,13 @@ class AllReduce(BasicOperation):
         self,
         process_group: Optional[torch.distributed.ProcessGroup] = None,
         reduce_in_backward: bool = True,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self._reduce_in_backward: bool = reduce_in_backward
+        _validate_reduction_dtype(reduction_dtype)
+        self.reduction_dtype = reduction_dtype
 
     def op_forward(
         self,
@@ -52,7 +59,7 @@ class AllReduce(BasicOperation):
 
         # Perform all-reduce
         x = maybe_dequantize(input_.contiguous())
-        torch.distributed.all_reduce(x, group=self.process_group)
+        allreduce(x, self.process_group, reduction_dtype=self.reduction_dtype)
         return x
 
     def op_backward(
