@@ -128,6 +128,7 @@ def main(argv=None, namespace=None):
         test_quantizer,
         test_quantized_all_gather,
         test_linear,
+        test_linear_3d_input,
         test_layernorm,
         test_layernorm_linear,
         test_layernorm_mlp,
@@ -795,6 +796,69 @@ def test_linear():
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
+
+
+@run_distributed_test()
+def _test_linear_3d_input(parallel_mode, micro_batch):
+    """Sequence-parallel Linear with a 3D [seq, micro-batch, hidden] input.
+
+    The quantized all-gathers along the sequence dimension see the 3D tensor, so a
+    micro-batch of 1 or an odd micro-batch checks their shape bookkeeping (#3720).
+
+    Args:
+        parallel_mode (str): 'row' or 'column' parallelism.
+        micro_batch (int): Size of the micro-batch dimension.
+    """
+    params_dtype = torch.bfloat16
+
+    # Create models
+    model_single_node = te.Linear(HIDDEN_SIZE, HIDDEN_SIZE, params_dtype=params_dtype)
+    model_distributed = te.Linear(
+        HIDDEN_SIZE,
+        HIDDEN_SIZE,
+        tp_size=WORLD_SIZE,
+        tp_group=NCCL_WORLD,
+        parallel_mode=parallel_mode,
+        sequence_parallel=True,
+        params_dtype=params_dtype,
+    )
+    _copy_params(model_distributed, model_single_node)
+
+    # Prepare input tensors; each rank holds SEQ_LEN tokens of the sequence
+    if parallel_mode == "row":
+        input_single_node = torch.randn(
+            (WORLD_SIZE * SEQ_LEN, micro_batch, HIDDEN_SIZE), dtype=params_dtype, device="cuda"
+        )
+        split_size = HIDDEN_SIZE // WORLD_SIZE
+        input_distributed = input_single_node[
+            ..., WORLD_RANK * split_size : (WORLD_RANK + 1) * split_size
+        ].clone()
+    else:
+        input_distributed = torch.randn(
+            (SEQ_LEN, micro_batch, HIDDEN_SIZE), dtype=params_dtype, device="cuda"
+        )
+        input_single_node = _gather(input_distributed, dim=0).detach()
+
+    # Apply models
+    output_single_node, output_distributed = _apply_models(
+        model_single_node, model_distributed, input_single_node, input_distributed
+    )
+    output_distributed = _gather(output_distributed, dim=0 if parallel_mode == "row" else -1)
+
+    # Compute loss and backpropagate
+    _loss_backward(output_single_node, output_distributed)
+
+    # Validate outputs and input gradients
+    _check_outputs(output_single_node, output_distributed)
+    grad_d = _gather(input_distributed.grad, dim=-1 if parallel_mode == "row" else 0)
+    _check_outputs(input_single_node.grad, grad_d)
+
+
+def test_linear_3d_input():
+    """Run sequence-parallel linear layer tests with 3D inputs."""
+    for parallel_mode in ["column", "row"]:
+        for micro_batch in [1, 3]:
+            _test_linear_3d_input(parallel_mode, micro_batch)
 
 
 ############################################
