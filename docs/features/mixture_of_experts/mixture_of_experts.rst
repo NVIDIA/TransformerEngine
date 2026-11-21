@@ -438,11 +438,95 @@ requirements, while the implementation contains the current checks. For example,
 see the `fusion eligibility checks in Transformer Engine v2.19
 <https://github.com/NVIDIA/TransformerEngine/blob/5e52befd5262c06289106338c308079d6adb391f/transformer_engine/pytorch/ops/fused/grouped_mlp.py#L789-L868>`_.
 
-For GLU fusion, use ``glu_interleave_size=32``: FC1 must produce alternating
+SwiGLU fusion supports two parameter layouts. With ``glu_interleave_size=32``, FC1 produces alternating
 blocks of 32 gate features and 32 value features. When loading a checkpoint
 whose FC1 outputs store all gate features before all value features, convert
 each expert's FC1 weight and bias with ``te.interleave_glu_tensor(tensor, 32)``.
-``ScaledClampedQGeGLU`` uses the same layout. For ``ScaledSReLU``, FC1 instead
+``ScaledClampedQGeGLU`` uses the same layout.
+
+For SwiGLU with ``glu_interleave_size=None``, FC1 weights, bias, saved activations and
+gradients retain the conventional ``[gate | up]`` channel order. This fused path
+supports BF16, MXFP8 (E4M3 with E8M0 scales), and NVFP4 (E2M1 with E4M3 scales).
+It requires SM100 or SM103, an FFN dimension divisible by 128, and cuDNN
+Frontend GLU and dGLU wrappers advertising ``gate_then_up`` in
+``supports_glu_layouts`` and the precision in ``supports_gate_then_up_precisions``.
+The new path also requires the natural tensor-rank API: A is two-dimensional,
+dense B has an expert dimension, probabilities are one-dimensional, and scales
+are flat views of the existing MMA-packed buffers. This is advertised by
+``supports_canonical_layouts`` (``supports_bf16_canonical_layouts`` for BF16).
+Tensor ranks and gate/up channel order are separate properties: the legacy
+``glu_interleave_size=32`` path continues to accept older tensor-rank APIs.
+Saved pre-activations use BF16. Regular canonical MXFP8/NVFP4 GLU uses the
+frontend's ``preferred_gate_then_up_mma_tiler`` when advertised; older canonical
+frontends retain the one-CTA ``(128, 256)`` fallback. Specialized RHT kernels
+keep their own tile selection. NVFP4 selects the RHT fusion from the quantization
+recipe for both GLU channel layouts.
+cuDNN pairs gate/up internally; when training starts with canonical storage,
+parameters and optimizer state need no GLU layout conversion. This option does
+not migrate an existing interleaved optimizer checkpoint; that conversion
+remains the training framework's responsibility. Frontends without the canonical
+GLU capabilities execute the unfused canonical path. Custom recipes retain their existing explicit fusion
+opt-in and must use compatible quantizers. The existing per-expert token
+alignment of 256 still applies.
+
+Fused NVFP4 GLU + RHT + quantization consumes the kernel's columnwise scales
+directly in standard GEMM-swizzled order for weight gradients. This output
+contract applies to both GLU channel layouts; it is independent of
+``glu_interleave_size`` and does not require a scale-layout option. This path
+requires the `cuDNN Frontend columnwise-scale correction
+<https://github.com/NVIDIA/cudnn-frontend/pull/2455>`_; support for older
+input-rank APIs does not imply compatibility with the old scale output order.
+
+BF16 and MXFP8 support discrete per-expert weights and a single grouped weight
+for ordinary parameters. NVFP4 uses discrete weights; packed NVFP4 grouped
+weights are not supported by this integration. ``DistributedWeight`` integrations use discrete parameters:
+the group leader materializes full weights for forward and backward, and finalizes
+full weight gradients into the sharded accumulation buffers. This also applies to
+singleton groups used for dense or shared-expert MLPs; routed-expert metadata is
+not required by the protocol. Packed distributed weights and delayed distributed
+weight-gradient computation remain unsupported. External ``main_grad`` buffers
+are refreshed through the parameter's FSDP accessor when available, and preserve
+the existing overwrite-versus-accumulate convention.
+
+GB200 measurements with the source frontend (2026-11-10 UTC) used balanced
+DeepSeek-V3 routing, EP8/TP1, and one 4096-token microbatch per EP rank:
+32 local experts, each with M=1024, H=7168 and F=2048. FC1 has
+``(M,N,K)=(1024,4096,7168)``; FC2 forward has ``(1024,7168,2048)``.
+The following CUDA Graph device times use the optimized two-CTA frontend
+preference for canonical quantized FC1. Each entry gives interleaved32 then
+canonical time, as the median of two round medians in milliseconds. Training here means forward and backward without an optimizer
+step; routing and distributed communication are excluded. Quantization,
+activation and gradient resets are included. Actual fused wrapper selection
+and numerical outputs/gradients were checked outside timing.
+
+.. list-table:: Grouped MLP: interleaved32 to canonical storage
+   :header-rows: 1
+
+   * - Precision
+     - Forward (ms)
+     - Forward + backward (ms)
+   * - BF16
+     - 2.091 to 2.103
+     - 7.403 to 7.448
+   * - NVFP4
+     - 0.984 to 1.010
+     - 4.709 to 4.739
+   * - MXFP8
+     - 1.314 to 1.321
+     - 5.379 to 5.376
+
+For these shapes, canonical NVFP4 forward is 2.6% slower than interleaved32;
+BF16 and MXFP8 forward are within 0.6%. Forward plus backward is within 0.7%
+for all three precisions. The benchmark preserves raw timing samples and
+alternates fused layout order;
+run ``benchmarks/linear/benchmark_graph_safe_grouped_mlp.py --preset deepseek-v3
+--expert-parallel-size 8 --tensor-parallel-size 1 --precision all --layout compare
+--mode both --timing both --comparison-rounds 2`` to reproduce the comparison.
+Add ``--canonical-fc1-tile-m 128`` to run the previous canonical quantized
+FC1 tile as a same-code control. The default follows the frontend preference;
+this benchmark option does not change BF16 or specialized RHT tile selection.
+
+For ``ScaledSReLU``, FC1 instead
 produces ``ffn_hidden_size`` features, without the GLU's doubled width.
 
 ``ScaledSwiGLU`` multiplies the activation output by the routing weights before
