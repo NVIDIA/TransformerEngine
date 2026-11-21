@@ -257,18 +257,34 @@ enum NVTEFusedAttnConfigAttribute {
   kNVTEFusedAttnConfigNumAttributes
 };
 
-/*! \brief Create a fused-attention configuration. */
+/*! \brief Create a fused-attention configuration.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 NVTEFusedAttnConfig nvte_create_fused_attn_config(void);
 
-/*! \brief Destroy a fused-attention configuration. */
+/*! \brief Destroy a fused-attention configuration.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_destroy_fused_attn_config(NVTEFusedAttnConfig config);
 
-/*! \brief Query an attribute in a fused-attention configuration. */
+/*! \brief Query an attribute in a fused-attention configuration.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           NVTEFusedAttnConfigAttribute attr, void *buf,
                                           size_t size_in_bytes, size_t *size_written);
 
-/*! \brief Set an attribute in a fused-attention configuration. */
+/*! \brief Set an attribute in a fused-attention configuration.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           NVTEFusedAttnConfigAttribute attr, const void *buf,
                                           size_t size_in_bytes);
@@ -324,18 +340,34 @@ enum NVTEFusedAttnFwdParamsAttribute {
   kNVTEFusedAttnFwdParamsNumAttributes
 };
 
-/*! \brief Create a fused-attention forward-parameter object. */
+/*! \brief Create a fused-attention forward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 NVTEFusedAttnFwdParams nvte_create_fused_attn_fwd_params(void);
 
-/*! \brief Destroy a fused-attention forward-parameter object. */
+/*! \brief Destroy a fused-attention forward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_destroy_fused_attn_fwd_params(NVTEFusedAttnFwdParams params);
 
-/*! \brief Query an attribute in a fused-attention forward-parameter object. */
+/*! \brief Query an attribute in a fused-attention forward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
                                               NVTEFusedAttnFwdParamsAttribute attr, void *buf,
                                               size_t size_in_bytes, size_t *size_written);
 
-/*! \brief Set an attribute in a fused-attention forward-parameter object. */
+/*! \brief Set an attribute in a fused-attention forward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
                                               NVTEFusedAttnFwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes);
@@ -395,18 +427,34 @@ enum NVTEFusedAttnBwdParamsAttribute {
   kNVTEFusedAttnBwdParamsNumAttributes
 };
 
-/*! \brief Create a fused-attention backward-parameter object. */
+/*! \brief Create a fused-attention backward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 NVTEFusedAttnBwdParams nvte_create_fused_attn_bwd_params(void);
 
-/*! \brief Destroy a fused-attention backward-parameter object. */
+/*! \brief Destroy a fused-attention backward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_destroy_fused_attn_bwd_params(NVTEFusedAttnBwdParams params);
 
-/*! \brief Query an attribute in a fused-attention backward-parameter object. */
+/*! \brief Query an attribute in a fused-attention backward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, void *buf,
                                               size_t size_in_bytes, size_t *size_written);
 
-/*! \brief Set an attribute in a fused-attention backward-parameter object. */
+/*! \brief Set an attribute in a fused-attention backward-parameter object.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
+ */
 void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes);
@@ -423,6 +471,9 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
  *
  *  \return Fused-attention backend, `NVTE_F16_arbitrary_seqlen` or `NVTE_FP8`,
  *          if the configuration is supported; otherwise, `NVTE_No_Backend`.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
                                                        const char **message);
@@ -449,7 +500,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic       Whether determinism is required or not.
  *
- *  \deprecated This function has been deprecated in favor of `nvte_get_fused_attn_backend_v2`.
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  *
  *  \note `nvte_get_fused_attn_backend` has a narrower input signature compared to
  *        `nvte_get_fused_attn_backend_v2`. For the fields it cannot express, it fills them with
@@ -474,6 +526,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  destroy it with `nvte_destroy_fused_attn_fwd_params()`.
  *
  *  \param[in,out] params                Fused-attention forward-parameter handle.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
 
@@ -537,7 +592,8 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  *
- *  \deprecated This function has been deprecated in favor of `nvte_fused_attn_fwd_v2`.
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
@@ -562,6 +618,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  destroy it with `nvte_destroy_fused_attn_bwd_params()`.
  *
  *  \param[in,out] params                Fused-attention backward-parameter handle.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params);
 
@@ -625,7 +684,8 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params);
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  *
- *  \deprecated This function has been deprecated in favor of `nvte_fused_attn_bwd_v2`.
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
@@ -997,6 +1057,9 @@ class AttentionShape {
  *  It owns an opaque `NVTEFusedAttnConfig` handle created by
  *  `nvte_create_fused_attn_config()`, and provides a convenient,
  *  chainable interface for setting every field in `FusedAttnConfig`.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 class FusedAttnConfigWrapper {
  public:
@@ -1172,6 +1235,9 @@ class FusedAttnConfigWrapper {
  *  It owns an opaque `NVTEFusedAttnFwdParams` handle created by
  *  `nvte_create_fused_attn_fwd_params()`, and provides a convenient,
  *  chainable interface for setting every field in `FusedAttnFwdParams`.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 class FusedAttnFwdParamsWrapper {
  public:
@@ -1320,6 +1386,9 @@ class FusedAttnFwdParamsWrapper {
  *  It owns an opaque `NVTEFusedAttnBwdParams` handle created by
  *  `nvte_create_fused_attn_bwd_params()`, and provides a convenient,
  *  chainable interface for setting every field in `FusedAttnBwdParams`.
+ *
+ *  \deprecated The C fused-attention API will be removed in the next major release.
+ *  Use Transformer Engine Python attention APIs instead.
  */
 class FusedAttnBwdParamsWrapper {
  public:
