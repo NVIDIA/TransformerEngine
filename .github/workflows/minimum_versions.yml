@@ -57,6 +57,9 @@ jobs:
         run: |
           ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so.1
           python3.10 tests/pytorch/test_sanity_import.py
+        env:
+          # Prefer apt cudnn9 runtime over the pip nvidia-cudnn-cu12 copy
+          CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
   min-jax:
     name: 'Minimum supported JAX'
     runs-on: ubuntu-latest
@@ -88,3 +91,5 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: python3.10 tests/jax/test_sanity_import.py
+        env:
+          CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
