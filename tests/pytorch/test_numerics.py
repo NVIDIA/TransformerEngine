@@ -10,7 +10,9 @@ import pytest
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import Parameter
+import transformer_engine.pytorch as te
 
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
@@ -45,6 +47,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
@@ -1130,6 +1133,184 @@ def test_ineligible_reentrant_checkpoint_preserves_outer_recompute_context():
     assert inner.weight.grad is None
     assert tail.weight.grad is not None and torch.isfinite(tail.weight.grad).all()
     _assert_fp8_recompute_state_drained(inner, tail)
+
+
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("rng_source", ("default", "tracker", "shared"))
+def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_source):
+    """Recompute must match forward and preserve the live RNG states."""
+
+    def run(checkpointed):
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        tracker = CudaRNGStatesTracker()
+        tracker.add("model-parallel-rng", 4321)
+        tracker_state = tracker.get_states()["model-parallel-rng"]
+        inp = torch.ones(4096, device="cuda", requires_grad=True)
+        draws = []
+
+        def get_tracked_rng_state():
+            state = tracker.get_states()["model-parallel-rng"]
+            return state.get_state() if isinstance(state, torch.Generator) else state.clone()
+
+        def body(value):
+            if rng_source == "tracker":
+                with tracker.fork():
+                    out = F.dropout(value, p=0.5, training=True)
+            else:
+                out = F.dropout(value, p=0.5, training=True)
+                if rng_source == "shared":
+                    with tracker.fork():
+                        out = out + 2 * F.dropout(value, p=0.5, training=True)
+            draws.append(out.detach().clone())
+            return out
+
+        # Leave the fork before backward so the checkpoint must restore the
+        # sharing between the default generator and the tracker for recompute.
+        with tracker.fork() if rng_source == "shared" else nullcontext():
+            if checkpointed:
+                out = te_checkpoint(
+                    body,
+                    inp,
+                    use_reentrant=use_reentrant,
+                    get_rng_state_tracker=lambda: tracker,
+                    distribute_saved_activations=False,
+                    tp_group=None,
+                )
+            else:
+                out = body(inp)
+
+        # Backward must preserve the RNG positions after unrelated draws.
+        torch.rand(8, device=inp.device)
+        with tracker.fork():
+            torch.rand(8, device=inp.device)
+        default_rng_before = torch.cuda.get_rng_state(inp.device)
+        tracked_rng_before = get_tracked_rng_state()
+        out.sum().backward()
+        assert torch.equal(
+            torch.cuda.get_rng_state(inp.device), default_rng_before
+        ), "Default RNG changed during backward"
+        assert torch.equal(
+            get_tracked_rng_state(), tracked_rng_before
+        ), "Tracked RNG changed during backward"
+        return out.detach(), inp.grad.detach(), draws, tracker, tracker_state
+
+    ref_out, ref_grad, _, _, _ = run(checkpointed=False)
+    out, grad, draws, tracker, tracker_state = run(checkpointed=True)
+    assert torch.equal(out, ref_out)
+    assert len(draws) == 2
+    assert torch.equal(draws[0], draws[1])
+    assert torch.equal(grad, ref_grad)
+    if isinstance(tracker_state, torch.Generator):
+        assert tracker.get_states()["model-parallel-rng"] is tracker_state
+
+
+@pytest.mark.parametrize("fork_tracker", all_boolean)
+def test_checkpoint_preserves_captured_rng_state(fork_tracker):
+    """Graph replay must still advance its registered RNG after eager recompute."""
+    tracker = CudaRNGStatesTracker()
+    tracker.add("model-parallel-rng", 4321)
+    rng_context = tracker.fork if fork_tracker else nullcontext
+    generator = (
+        tracker.get_states()["model-parallel-rng"]
+        if fork_tracker
+        else torch.cuda.default_generators[torch.cuda.current_device()]
+    )
+    sample = torch.empty(128, device="cuda")
+    with rng_context():
+        sample.uniform_()
+    graph = torch.cuda.CUDAGraph()
+    if fork_tracker:
+        graph.register_generator_state(generator)
+    with torch.cuda.graph(graph), rng_context():
+        sample.uniform_()
+
+    offset = generator.get_offset()
+    graph.replay()
+    increment = generator.get_offset() - offset
+    assert increment > 0
+
+    def body(value):
+        with rng_context():
+            return F.dropout(value, p=0.5, training=True)
+
+    inp = torch.ones(4096, device="cuda", requires_grad=True)
+    out = te_checkpoint(body, inp, use_reentrant=True, get_rng_state_tracker=lambda: tracker)
+    out.sum().backward()
+    assert torch.equal(inp.grad, out)
+
+    offset = generator.get_offset()
+    graph.replay()
+    assert generator.get_offset() - offset == increment
+
+
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("rng_source", ("default", "tracker", "mixed", "shared", "no_tracker"))
+@pytest.mark.parametrize("capture_mode", ("graphed", "manual"))
+@pytest.mark.skipif(
+    not hasattr(torch.Generator, "philox_state"), reason="Captured RNG requires PyTorch 2.14+"
+)
+def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_source, capture_mode):
+    """Each captured recompute must reproduce its corresponding forward masks."""
+    torch.manual_seed(seed)
+    tracker = CudaRNGStatesTracker()
+    tracker.add("model-parallel-rng", 4321)
+
+    def body(value):
+        if rng_source == "tracker":
+            with tracker.fork():
+                return F.dropout(value, p=0.5, training=True)
+        out = F.dropout(value, p=0.5, training=True)
+        if rng_source in ("mixed", "shared"):
+            with tracker.fork():
+                out = out + 2 * F.dropout(value, p=0.5, training=True)
+        return out
+
+    class Model(torch.nn.Module):
+        def forward(self, value):
+            with tracker.fork() if rng_source == "shared" else nullcontext():
+                torch.rand(8, device=value.device)
+                return te_checkpoint(
+                    body,
+                    value,
+                    use_reentrant=use_reentrant,
+                    get_rng_state_tracker=None if rng_source == "no_tracker" else lambda: tracker,
+                )
+
+    sample = torch.ones(4096, device="cuda", requires_grad=True)
+    if capture_mode == "manual":
+        model = Model()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                sample.grad = None
+                model(sample).sum().backward()
+        torch.cuda.current_stream().wait_stream(stream)
+        sample.grad = None
+        graph = torch.cuda.CUDAGraph()
+        graph.register_generator_state(tracker.get_states()["model-parallel-rng"])
+        with torch.cuda.graph(graph):
+            output = model(sample)
+            output.sum().backward()
+    else:
+        model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
+    previous = None
+    for _ in range(3):
+        if capture_mode == "manual":
+            sample.grad.zero_()
+            graph.replay()
+            grad = sample.grad
+        else:
+            value = torch.ones_like(sample, requires_grad=True)
+            output = model(value)
+            output.sum().backward()
+            grad = value.grad
+        forward_output = output.detach().clone()
+        assert torch.equal(grad, forward_output), "Recompute used a different dropout mask"
+        if previous is not None:
+            assert not torch.equal(forward_output, previous), "Graph replay did not advance RNG"
+        previous = forward_output
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
