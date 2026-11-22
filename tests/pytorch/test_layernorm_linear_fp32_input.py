@@ -446,3 +446,60 @@ def test_direct_rmsnorm_preserves_small_fp32_inputs(dtype):
     rounding_error = torch.linalg.vector_norm(x_rounded.grad - x_ref.grad)
     assert rounding_error > torch.linalg.vector_norm(x_ref.grad) * 1e-5
     assert actual_error < rounding_error * 0.01
+
+
+@pytest.mark.skipif(
+    any(
+        os.environ.get(name) != "1"
+        for name in (
+            "NVTE_NORM_FWD_USE_CUDNN",
+            "NVTE_NORM_BWD_USE_CUDNN",
+            "NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE",
+        )
+    ),
+    reason="Run separately with cuDNN normalization and weight-dtype gamma addition enabled",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rmsnorm_add_zero_centered_gamma_in_weight_dtype(dtype):
+    """Mixed backward-add must retain the requested rounding of gamma + 1."""
+    _check_dtype(dtype)
+    if get_cudnn_version() < (9, 21, 0):
+        pytest.skip("cuDNN RMSNorm backward-add requires cuDNN 9.21 or newer")
+    torch.manual_seed(1234)
+    x = torch.randn(17, 512, device="cuda", dtype=torch.float32)
+    gamma = torch.empty(512, device="cuda", dtype=dtype).uniform_(0.01, 0.5)
+    dy = torch.randn_like(x, dtype=dtype)
+    add = torch.randn_like(dy)
+    eps = 1e-5
+    out, _, rsigma = tex.rmsnorm_fwd(x, gamma, eps, None, None, TE_DType[dtype], 0, True)
+    dx, dgamma = tex.rmsnorm_bwd_add(dy, x, add, rsigma, gamma, 0, True)
+
+    x_ref = x.double().requires_grad_()
+    gamma_ref = gamma.double().requires_grad_()
+    rounded_gamma = (gamma_ref.to(dtype) + 1).double()
+    norm_ref = x_ref * torch.rsqrt(x_ref.square().mean(dim=-1, keepdim=True) + eps)
+    norm_ref = norm_ref * rounded_gamma
+    norm_ref.backward(dy.double())
+    expected_dx = x_ref.grad + add.double()
+
+    x_unrounded = x.double().requires_grad_()
+    norm_unrounded = x_unrounded * torch.rsqrt(
+        x_unrounded.square().mean(dim=-1, keepdim=True) + eps
+    )
+    norm_unrounded = norm_unrounded * (gamma.double() + 1)
+    norm_unrounded.backward(dy.double())
+    alternative_dx = x_unrounded.grad + add.double()
+
+    assert out.dtype == dgamma.dtype == dtype
+    assert dx.dtype == torch.float32
+    torch.testing.assert_close(
+        out, norm_ref.detach().to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-6
+    )
+    torch.testing.assert_close(dx, expected_dx.float(), rtol=3e-5, atol=3e-6)
+    torch.testing.assert_close(
+        dgamma, gamma_ref.grad.to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-5
+    )
+    actual_error = torch.linalg.vector_norm(dx.double() - expected_dx)
+    alternative_error = torch.linalg.vector_norm(dx.double() - alternative_dx)
+    assert alternative_error > 0
+    assert actual_error < alternative_error * 0.1

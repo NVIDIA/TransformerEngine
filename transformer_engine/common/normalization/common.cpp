@@ -14,6 +14,7 @@
 #include <iostream>
 #include <numeric>
 
+#include "transformer_engine/cast.h"
 #include "transformer_engine/normalization.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -38,6 +39,16 @@ Compute always in FP32
 
 namespace transformer_engine {
 namespace normalization {
+
+namespace {
+
+bool requires_fp32_add_cast(NVTE_Norm_Stage stage, fe::DataType_t input_dtype,
+                            fe::DataType_t weight_dtype) {
+  return stage == NVTE_Norm_Stage::BackwardAdd && input_dtype == fe::DataType_t::FLOAT &&
+         (weight_dtype == fe::DataType_t::HALF || weight_dtype == fe::DataType_t::BFLOAT16);
+}
+
+}  // namespace
 
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
@@ -411,11 +422,13 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       NVTE_CHECK(cudnnGetVersion() >= 92100,
                  "Fused BackwardAdd requires cuDNN >= 9.21.0, but found ", cudnnGetVersion());
 
+      const bool cast_add =
+          requires_fp32_add_cast(_norm_stage, get_cudnn_fe_dtype(itype), get_cudnn_fe_dtype(wtype));
       _add = _graph.tensor(fe::graph::Tensor_attributes()
                                .set_name("add")
                                .set_dim({batch_dim, hidden_dim, 1, 1})
                                .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
-                               .set_data_type(get_cudnn_fe_dtype(wtype)));
+                               .set_data_type(get_cudnn_fe_dtype(cast_add ? itype : wtype)));
       auto add_options = fe::graph::Pointwise_attributes()
                              .set_mode(fe::PointwiseMode_t::ADD)
                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
@@ -446,6 +459,9 @@ void CudnnNormalizationPlan::_build() {
 
 Shape CudnnNormalizationPlan::getWorkspaceShape() const {
   size_t workspace_size = _graph.get_workspace_size();
+  if (requires_fp32_add_cast(_norm_stage, _x->get_data_type(), _gamma_zero->get_data_type())) {
+    workspace_size = alignTo<16>(workspace_size) + product(_add->get_dim()) * sizeof(float);
+  }
   if (workspace_size == 0) {
     // Workspace size must not be zero since that corresponds to a
     // workspace size query
@@ -504,6 +520,20 @@ void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_
   // Bind the add tensor for fused backward+add
   if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
     NVTE_CHECK(add_dptr != nullptr, "add_dptr must not be null for BackwardAdd");
+    if (requires_fp32_add_cast(_norm_stage, _x->get_data_type(), _gamma_zero->get_data_type())) {
+      // The fused cuDNN operation reads the addend in the input-gradient dtype.
+      // Promote its storage explicitly, without changing gamma arithmetic.
+      auto* promoted_add =
+          static_cast<char*>(workspace_dptr) + alignTo<16>(_graph.get_workspace_size());
+      const auto& dims = _add->get_dim();
+      const std::vector<size_t> shape(dims.begin(), dims.end());
+      const DType add_dtype =
+          _gamma_zero->get_data_type() == fe::DataType_t::HALF ? DType::kFloat16 : DType::kBFloat16;
+      TensorWrapper add_input(add_dptr, shape, add_dtype);
+      TensorWrapper add_output(promoted_add, shape, DType::kFloat32);
+      nvte_quantize(add_input.data(), add_output.data(), stream);
+      add_dptr = promoted_add;
+    }
     _variant_pack.insert({{_add, add_dptr}});
   }
 
