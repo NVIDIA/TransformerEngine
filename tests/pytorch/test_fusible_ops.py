@@ -4653,6 +4653,17 @@ class TestCheckpointing:
             os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = "1"
         try:
             model_load.load_state_dict(state_dict["model"])
+
+            # Strict load into an op without bias should reject the checkpoint's bias
+            if bias:
+                with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+                    model_no_bias = te_ops.Sequential(
+                        te_ops.Linear(
+                            in_features, out_features, bias=False, device=device, dtype=dtype
+                        )
+                    )
+                with pytest.raises(RuntimeError, match="Unexpected key"):
+                    model_no_bias.load_state_dict(state_dict["model"])
         finally:
             if old_unsafe_extra_state is None:
                 os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
