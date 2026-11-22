@@ -8,17 +8,20 @@ from __future__ import annotations
 import abc
 import math
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
 
 import transformer_engine_torch as tex
 from ...constants import DType
+from ...dynamo import TensorSpec, TensorOrQuantized
+from ...dynamo.fake import fake_activation, fake_activation_backward
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, maybe_dequantize
+from .._common import is_quantized_tensor, maybe_autocast_dtype, maybe_dequantize
 
 __all__ = [
     "GELU",
@@ -34,6 +37,28 @@ __all__ = [
     "SReGLU",
     "SiLU",
 ]
+
+
+@dataclass(slots=True)
+class ActivationFwdArgs:
+    """Activation inputs and quantization configuration."""
+
+    input_: TensorOrQuantized
+    dtype: torch.dtype
+    output_quantizer: Optional[Quantizer]
+    input_quantizer: Optional[Quantizer]
+    grad_input_quantizer: Optional[Quantizer]
+    requires_grad: bool
+
+
+@dataclass(slots=True)
+class ActivationBwdArgs:
+    """Activation gradient and saved input."""
+
+    grad_output: TensorOrQuantized
+    input_: TensorOrQuantized
+    dtype: torch.dtype
+    grad_input_quantizer: Optional[Quantizer]
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -69,79 +94,132 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
 
+    @staticmethod
     @abc.abstractmethod
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         """Forward implementation
 
         Implementation from transformer_engine.pytorch.cpp_extensions.
 
         """
 
+    @staticmethod
     @abc.abstractmethod
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         """Backward implementation
 
         Implementation from transformer_engine_torch.
 
         """
 
-    def op_forward(
-        self,
-        ctx: OperationContext,
-        input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+    fwd_args_type = ActivationFwdArgs
+    bwd_args_type = ActivationBwdArgs
+    _output_halves_last_dim: bool = False
 
-        # Compute dtype
-        dtype: torch.dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        if is_cpu_offload_enabled():
+            return "CPU offloading"
+        return super().compile_unsupported_reason(mode)
+
+    def pack_forward_args(
+        self,
+        basic_op_ctxs,
+        input_,
+        *,
+        prev_op_grad_output_quantizer,
+        next_op_input_quantizer,
+        basic_op_kwargs,
+        **unused,  # pylint: disable=unused-argument
+    ) -> ActivationFwdArgs:
+        if basic_op_kwargs[0]:
+            raise ValueError("Activation forward does not expect keyword arguments")
+        if (
+            torch.compiler.is_compiling()
+            and not is_quantized_tensor(input_)
+            and not input_.is_contiguous()
+        ):
+            raise RuntimeError("Activation forward requires contiguous inputs under torch.compile")
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
-
-        # Check input tensor
-        x = maybe_dequantize(input_.contiguous(), dtype)
-
-        # Launch kernel
-        y = self._activation_forward_impl(x, next_op_input_quantizer)
-
-        # Quantize input to FP8 before caching if needed
+        input_quantizer = None
         if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(DType.kFloat8E4M3, x.device)
+            input_quantizer = Float8CurrentScalingQuantizer(DType.kFloat8E4M3, input_.device)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
-            x = input_quantizer(x)
+            input_quantizer.internal = True
+        return self.fwd_args_type(
+            input_,
+            dtype,
+            next_op_input_quantizer,
+            input_quantizer,
+            prev_op_grad_output_quantizer,
+            basic_op_ctxs[0].requires_grad,
+        )
 
-        # Save state for backward pass
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x)
-            ctx.save_for_backward(x)
-            ctx.dtype = dtype
-            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+    @classmethod
+    def forward_compute(
+        cls, args: ActivationFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
+        x = maybe_dequantize(args.input_, args.dtype).contiguous()
+        y = cls._activation_forward_impl(x, args.output_quantizer)
+        if args.input_quantizer is not None:
+            x = args.input_quantizer(x)
+        return y, [()], (x,) if args.requires_grad and x is not args.input_ else ()
 
-        return y
+    @classmethod
+    def forward_compute_fake(cls, args: ActivationFwdArgs):
+        x = args.input_
+        y = fake_activation(
+            x,
+            args.output_quantizer,
+            dtype=args.dtype,
+            gated=cls._output_halves_last_dim,
+        )
+        saved = ()
+        if args.requires_grad and (
+            args.input_quantizer is not None or is_quantized_tensor(x) or x.dtype != args.dtype
+        ):
+            saved = (
+                TensorSpec(
+                    shape=x.shape, dtype=args.dtype, device=x.device, quantizer=args.input_quantizer
+                ),
+            )
+        return y, [()], saved
 
-    def op_backward(
-        self,
-        ctx: OperationContext,
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[()]]:
+    def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
+        ctx = basic_op_ctxs[0]
+        x = aux[0] if aux else args.input_
+        if is_cpu_offload_enabled():
+            mark_activation_offload(x)
+        ctx.save_for_backward(x)
+        ctx.dtype = args.dtype
+        ctx.prev_op_grad_output_quantizer = args.grad_input_quantizer
 
-        # Saved tensors from forward pass
-        (x,) = ctx.saved_tensors
+    def pack_backward_args(
+        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
+    ) -> ActivationBwdArgs:
+        ctx = basic_op_ctxs[0]
+        return self.bwd_args_type(
+            grad_output, ctx.saved_tensors[0], ctx.dtype, ctx.prev_op_grad_output_quantizer
+        )
 
-        # Check input tensor
-        x = maybe_dequantize(x.contiguous(), ctx.dtype)
+    @classmethod
+    def backward_compute(cls, args: ActivationBwdArgs, *, in_custom_op: bool = False):
+        x = maybe_dequantize(args.input_, args.dtype).contiguous()
+        dy = maybe_dequantize(args.grad_output, args.dtype).contiguous()
+        dx = cls._activation_backward_impl(dy, x, args.grad_input_quantizer)
+        if not in_custom_op:
+            clear_tensor_data(x)
+        return dx, [()], [()]
 
-        # Check grad output tensor
-        dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
-
-        # Launch kernel
-        dx = self._activation_backward_impl(dy, x, ctx.prev_op_grad_output_quantizer)
-
-        # Clear input tensor if possible
-        clear_tensor_data(x)
-
-        return dx, ()
+    @classmethod
+    def backward_compute_fake(cls, args: ActivationBwdArgs):
+        dx = fake_activation_backward(
+            args.input_,
+            args.grad_input_quantizer,
+            dtype=args.dtype,
+        )
+        return dx, [()], [()]
 
 
 class GELU(_ActivationOperation):
@@ -157,10 +235,12 @@ class GELU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.gelu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dgelu(*args, **kwargs)
 
 
@@ -189,10 +269,14 @@ class GLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    _output_halves_last_dim = True
+
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.glu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dglu(*args, **kwargs)
 
 
@@ -224,10 +308,14 @@ class GEGLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    _output_halves_last_dim = True
+
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.geglu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dgeglu(*args, **kwargs)
 
 
@@ -243,10 +331,12 @@ class QGELU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.qgelu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dqgelu(*args, **kwargs)
 
 
@@ -276,10 +366,14 @@ class QGEGLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    _output_halves_last_dim = True
+
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.qgeglu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dqgeglu(*args, **kwargs)
 
 
@@ -292,10 +386,12 @@ class ReLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.relu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.drelu(*args, **kwargs)
 
 
@@ -321,10 +417,14 @@ class ReGLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    _output_halves_last_dim = True
+
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.reglu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dreglu(*args, **kwargs)
 
 
@@ -339,10 +439,12 @@ class SReLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.srelu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dsrelu(*args, **kwargs)
 
 
@@ -592,10 +694,14 @@ class SReGLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    _output_halves_last_dim = True
+
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.sreglu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dsreglu(*args, **kwargs)
 
 
@@ -608,8 +714,10 @@ class SiLU(_ActivationOperation):
 
     """
 
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_forward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.silu(*args, **kwargs)
 
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+    @staticmethod
+    def _activation_backward_impl(*args, **kwargs) -> torch.Tensor:
         return tex.dsilu(*args, **kwargs)
