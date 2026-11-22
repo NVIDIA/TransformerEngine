@@ -1178,7 +1178,8 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
 //   1. Explicit per-tensor offset array provided  → use it directly.
 //   2. Per-tensor first/last dims provided but no offsets → cumulative sum of (first*last) products.
 //   3. Fully uniform shapes                        → idx * uniform_first * uniform_last.
-// Interleaved groups (uniform shapes, stored as (first, num_groups, last)) start at idx * last.
+// Interleaved groups (uniform shapes, stored as (first, num_groups, last), no explicit offsets)
+// start at idx * last.
 __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorShapeInfo &meta,
                                                                  size_t idx) {
   if (meta.interleaved) {
@@ -1583,6 +1584,8 @@ inline void validate_interleaved_operand(const TensorShapeInfo &meta,
   if (!meta.interleaved) return;
   NVTE_CHECK(meta.first_dims == nullptr && meta.last_dims == nullptr, "Grouped GEMM: interleaved ",
              operand, " requires uniform per-group shapes.");
+  NVTE_CHECK(meta.offsets == nullptr, "Grouped GEMM: interleaved ", operand,
+             " does not support explicit tensor offsets.");
   NVTE_CHECK(!transformer_engine::is_fp8_dtype(dtype) && !transformer_engine::is_fp4_dtype(dtype),
              "Grouped GEMM: interleaved ", operand, " is only supported for unscaled data.");
   NVTE_CHECK(!storage_transposed, "Grouped GEMM: interleaved ", operand,
@@ -1638,7 +1641,8 @@ inline void launch_grouped_gemm_setup(
   if (d_interleaved) {
     NVTE_CHECK(!d_is_discrete && !c_is_discrete,
                "Grouped GEMM: interleaved D requires grouped C/D tensors.");
-    // C is described by D's layout, so it must be interleaved the same way.
+    // C is addressed with D's interleaved layout, which is only known to hold for D itself.
+    NVTE_CHECK(C == D, "Grouped GEMM: interleaved D requires C to be null or D.");
     D_meta.interleaved = true;
     C_meta.interleaved = true;
     validate_interleaved_operand(D_meta, d_dtype, false, "D");

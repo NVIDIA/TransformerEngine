@@ -19,6 +19,7 @@ from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensor,
+    ScalingMode,
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
@@ -350,7 +351,7 @@ def grouped_dense(
                            an interleaved (K, G, N) kernel, e.g. one all-gathered along K. With
                            1, the kernel is used without a transpose and its gradient is
                            returned as (K, G, N). Only supported without quantization
-                           or bias.
+                           or bias, and needs the V2 grouped GEMM (today: BF16 on SM90+).
 
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
@@ -363,6 +364,12 @@ def grouped_dense(
         raise ValueError(
             "kernel_group_axis=1 requires an unquantized 3D (K, G, N) kernel and no bias."
         )
+    if kernel_group_axis == 1:
+        is_supported, reason = tex.is_v2_grouped_gemm_supported(
+            ScalingMode.NO_SCALING, x.dtype, has_bias=False
+        )
+        if not is_supported:
+            raise ValueError(f"kernel_group_axis=1 requires the V2 grouped GEMM: {reason}")
     output = _grouped_dense(
         x,
         kernel,

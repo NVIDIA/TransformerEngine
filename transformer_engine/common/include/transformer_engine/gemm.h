@@ -104,13 +104,14 @@ enum NVTEGroupedMatmulConfigAttribute {
    *  gathering a (num_groups, first, last) tensor that is sharded along its middle
    *  dimension, so the grouped GEMM can consume it without a transpose.
    *
-   *  Requires uniform per-group shapes and unscaled (non-FP8/FP4) data.
+   *  Requires uniform per-group shapes, no explicit tensor offsets, and unscaled
+   *  (non-FP8/FP4) data.
    */
   kNVTEGroupedMatmulConfigAInterleaved = 5,
   /*! Whether B is stored with its groups interleaved. See kNVTEGroupedMatmulConfigAInterleaved. */
   kNVTEGroupedMatmulConfigBInterleaved = 6,
   /*! Whether D (and C) is stored with its groups interleaved.
-   *  See kNVTEGroupedMatmulConfigAInterleaved.
+   *  See kNVTEGroupedMatmulConfigAInterleaved. C must be null or the same tensor as D.
    */
   kNVTEGroupedMatmulConfigDInterleaved = 7,
   kNVTEGroupedMatmulConfigNumAttributes

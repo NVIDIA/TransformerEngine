@@ -2495,7 +2495,8 @@ def grouped_gemm(
         out_interleaved: If True, a non-ragged 3D output (e.g. a weight gradient of shape
             (G, A, B)) is written interleaved and returned with shape (A, G, B).
 
-    Interleaved operands are only supported for unquantized inputs with the V2 grouped GEMM.
+    Interleaved operands are only supported for unquantized inputs with the V2 grouped GEMM
+    (today: BF16 on SM90+).
 
     Returns:
         A jnp.ndarray containing the result of the grouped GEMM operation
@@ -2627,7 +2628,7 @@ def grouped_gemm(
             " and padded with zeros to not affect the result of the MoE block."
         )
 
-    use_v2_ffi, _ = is_v2_grouped_gemm_supported(
+    use_v2_ffi, v2_unsupported_reason = is_v2_grouped_gemm_supported(
         scaling_mode,
         lhs.data.dtype,
         has_bias,
@@ -2637,7 +2638,10 @@ def grouped_gemm(
         rhs_axis_boundary=rhs_axis_boundary,
     )
     if (rhs_interleaved or out_interleaved) and not use_v2_ffi:
-        raise ValueError("Interleaved grouped GEMM operands require the V2 grouped GEMM.")
+        raise ValueError(
+            "Interleaved grouped GEMM operands require the V2 grouped GEMM: "
+            + v2_unsupported_reason
+        )
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         # Both V1 and V2 quantize produce pre-swizzled scales (V1 via

@@ -1969,7 +1969,7 @@ class TestGroupedDense:
         return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size)
 
     def test_grouped_dense_grad_interleaved_kernel(self, input_shape):
-        """A (K, G, N) kernel with kernel_group_axis=1 matches the same (G, K, N) kernel."""
+        """A (K, G, N) kernel with kernel_group_axis=1 matches a per-group jnp reference."""
         dtype = jnp.bfloat16
         is_supported, reason = tex.is_v2_grouped_gemm_supported(
             ScalingMode.NO_SCALING, dtype, has_bias=False
@@ -1985,15 +1985,22 @@ class TestGroupedDense:
             jax.random.PRNGKey(1), (x.shape[0], kernel.shape[2]), jnp.float32
         )
 
-        def loss(x, kernel, kernel_group_axis):
+        def ref_loss(x, kernel):
+            out_list = self._ref_grouped_dense(x, kernel, None, group_sizes, contracting_dims)
+            out = jnp.concatenate(out_list, axis=0)
+            return jnp.sum(out.astype(jnp.float32) * cotangent) / jnp.sqrt(x.size)
+
+        def interleaved_loss(x, interleaved_kernel):
             out = grouped_dense(
-                x, kernel, group_sizes, contracting_dims, kernel_group_axis=kernel_group_axis
+                x, interleaved_kernel, group_sizes, contracting_dims, kernel_group_axis=1
             )
             return jnp.sum(out.astype(jnp.float32) * cotangent) / jnp.sqrt(x.size)
 
-        value_n_grad = jit(value_and_grad(loss, (0, 1)), static_argnums=(2,))
-        ref_out, (ref_dgrad, ref_wgrad) = value_n_grad(x, kernel, 0)
-        out, (dgrad, wgrad) = value_n_grad(x, jnp.transpose(kernel, (1, 0, 2)), 1)
+        # Not jitted: the reference splits by the concrete group sizes.
+        ref_out, (ref_dgrad, ref_wgrad) = value_and_grad(ref_loss, (0, 1))(x, kernel)
+        out, (dgrad, wgrad) = jit(value_and_grad(interleaved_loss, (0, 1)))(
+            x, jnp.transpose(kernel, (1, 0, 2))
+        )
 
         assert wgrad.shape == (kernel.shape[1], kernel.shape[0], kernel.shape[2])
         assert_allclose(out, ref_out, dtype=dtype)
