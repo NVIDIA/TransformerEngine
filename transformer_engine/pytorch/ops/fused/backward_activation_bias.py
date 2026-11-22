@@ -6,27 +6,34 @@
 
 from __future__ import annotations
 from typing import Optional
-
-import torch
+from dataclasses import dataclass
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import Recipe
 from transformer_engine.pytorch.ops.basic import Bias
 from transformer_engine.pytorch.ops.basic.activation import (
     _ActivationOperation,
+    ActivationBwdArgs,
     GELU,
     ReLU,
 )
 from transformer_engine.pytorch.ops.op import (
     FusedOperation,
     FusibleOperation,
-    OperationContext,
 )
 from ...utils import clear_tensor_data
+from ...dynamo.fake import fake_bgrad
 from .._common import maybe_dequantize
 
 _fused_activations = {GELU: tex.dbias_dgelu, ReLU: tex.dbias_drelu}
 _fusible_activations = tuple(_fused_activations.keys())
+
+
+@dataclass(slots=True)
+class BackwardActivationBiasArgs(ActivationBwdArgs):
+    """Activation gradient with a fused bias reduction."""
+
+    activation: str
 
 
 class BackwardActivationBias(FusedOperation):
@@ -38,47 +45,44 @@ class BackwardActivationBias(FusedOperation):
 
     def __init__(self, *, bias: Bias, activation: _ActivationOperation):
         super().__init__((bias, activation))
-        self._fused_function = _fused_activations[type(activation)]
 
-    def fuser_backward(
-        self,
-        basic_op_ctxs: list[OperationContext],
-        grad_output: torch.Tensor,
-        *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
-    ) -> tuple[
-        torch.Tensor,
-        list[tuple[Optional[torch.Tensor], ...]],
-        list[tuple[()]],
-    ]:
+    bwd_args_type = BackwardActivationBiasArgs
 
-        # Get basic operation contexts
-        bias_op_ctx = basic_op_ctxs[0]
-        activation_op_ctx = basic_op_ctxs[1]
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        reason = super().compile_unsupported_reason(mode)
+        return reason or self.basic_ops[1].compile_unsupported_reason(mode)
 
-        # Saved tensors from forward pass
-        (act_input,) = activation_op_ctx.saved_tensors
-
-        # Check activation input tensor
-        act_input = maybe_dequantize(act_input.contiguous(), activation_op_ctx.dtype)
-
-        # Check grad output tensor
-        dy = maybe_dequantize(grad_output.contiguous(), act_input.dtype)
-
-        # Get previous op quantizer
-        quantizer = bias_op_ctx.grad_input_quantizer
+    def pack_backward_args(
+        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
+    ) -> BackwardActivationBiasArgs:
+        bias_ctx, act_ctx = basic_op_ctxs
+        quantizer = bias_ctx.grad_input_quantizer
         if quantizer is None:
             raise RuntimeError(
                 "BackwardActivationBias requires previous op's grad output quantizer, "
                 "but Bias context has no quantizer"
             )
+        return BackwardActivationBiasArgs(
+            grad_output,
+            act_ctx.saved_tensors[0],
+            act_ctx.dtype,
+            quantizer,
+            type(self.basic_ops[1]).__name__.lower(),
+        )
 
-        # Launch kernel
-        db, dx = self._fused_function(dy, act_input, quantizer)
+    @classmethod
+    def backward_compute(cls, args: BackwardActivationBiasArgs, *, in_custom_op: bool = False):
+        x = maybe_dequantize(args.input_, args.dtype).contiguous()
+        dy = maybe_dequantize(args.grad_output, args.dtype).contiguous()
+        compute = {"gelu": tex.dbias_dgelu, "relu": tex.dbias_drelu}[args.activation]
+        db, dx = compute(dy, x, args.grad_input_quantizer)
+        if not in_custom_op:
+            clear_tensor_data(x)
+        return dx, [(db,), ()], [(), ()]
 
-        # Clear activation input tensor
-        clear_tensor_data(act_input)
-
+    @classmethod
+    def backward_compute_fake(cls, args: BackwardActivationBiasArgs):
+        db, dx = fake_bgrad(args.grad_output, args.grad_input_quantizer, dtype=args.dtype)
         return dx, [(db,), ()], [(), ()]
 
     @staticmethod
