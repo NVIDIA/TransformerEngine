@@ -19,7 +19,10 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling
+from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.utils import get_cudnn_version
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -340,3 +343,106 @@ def test_fp32_input_fp8(normalization, return_norm, recipe_name, monkeypatch):
     if return_norm:
         assert norm_out.dtype == torch.bfloat16
         torch.testing.assert_close(norm_out, norm_ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm", "RMSNormAdd"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_direct_norm_backward_preserves_input_dtype(normalization, dtype):
+    """The backward graph must write FP32 dx into the FP32 input-sized allocation."""
+    _check_dtype(dtype)
+    if (
+        normalization == "RMSNormAdd"
+        and os.environ.get("NVTE_NORM_BWD_USE_CUDNN") == "1"
+        and get_cudnn_version() < (9, 21, 0)
+    ):
+        pytest.skip("cuDNN RMSNorm backward-add requires cuDNN 9.21 or newer")
+    if (
+        normalization == "RMSNormAdd"
+        and os.environ.get("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE") == "1"
+        and os.environ.get("NVTE_NORM_BWD_USE_CUDNN") != "1"
+    ):
+        pytest.skip("Native RMSNorm backward-add does not support weight-dtype gamma addition")
+    torch.manual_seed(1234)
+    x = torch.randn(17, 512, device="cuda", dtype=torch.float32)
+    gamma = torch.empty(512, device="cuda", dtype=dtype).uniform_(0.75, 1.25)
+    beta = torch.zeros_like(gamma)
+    dy = torch.randn_like(x, dtype=dtype)
+    eps = 1e-5
+    if normalization == "LayerNorm":
+        out, mu, rsigma = tex.layernorm_fwd(
+            x, gamma, beta, eps, None, None, TE_DType[dtype], 0, False
+        )
+        dx, dgamma, dbeta = tex.layernorm_bwd(dy, x, mu, rsigma, gamma, 0, False)
+    else:
+        out, _, rsigma = tex.rmsnorm_fwd(x, gamma, eps, None, None, TE_DType[dtype], 0, False)
+        if normalization == "RMSNormAdd":
+            add = torch.randn_like(dy)
+            dx, dgamma = tex.rmsnorm_bwd_add(dy, x, add, rsigma, gamma, 0, False)
+        else:
+            dx, dgamma = tex.rmsnorm_bwd(dy, x, rsigma, gamma, 0, False)
+
+    x_ref = x.double().requires_grad_()
+    gamma_ref = gamma.double().requires_grad_()
+    if normalization == "LayerNorm":
+        beta_ref = beta.double().requires_grad_()
+        normalized = F.layer_norm(x_ref, (512,), gamma_ref, beta_ref, eps)
+    else:
+        normalized = x_ref * torch.rsqrt(x_ref.square().mean(dim=-1, keepdim=True) + eps)
+        normalized = normalized * gamma_ref
+    normalized.backward(dy.double())
+    expected_dx = x_ref.grad
+    if normalization == "RMSNormAdd":
+        expected_dx = expected_dx + add.double()
+
+    assert out.dtype == dtype
+    assert dx.dtype == x.dtype == torch.float32
+    assert dgamma.dtype == gamma.dtype == dtype
+    torch.testing.assert_close(
+        out, normalized.detach().to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-6
+    )
+    torch.testing.assert_close(dx, expected_dx.float(), rtol=3e-5, atol=3e-6)
+    torch.testing.assert_close(
+        dgamma, gamma_ref.grad.to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-5
+    )
+    if normalization == "LayerNorm":
+        assert dbeta.dtype == beta.dtype == dtype
+        torch.testing.assert_close(
+            dbeta, beta_ref.grad.to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-5
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_direct_rmsnorm_preserves_small_fp32_inputs(dtype):
+    """RMSNorm's cuDNN path must keep small inputs rather than narrowing them."""
+    _check_dtype(dtype)
+    torch.manual_seed(1234)
+    x = torch.randn(17, 512, device="cuda", dtype=torch.float32) * 1e-6
+    gamma = torch.ones(512, device="cuda", dtype=dtype)
+    dy = torch.randn_like(x, dtype=dtype)
+    eps = 1e-12
+    out, _, rsigma = tex.rmsnorm_fwd(x, gamma, eps, None, None, TE_DType[dtype], 0, False)
+    dx, _ = tex.rmsnorm_bwd(dy, x, rsigma, gamma, 0, False)
+
+    x_ref = x.double().requires_grad_()
+    rsigma_ref = torch.rsqrt(x_ref.square().mean(dim=-1, keepdim=True) + eps)
+    normalized = x_ref * rsigma_ref
+    normalized.backward(dy.double())
+    x_rounded = x.to(dtype).double().requires_grad_()
+    rsigma_rounded = torch.rsqrt(x_rounded.square().mean(dim=-1, keepdim=True) + eps)
+    normalized_rounded = x_rounded * rsigma_rounded
+    normalized_rounded.backward(dy.double())
+
+    assert dx.dtype == rsigma.dtype == torch.float32
+    torch.testing.assert_close(
+        out, normalized.detach().to(dtype), rtol=torch.finfo(dtype).eps, atol=2e-6
+    )
+    torch.testing.assert_close(rsigma, rsigma_ref.detach().flatten().float(), rtol=3e-7, atol=0)
+    torch.testing.assert_close(dx, x_ref.grad.float(), rtol=3e-5, atol=0.25)
+    statistic_error = torch.linalg.vector_norm(rsigma.double() - rsigma_ref.detach().flatten())
+    rounded_statistic_error = torch.linalg.vector_norm(rsigma_rounded - rsigma_ref)
+    assert rounded_statistic_error > torch.linalg.vector_norm(rsigma_ref) * 1e-6
+    assert statistic_error < rounded_statistic_error * 0.01
+    actual_error = torch.linalg.vector_norm(dx.double() - x_ref.grad)
+    rounding_error = torch.linalg.vector_norm(x_rounded.grad - x_ref.grad)
+    assert rounding_error > torch.linalg.vector_norm(x_ref.grad) * 1e-5
+    assert actual_error < rounding_error * 0.01

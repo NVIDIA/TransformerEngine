@@ -1646,7 +1646,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   would not fit in GPU memory. FP32 inputs are preserved through normalization
                   when parameters are FP16 or BF16. The linear transformation and returned
                   normalization output use the parameter dtype (or the autocast dtype), and
-                  input gradients are FP32.
+                  input gradients are FP32. FP32 LayerNorm normally uses native centered
+                  statistics and separate FP8 quantization. RMSNorm retains fused cuDNN
+                  and quantized paths where available without narrowing the FP32 input.
     delay_wgrad_compute : bool, default = False
                          Whether or not to delay weight gradient computation. If set to ``True``,
                          it's the user's responsibility to call ``module.backward_dw`` to compute

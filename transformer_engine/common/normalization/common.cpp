@@ -575,6 +575,13 @@ bool& _zero_centered_gamma_in_weight_dtype() {
 
 bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
 
+bool use_native_layernorm_for_fp32_input(DType input_dtype, DType weight_dtype,
+                                         bool zero_centered_gamma) {
+  const bool weight_dtype_gamma = zero_centered_gamma && weight_dtype != DType::kFloat32 &&
+                                  use_zero_centered_gamma_in_weight_dtype();
+  return input_dtype == DType::kFloat32 && !weight_dtype_gamma;
+}
+
 bool use_cudnn_mxfp8_norm_output_in_input_dtype() {
   static bool flag =
       transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM_OUTPUT_IN_INPUT_DTYPE");
