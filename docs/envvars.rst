@@ -150,14 +150,16 @@ General
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
-                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 It also requires ``apache-tvm-ffi`` and ``nvidia-cutlass-dsl>=4.8.0`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
 
-.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+.. envvar:: NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
+   :Type: ``str`` (``WARN`` or ``ERROR``)
+   :Default: None
+   :Description: Control what happens when TE fails dispatch to a CuTeDSL kernel and would fall back to the CUDA C++ kernel.
+                 ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
+                 Only effective when the CuTeDSL backend is enabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
@@ -175,6 +177,20 @@ General
                  :class:`transformer_engine.pytorch.ops.GroupedLinear` instead).
                  When set to ``1``, overrides the operation's declared split alignment
                  to 256, enabling grouped MLP fusion when its other requirements are met.
+
+.. envvar:: NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: When set to ``1``, the fused grouped MLP runs its unfused GEMMs, i.e. those
+                 without a fused activation, on cuBLAS instead of the cuDNN frontend CuTe
+                 DSL kernels: the FC2 forward, FC1 input-gradient and weight-gradient
+                 GEMMs. A single-group MLP on the dense single-group path keeps its dense
+                 GEMMs either way, and the NVFP4 FC2 forward and FC1 input-gradient GEMMs
+                 always run on cuBLAS when the cuDNN frontend predates canonical data
+                 layouts (1.32.1).
+                 ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``
+                 is a deprecated alias, honored when this variable is unset.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

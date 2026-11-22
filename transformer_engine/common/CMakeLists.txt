@@ -324,6 +324,7 @@ list(APPEND transformer_engine_cuda_sources
      fused_rope/fused_rope.cu
      fused_router/fused_moe_aux_loss.cu
      fused_router/fused_score_for_moe_aux_loss.cu
+     fused_router/fused_topk_with_aux_loss_scores.cu
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
@@ -363,7 +364,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
-     cast/fused_group_requantize.cu
+     cast/mxfp8/requantize_mxfp8.cu
      fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu

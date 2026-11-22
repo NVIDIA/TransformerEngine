@@ -157,6 +157,19 @@ void init_router_bindings(pybind11::module &m) {
         py::arg("scaling_factor"), py::arg("score_function"), py::arg("use_dense_indices") = false,
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function bwd");
+  m.def("fused_topk_with_aux_loss_scores_is_supported",
+        &fused_topk_with_aux_loss_scores_is_supported, py::arg("num_experts"), py::arg("topk"),
+        py::arg("num_groups"), py::arg("group_topk"), py::arg("score_function"),
+        "Whether the single-pass top-k with aux-loss scores supports a router configuration");
+  m.def("fused_topk_with_aux_loss_scores_fwd", &fused_topk_with_aux_loss_scores_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("num_groups"), py::arg("group_topk"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
+        py::arg("tokens_per_expert"), py::arg("fp32_probs"), py::arg("index_dtype"),
+        "Single-pass top-k routing with aux-loss scores fwd");
+  m.def("fused_topk_with_aux_loss_scores_bwd", &fused_topk_with_aux_loss_scores_bwd,
+        py::arg("logits"), py::arg("topk_indices"), py::arg("grad_probs"),
+        py::arg("grad_aux_scores"), py::arg("scaling_factor"), py::arg("score_function"),
+        "Single-pass top-k routing with aux-loss scores bwd");
   m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
         py::arg("topk"), py::arg("score_function"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
@@ -187,6 +200,10 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
         py::arg("tensor_offsets") = py::none());
+  m.def("nvfp4_group_hadamard_amax", nvfp4_group_hadamard_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
+        "Per-group (pre-RHT, post-RHT) NVFP4 amax of a grouped tensor without quantizing it");
 }
 
 }  // namespace transformer_engine::pytorch
@@ -213,11 +230,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
-  m.def("nvfp4_gemm_swizzled_scales_alignment",
-        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
-        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
-        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
-        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
@@ -388,27 +400,33 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
         "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_softmax_backward", &transformer_engine::pytorch::scaled_softmax_backward,
-        "Scaled Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Softmax BWD", py::arg("output_grads"), py::arg("softmax_results"),
+        py::arg("scale_factor"), py::arg("overwrite_output_grads") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_masked_softmax_forward, "Scaled Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_masked_softmax_backward, "Scaled Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("output_grads"), py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_forward,
         "Scaled Upper-Triangular Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_backward,
-        "Scaled Upper-Triangular Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Upper-Triangular Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_forward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_backward,
-        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
+        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),

@@ -27,6 +27,9 @@ export NVTE_FLASH_ATTN_V2=1
 export NVTE_FLASH_ATTN_V3=0
 export NVTE_FLASH_ATTN_V4=0
 
+# If CuTeDSL backend is not enabled, this will be ignored
+export NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN=ERROR
+
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_optional_flash_attn_import.xml $TE_PATH/tests/pytorch/test_optional_flash_attn_import.py || test_fail "test_optional_flash_attn_import.py"
@@ -75,6 +78,7 @@ NVTE_KDA_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pyt
 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_linear_mxfp8_attention.xml $TE_PATH/tests/pytorch/attention/test_linear_mxfp8_attention.py || test_fail "test_linear_mxfp8_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_mla.xml $TE_PATH/tests/pytorch/attention/test_fused_mla.py || test_fail "test_fused_mla.py"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8_bhsd_swizzle.xml $TE_PATH/tests/pytorch/attention/test_mxfp8_bhsd_swizzle.py || test_fail "test_mxfp8_bhsd_swizzle.py"
 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_kv_cache.xml $TE_PATH/tests/pytorch/attention/test_kv_cache.py || test_fail "test_kv_cache.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_cu_seqlens_cache.xml $TE_PATH/tests/pytorch/attention/test_cu_seqlens_cache.py || test_fail "test_cu_seqlens_cache.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mixed_thd_attention.xml $TE_PATH/tests/pytorch/attention/test_mixed_thd_attention.py || test_fail "test_mixed_thd_attention.py"

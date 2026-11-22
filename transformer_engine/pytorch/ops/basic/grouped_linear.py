@@ -1500,7 +1500,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=x.reshape(-1),
+                data=x,
                 first_dims=split_sizes,
                 tensor_offsets=input_tensor_offsets,
             )
@@ -1537,7 +1537,7 @@ class GroupedLinear(BasicOperation):
             dtype=dtype,
             num_tensors=num_groups,
             quantizer=None,
-            data=out.reshape(-1),
+            data=out,
             first_dims=split_sizes,
             tensor_offsets=output_tensor_offsets,
         )
@@ -1921,7 +1921,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=dy_2d.reshape(-1),
+                data=dy_2d,
                 first_dims=split_sizes,
                 tensor_offsets=output_tensor_offsets,
             )
@@ -1959,7 +1959,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=grad_input.reshape(-1),
+                data=grad_input,
                 first_dims=split_sizes,
                 tensor_offsets=input_tensor_offsets,
             )

@@ -75,7 +75,7 @@ same input for both models.
       :start-after: # SINGLE_GPU_OUTPUT_START
       :end-before: # SINGLE_GPU_OUTPUT_END
 
-On a single GB200, that's roughly **1.6× faster** for the fwd+bwd of one large
+On a single GB200, that's roughly **1.7× faster** for the fwd+bwd of one large
 Dense — and the only code change was passing ``dot_general=te_dot_general_cls()``
 into ``nn.Dense``.
 

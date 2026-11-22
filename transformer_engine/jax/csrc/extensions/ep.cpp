@@ -332,9 +332,10 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
-                  total_recv_tokens_.data(), &layer_cfg, stream);
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP prepare failed: ", [&] {
+    nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
+                    total_recv_tokens_.data(), &layer_cfg, stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
@@ -354,10 +355,16 @@ struct EpDispatchBuffers {
   TensorWrapper topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights;
 };
 
+// MXFP8 block size along the hidden dim.
+constexpr size_t kEpMxfp8BlockSize = 32;
+
 // Wrap the topk_idx / tokens / topk_weights inputs and the recv_tokens / recv_topk_weights
-// outputs shared by dispatch and fused prepare + dispatch.
+// outputs shared by dispatch and fused prepare + dispatch. E4M3 tokens are MXFP8: the compact
+// (unswizzled) E8M0 scales tokens_scale_inv / recv_scale_inv ride with the data. For other
+// token dtypes the scale buffers are empty placeholders and ignored.
 EpDispatchBuffers WrapEpDispatchBuffers(Buffer_Type topk_idx, Buffer_Type tokens,
-                                        Buffer_Type topk_weights, Result_Type recv_tokens,
+                                        Buffer_Type tokens_scale_inv, Buffer_Type topk_weights,
+                                        Result_Type recv_tokens, Result_Type recv_scale_inv,
                                         Result_Type recv_topk_weights, const EpConfig& config) {
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -380,7 +387,21 @@ EpDispatchBuffers WrapEpDispatchBuffers(Buffer_Type topk_idx, Buffer_Type tokens
   const size_t H = static_cast<size_t>(token_dims.back());
   std::vector<size_t> tok_shape = {T_flat, H};
   auto token_dtype = convert_ffi_datatype_to_te_dtype(tokens.element_type());
-  auto tokens_ = TensorWrapper(tokens.untyped_data(), tok_shape, token_dtype);
+  const bool is_mxfp8 = token_dtype == DType::kFloat8E4M3;
+  const size_t sc_cols = H / kEpMxfp8BlockSize;
+  TensorWrapper tokens_(is_mxfp8 ? NVTE_MXFP8_1D_SCALING : NVTE_DELAYED_TENSOR_SCALING);
+  tokens_.set_rowwise_data(tokens.untyped_data(), token_dtype, tok_shape);
+  if (is_mxfp8) {
+    NVTE_CHECK(H % kEpMxfp8BlockSize == 0, "MXFP8 dispatch requires hidden dim divisible by ",
+               kEpMxfp8BlockSize, "; got H=", H);
+    NVTE_CHECK(tokens_scale_inv.element_type() == ::xla::ffi::DataType::F8E8M0FNU,
+               "tokens_scale_inv must be float8_e8m0fnu for MXFP8 dispatch");
+    NVTE_CHECK(tokens_scale_inv.element_count() == T_flat * sc_cols,
+               "tokens_scale_inv must have T * H/32 elements; got ",
+               tokens_scale_inv.element_count(), " for T=", T_flat, ", H=", H);
+    tokens_.set_rowwise_scale_inv(tokens_scale_inv.untyped_data(), DType::kFloat8E8M0,
+                                  std::vector<size_t>{T_flat, sc_cols});
+  }
 
   auto tw_dims = topk_weights.dimensions();
   NVTE_CHECK(tw_dims.size() >= 2,
@@ -398,7 +419,15 @@ EpDispatchBuffers WrapEpDispatchBuffers(Buffer_Type topk_idx, Buffer_Type tokens
              "recv_tokens must be at least 2D [..., recv_pr, H]; got ndim=", recv_dims.size());
   const size_t recv_capacity_per_rank = product(recv_dims, 0, recv_dims.size() - 1);
   std::vector<size_t> recv_shape = {recv_capacity_per_rank, H};
-  auto recv_tokens_ = TensorWrapper(recv_tokens->untyped_data(), recv_shape, token_dtype);
+  TensorWrapper recv_tokens_(is_mxfp8 ? NVTE_MXFP8_1D_SCALING : NVTE_DELAYED_TENSOR_SCALING);
+  recv_tokens_.set_rowwise_data(recv_tokens->untyped_data(), token_dtype, recv_shape);
+  if (is_mxfp8) {
+    NVTE_CHECK(recv_scale_inv->element_count() == recv_capacity_per_rank * sc_cols,
+               "recv_scale_inv must have recv_pr * H/32 elements; got ",
+               recv_scale_inv->element_count());
+    recv_tokens_.set_rowwise_scale_inv(recv_scale_inv->untyped_data(), DType::kFloat8E8M0,
+                                       std::vector<size_t>{recv_capacity_per_rank, sc_cols});
+  }
 
   auto recv_w_dims = recv_topk_weights->dimensions();
   NVTE_CHECK(recv_w_dims.size() >= 1,
@@ -415,13 +444,14 @@ EpDispatchBuffers WrapEpDispatchBuffers(Buffer_Type topk_idx, Buffer_Type tokens
 }
 
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
-                         Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
-                         Result_Type recv_tokens, Result_Type recv_topk_weights,
+                         Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type tokens_scale_inv,
+                         Buffer_Type topk_weights, Result_Type recv_tokens,
+                         Result_Type recv_scale_inv, Result_Type recv_topk_weights,
                          Result_Type out_handle_mem, EpConfig config) {
   (void)ep_state;
   (void)out_handle_mem;  // aliased to handle_mem; dispatch writes there directly
-  auto bufs =
-      WrapEpDispatchBuffers(topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights, config);
+  auto bufs = WrapEpDispatchBuffers(topk_idx, tokens, tokens_scale_inv, topk_weights, recv_tokens,
+                                    recv_scale_inv, recv_topk_weights, config);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
@@ -431,11 +461,11 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_dispatch_v2(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
-                      bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
-                      bufs.recv_topk_weights.data(), no_win, &layer_cfg, stream);
-
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP dispatch failed: ", [&] {
+    nvte_ep_dispatch_v2(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
+                        bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
+                        bufs.recv_topk_weights.data(), no_win, &layer_cfg, stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
@@ -445,8 +475,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Arg<Buffer_Type>()                         // handle_mem
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Arg<Buffer_Type>()                         // tokens
+                                  .Arg<Buffer_Type>()                         // tokens_scale_inv
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
+                                  .Ret<Buffer_Type>()                         // recv_scale_inv
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
                                   .Ret<Buffer_Type>()  // out_handle_mem (aliased to handle_mem)
                                   .Attrs<EpConfig>(),
@@ -454,16 +486,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
 
 // ── ep_prepare_and_dispatch ───────────────────────────────────────────────────
 
-Error_Type EpPrepareAndDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state,
-                                   Buffer_Type topk_idx, Buffer_Type tokens,
-                                   Buffer_Type topk_weights, Result_Type recv_tokens,
-                                   Result_Type recv_topk_weights,
-                                   Result_Type recv_tokens_per_expert,
-                                   Result_Type total_recv_tokens, Result_Type handle_mem,
-                                   EpConfig config) {
+Error_Type EpPrepareAndDispatchFFI(
+    cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx, Buffer_Type tokens,
+    Buffer_Type tokens_scale_inv, Buffer_Type topk_weights, Result_Type recv_tokens,
+    Result_Type recv_scale_inv, Result_Type recv_topk_weights, Result_Type recv_tokens_per_expert,
+    Result_Type total_recv_tokens, Result_Type handle_mem, EpConfig config) {
   (void)ep_state;
-  auto bufs =
-      WrapEpDispatchBuffers(topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights, config);
+  auto bufs = WrapEpDispatchBuffers(topk_idx, tokens, tokens_scale_inv, topk_weights, recv_tokens,
+                                    recv_scale_inv, recv_topk_weights, config);
 
   std::vector<size_t> tc_shape = {static_cast<size_t>(recv_tokens_per_expert->element_count())};
   auto recv_tokens_per_expert_ =
@@ -482,12 +512,13 @@ Error_Type EpPrepareAndDispatchFFI(cudaStream_t stream, EpInstanceState* ep_stat
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   NVTECommWindow no_win{nullptr, 0};
-  nvte_ep_prepare_and_dispatch(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
-                               bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
-                               bufs.recv_topk_weights.data(), no_win,
-                               recv_tokens_per_expert_.data(), total_recv_tokens_.data(),
-                               &layer_cfg, stream);
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP prepare_and_dispatch failed: ", [&] {
+    nvte_ep_prepare_and_dispatch(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(),
+                                 no_win, bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(),
+                                 no_win, bufs.recv_topk_weights.data(), no_win,
+                                 recv_tokens_per_expert_.data(), total_recv_tokens_.data(),
+                                 &layer_cfg, stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareAndDispatchHandler, EpPrepareAndDispatchFFI,
@@ -496,8 +527,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareAndDispatchHandler, EpPrepareAndDispatchF
                                   .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Arg<Buffer_Type>()                         // tokens
+                                  .Arg<Buffer_Type>()                         // tokens_scale_inv
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
+                                  .Ret<Buffer_Type>()                         // recv_scale_inv
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
                                   .Ret<Buffer_Type>()  // recv_tokens_per_expert
                                   .Ret<Buffer_Type>()  // total_recv_tokens
@@ -536,10 +569,10 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_combine_v2(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
-                     stream);
-
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP combine failed: ", [&] {
+    nvte_ep_combine_v2(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
+                       stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
@@ -609,11 +642,11 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_dispatch_bwd_v2(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
-                          no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
-                          stream);
-
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP dispatch_bwd failed: ", [&] {
+    nvte_ep_dispatch_bwd_v2(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
+                            no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
+                            stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
@@ -661,10 +694,10 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_combine_bwd_v2(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
-                         &layer_cfg, stream);
-
-  return ffi_with_cuda_error_check();
+  return ffi_guard("EP combine_bwd failed: ", [&] {
+    nvte_ep_combine_bwd_v2(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(),
+                           no_win, &layer_cfg, stream);
+  });
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,

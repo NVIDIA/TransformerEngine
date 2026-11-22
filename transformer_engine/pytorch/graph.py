@@ -22,7 +22,7 @@ from .quantization import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
-from .distributed import get_all_rng_states, graph_safe_rng_available
+from .distributed import get_all_rng_states
 from .module.base import TransformerEngineBaseModule
 from .ops.op import BasicOperation
 from .ops import Sequential
@@ -482,12 +482,11 @@ def _make_graphed_callables(
         )
 
     # For cases with multiple active RNG states, e.g. TP.
-    if graph_safe_rng_available():
-        for _, state in get_all_rng_states().items():
-            for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
-                fwd_graph.register_generator_state(state)
-                bwd_graph.register_generator_state(state)
-                bwd_dw_graph.register_generator_state(state)
+    for _, state in get_all_rng_states().items():
+        for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
+            fwd_graph.register_generator_state(state)
+            bwd_graph.register_generator_state(state)
+            bwd_dw_graph.register_generator_state(state)
 
     mempool = graph_pool_handle() if pool is None else pool
 
@@ -1712,14 +1711,11 @@ def make_graphed_callables(
         forward_funcs = tuple(forward_funcs)
 
     # Save RNG state.
-    if graph_safe_rng_available():
-        generators = [
-            torch.cuda.default_generators[torch.cuda.current_device()],
-            *get_all_rng_states().values(),
-        ]
-        original_rng_states = [state.get_state() for state in generators]
-    else:
-        original_rng_states = torch.cuda.get_rng_state()
+    generators = [
+        torch.cuda.default_generators[torch.cuda.current_device()],
+        *get_all_rng_states().values(),
+    ]
+    original_rng_states = [state.get_state() for state in generators]
 
     graphed_callables = _make_graphed_callables(
         forward_funcs,
@@ -1740,11 +1736,8 @@ def make_graphed_callables(
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
-    if graph_safe_rng_available():
-        for gen, state in zip(generators, original_rng_states):
-            gen.set_state(state)
-    else:
-        torch.cuda.set_rng_state(original_rng_states)
+    for gen, state in zip(generators, original_rng_states):
+        gen.set_state(state)
 
     # Remove FP8 wrapper.
     for module_cls, old_call in old_call_funcs.items():
