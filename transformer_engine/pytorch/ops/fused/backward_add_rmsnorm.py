@@ -45,7 +45,7 @@ class BackwardAddRMSNorm(FusedOperation):
         rmsnorm_op_ctx = basic_op_ctxs[1]
 
         # Saved tensors from forward pass
-        x, rstdevs = rmsnorm_op_ctx.saved_tensors
+        saved_x, rstdevs = rmsnorm_op_ctx.saved_tensors
 
         # Tensor dims
         weight_dims = rmsnorm_op.weight.size()
@@ -54,6 +54,7 @@ class BackwardAddRMSNorm(FusedOperation):
         # Check input tensors
         dtype = rmsnorm_op_ctx.dtype
         extra_grad = basic_op_grad_extra_outputs[0][0]
+        x = maybe_dequantize(saved_x, dtype).view((-1, inner_dim))
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(rmsnorm_op.weight, dtype).view((inner_dim,))
         if extra_grad is None:
@@ -74,7 +75,7 @@ class BackwardAddRMSNorm(FusedOperation):
         )
 
         # Clear saved tensors if possible
-        clear_tensor_data(x)
+        clear_tensor_data(saved_x)
         clear_tensor_data(rstdevs)
 
         # Reshape results

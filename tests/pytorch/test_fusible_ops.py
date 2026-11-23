@@ -4261,7 +4261,7 @@ class TestFusedOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
-    @pytest.mark.parametrize("weight_shape", ((19,), (64,)))
+    @pytest.mark.parametrize("weight_shape", ((19,), (64,), (4, 16)))
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))

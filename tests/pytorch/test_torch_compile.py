@@ -3728,10 +3728,19 @@ def test_te_ops_normalization_dynamic_compile(normalization):
     _check_te_ops_normalization_compile(normalization, dynamic=True)
 
 
-@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
 @pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "nvfp4"])
-@pytest.mark.parametrize("training", [False, True])
-def test_te_ops_normalization_mlp_compile(normalization, quantization, training, monkeypatch):
+@pytest.mark.parametrize(
+    "normalization,training,mode",
+    [
+        ("LayerNorm", True, "default"),
+        ("RMSNorm", True, "default"),
+        ("LayerNorm", False, "default"),
+        ("RMSNorm", False, "default"),
+        ("LayerNorm", True, "reduce-overhead"),
+        ("RMSNorm", True, "reduce-overhead"),
+    ],
+)
+def test_te_ops_normalization_mlp_compile(normalization, quantization, training, mode, monkeypatch):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
@@ -3740,8 +3749,10 @@ def test_te_ops_normalization_mlp_compile(normalization, quantization, training,
         pytest.skip(reason_for_no_nvfp4)
     dtype = torch.bfloat16
     torch._dynamo.reset()
+    counters.clear()
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
-    in_features, hidden = (128, 128) if quantization == "nvfp4" else (32, 64)
+    in_features, hidden = (128, 128) if quantization in ("mxfp8", "nvfp4") else (32, 64)
+    rows = 128 if quantization == "mxfp8" else (64 if quantization == "nvfp4" else 32)
     model = (
         te.ops.Sequential(
             getattr(te.ops, normalization)(in_features, device="cuda", dtype=dtype),
@@ -3769,11 +3780,17 @@ def test_te_ops_normalization_mlp_compile(normalization, quantization, training,
         with te.autocast(recipe=quant_recipe):
             return module(x)
 
-    compiled, graphs = _compile_with_graphs(run)
+    if mode == "default":
+        compiled, graphs = _compile_with_graphs(run)
+    else:
+        compiled, graphs = torch.compile(run, fullgraph=True, mode=mode), []
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     eager_optimizer = torch.optim.SGD(eager_model.parameters(), lr=0.01)
-    for step in range(3 if training else 1):
-        x = torch.randn(2, 16, in_features, device="cuda", dtype=dtype, requires_grad=training)
+    for step in range(4 if training else 1):
+        torch.compiler.cudagraph_mark_step_begin()
+        x = torch.randn(
+            2, rows // 2, in_features, device="cuda", dtype=dtype, requires_grad=training
+        )
         eager_x = x.detach().clone().requires_grad_(training)
         with torch.set_grad_enabled(training):
             actual = compiled(x)
@@ -3795,7 +3812,12 @@ def test_te_ops_normalization_mlp_compile(normalization, quantization, training,
             graph_count = len(graphs)
         elif step > 1:
             assert len(graphs) == graph_count
-    _assert_custom_ops(graphs, normalization.lower(), backward=training)
+        del actual, expected, x, eager_x
+    if mode == "default":
+        _assert_custom_ops(graphs, normalization.lower(), backward=training)
+    else:
+        assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
+        assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0
 
 
 @pytest.mark.parametrize("module", ["LayerNorm", "RMSNorm"])
