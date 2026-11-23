@@ -187,6 +187,9 @@ void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
     case kNVTEGroupedMatmulConfigUseSplitAccumulator:
       bool_to_uint8(config_.use_split_accumulator, buf);
       break;
+    case kNVTEGroupedMatmulConfigAlphaBetaOnDevice:
+      bool_to_uint8(config_.alpha_beta_on_device, buf);
+      break;
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(buf, &config_.sm_count, attr_size);
       break;
@@ -239,6 +242,9 @@ void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
     }
     case kNVTEGroupedMatmulConfigUseSplitAccumulator:
       uint8_to_bool(buf, config_.use_split_accumulator);
+      break;
+    case kNVTEGroupedMatmulConfigAlphaBetaOnDevice:
+      uint8_to_bool(buf, config_.alpha_beta_on_device);
       break;
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(&config_.sm_count, buf, attr_size);

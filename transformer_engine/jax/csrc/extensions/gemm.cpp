@@ -953,12 +953,12 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   TensorWrapper workspace_cublas(cublas_workspace_ptr, std::vector<size_t>{workspace_size},
                                  DType::kByte);
 
-  TensorWrapper alpha_tensor(static_cast<void *>(alpha.untyped_data()),
-                             std::vector<size_t>{alpha.element_count()},
-                             convert_ffi_datatype_to_te_dtype(alpha.element_type()));
-  TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()),
-                            std::vector<size_t>{beta.element_count()},
-                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
+  // alpha and beta are always 1 and 0 here. Passing them from host memory lets cuBLAS specialize
+  // the GEMM epilogue and skip loading C.
+  float one = 1.0f;
+  float zero = 0.0f;
+  TensorWrapper alpha_tensor(&one, std::vector<size_t>{1}, DType::kFloat32);
+  TensorWrapper beta_tensor(&zero, std::vector<size_t>{1}, DType::kFloat32);
 
   // Build grouped tensors from XLA buffer shapes and group_sizes — no m/n/k derivation needed.
   // int64_workspace is partitioned into per-ragged-buffer slots of num_gemms int64 elements each.
@@ -1013,6 +1013,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   gemmConfig.set_avg_m(avg_m);
   gemmConfig.set_avg_n(avg_n);
   gemmConfig.set_avg_k(avg_k_lhs);
+  gemmConfig.set_alpha_beta_on_device(false);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),

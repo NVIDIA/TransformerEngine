@@ -199,25 +199,21 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
-    at::Tensor workspace_setup, at::Tensor workspace_cublas, bool use_split_accumulator,
-    int math_sm_count);
+    std::optional<at::Tensor> bias_scale, std::optional<at::Tensor> alpha,
+    std::optional<at::Tensor> beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    bool use_split_accumulator, int math_sm_count, bool accumulate);
 
-py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
-                                                   bool transb, py::handle D, py::object bias,
-                                                   std::optional<at::Tensor> bias_scale,
-                                                   at::Tensor alpha, at::Tensor beta,
-                                                   at::Tensor workspace_setup,
-                                                   at::Tensor workspace_cublas,
-                                                   bool use_split_accumulator, int math_sm_count);
+py::object te_general_grouped_gemm_for_discrete_in(
+    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
+    std::optional<at::Tensor> bias_scale, std::optional<at::Tensor> alpha,
+    std::optional<at::Tensor> beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    bool use_split_accumulator, int math_sm_count, bool accumulate);
 
-py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
-                                                    bool transb, py::handle D, py::object bias,
-                                                    std::optional<at::Tensor> bias_scale,
-                                                    at::Tensor alpha, at::Tensor beta,
-                                                    at::Tensor workspace_setup,
-                                                    at::Tensor workspace_cublas,
-                                                    bool use_split_accumulator, int math_sm_count);
+py::object te_general_grouped_gemm_for_discrete_out(
+    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
+    std::optional<at::Tensor> bias_scale, std::optional<at::Tensor> alpha,
+    std::optional<at::Tensor> beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    bool use_split_accumulator, int math_sm_count, bool accumulate);
 
 /***************************************************************************************************
  * Transpose

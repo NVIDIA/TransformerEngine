@@ -193,6 +193,12 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
+def ulp(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Spacing of dtype values at the magnitude of each element of x"""
+    _, exponent = torch.frexp(x)
+    return torch.ldexp(torch.full_like(x, torch.finfo(dtype).eps), exponent - 1)
+
+
 param_types = [torch.float32, torch.float16]
 if is_bf16_available():
     param_types.append(torch.bfloat16)
@@ -1179,8 +1185,11 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
         else:  # layout == "TN"
             out_ref = [torch.matmul(B[i].float(), A[i].transpose(0, 1).float()) for i in range(z)]
 
+    # With host alpha/beta, cuBLAS accumulates in place and rounds the GEMM result to the output
+    # dtype before adding it, so the reference does too.
+    gemm_ref = out_ref
     if accumulate:
-        out_ref = [out[i].float() + o for i, o in enumerate(out_ref)]
+        out_ref = [out[i].float() + o.to(dtype).float() for i, o in enumerate(out_ref)]
 
     # Bias is applied after GEMM (broadcasted along rows)
     # Match kernel behavior: GEMM output is already in output dtype when bias is added.
@@ -1279,7 +1288,14 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
         out_grouped_no_bias, bias, bias_scale, m_sizes, dtype
     )
     tols = dtype_tols(dtype)
-    for o, o_ref in zip(out_grouped_no_bias, out_ref_no_bias):
+    for o, o_ref, g in zip(out_grouped_no_bias, out_ref_no_bias, gemm_ref):
+        if accumulate:
+            # The kernel sums the GEMM result in a different order than the reference, so it may
+            # round to a neighboring value. Kernels that add before rounding (device alpha/beta)
+            # differ by less. Allow one ulp of the GEMM result.
+            g_ulp = ulp(g, dtype)
+            o, o_ref = o.float(), o_ref.float()
+            o_ref = o_ref + (o - o_ref).clamp(-g_ulp, g_ulp)
         torch.testing.assert_close(o, o_ref, **tols)
     if bias is not None:
         for o, o_ref in zip(out_grouped_bias, out_grouped_manual_bias):
