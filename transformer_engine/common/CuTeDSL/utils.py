@@ -209,6 +209,13 @@ def pack_f32x2(lo: Float32, hi: Float32) -> Int64:
 
 
 @cute.jit
+def zero_b32_reg() -> Int32:
+    """A zero held in a register, for packed ops such as max.xorsign.abs.bf16x2 that take no
+    immediate operands: CuTeDSL would emit Int32(0) as an immediate."""
+    return cute.arch.inline_ptx("mov.b32 {$w0}, 0;", write_only_types=[Int32], read_only_args=[])
+
+
+@cute.jit
 def unpack_i64_to_i32x2(v: Int64):
     """Split a 64-bit value into (lo, hi) 32-bit halves.
 

@@ -82,15 +82,14 @@ GATED_ACTIVATIONS = {
 
 
 @cute.jit
-def derive_swizzled_scale_layout(
-    M: Int32,
-    N: Int32,
+def swizzled_scale_layouts(
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ROWWISE: cutlass.Constexpr[bool],
     COLWISE: cutlass.Constexpr[bool],
-    mS_row: Optional[cute.Tensor],
-    mS_col: Optional[cute.Tensor],
 ):
-    """Derive the swizzled layout for the rowwise and colwise scale tensors."""
+    """The GEMM-swizzled layouts of an (M, N) tensor's rowwise (M, N / 32) and colwise
+    (M / 32, N) scales, or None for a direction not requested."""
     num_scale_cols = cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE)
     num_scale_rows = cute.ceil_div(M, MXFP8_BLOCK_SCALING_SIZE)
 
@@ -99,23 +98,90 @@ def derive_swizzled_scale_layout(
     num_tiles_SR = cute.ceil_div(num_scale_rows, 4)
     num_tiles_N = cute.ceil_div(N, 128)
 
+    row_layout = col_layout = None
     if cutlass.const_expr(ROWWISE):
-        mS_row = cute.make_tensor(
-            mS_row.iterator,
-            cute.make_layout(
-                ((32, 4, num_tiles_M), (4, num_tiles_SC)),
-                stride=((16, 4, num_tiles_SC * 512), (1, 512)),
-            ),
+        row_layout = cute.make_layout(
+            ((32, 4, num_tiles_M), (4, num_tiles_SC)),
+            stride=((16, 4, num_tiles_SC * 512), (1, 512)),
         )
     if cutlass.const_expr(COLWISE):
-        mS_col = cute.make_tensor(
-            mS_col.iterator,
-            cute.make_layout(
-                ((4, num_tiles_SR), (32, 4, num_tiles_N)),
-                stride=((1, 512), (16, 4, num_tiles_SR * 512)),
-            ),
+        col_layout = cute.make_layout(
+            ((4, num_tiles_SR), (32, 4, num_tiles_N)),
+            stride=((1, 512), (16, 4, num_tiles_SR * 512)),
         )
+    return row_layout, col_layout
+
+
+@cute.jit
+def derive_swizzled_scale_layout(
+    M: Int32 | Int64,
+    N: Int32 | Int64,
+    ROWWISE: cutlass.Constexpr[bool],
+    COLWISE: cutlass.Constexpr[bool],
+    mS_row: Optional[cute.Tensor],
+    mS_col: Optional[cute.Tensor],
+):
+    """Derive the swizzled layout for the rowwise and colwise scale tensors."""
+    row_layout, col_layout = swizzled_scale_layouts(M, N, ROWWISE, COLWISE)
+    if cutlass.const_expr(ROWWISE):
+        mS_row = cute.make_tensor(mS_row.iterator, row_layout)
+    if cutlass.const_expr(COLWISE):
+        mS_col = cute.make_tensor(mS_col.iterator, col_layout)
     return mS_row, mS_col
+
+
+@cute.jit
+def derive_swizzled_scale_vectorized_tv_layout(
+    M: cutlass.Constexpr[int],
+    N: cutlass.Constexpr[int],
+    ROWWISE: cutlass.Constexpr[bool],
+    COLWISE: cutlass.Constexpr[bool],
+    num_threads: cutlass.Constexpr[int],
+    num_values: cutlass.Constexpr[int],
+):
+    """Find a TV layout such that each (t, v) pair is still mapped to the same memory offset after swizzling the scale layout.
+
+    num_threads: how many threads are mapped to this swizzled scale layout
+    num_values: how many consecutive values each thread accesses (which can be vectorized if possible)
+
+    How it works:
+    Define
+    - U as the unswizzled scale layout, taken as the identity over the flat scale bytes
+    - TV_U as the thread-value layout for unswizzled scale, (num_threads, num_values) :
+      (num_values, 1), i.e. each thread accesses num_values consecutive bytes and all values
+      are contiguous.
+    - S as the swizzled scale layout (rowwise or colwise)
+    - TV_S as the thread-value layout for swizzled scale we return.
+
+    U, S are mappings from the logical index to the physical memory offset,
+    and TV_U, TV_S are mappings from the thread index and which value
+    it accesses to the logical index used to access U and S.
+
+    In other words, for a thread t and value v, the index they are mapped to is idx = TV_U(t, v)
+    for the unswizzled scale and index = TV_S(t, v) for the swizzled scale.
+    And the physical memory offset for that index is U(idx) for the unswizzled scale and S(idx) for the swizzled scale.
+
+    We want to find a TV_S such that for each thread t, the offsets S(TV_S(t, v)) = U(TV_U(t, v))
+    for all values v that thread t accesses.
+    This is equivalent to solving the equation S ∘ TV_S = U ∘ TV_U = TV_U,
+    which is solved by TV_S = right_inverse(S) ∘ TV_U.
+
+    Therefore, you can use TV_S with the swizzled scale as if both are unswizzled, and you get to
+    preserve properties like vectorization and coalescing that TV_U has with the unswizzled scale,
+    because all pairs of (tx, vx) are still mapped to the same physical memory offsets.
+    """
+    tv_layout_for_unswizzled = cute.make_layout((num_threads, num_values), stride=(num_values, 1))
+    row_layout, col_layout = swizzled_scale_layouts(M, N, ROWWISE, COLWISE)
+    tv_row_for_swizzled = tv_col_for_swizzled = None
+    if cutlass.const_expr(ROWWISE):
+        tv_row_for_swizzled = cute.composition(
+            cute.right_inverse(row_layout), tv_layout_for_unswizzled
+        )
+    if cutlass.const_expr(COLWISE):
+        tv_col_for_swizzled = cute.composition(
+            cute.right_inverse(col_layout), tv_layout_for_unswizzled
+        )
+    return tv_row_for_swizzled, tv_col_for_swizzled
 
 
 @cute.jit
