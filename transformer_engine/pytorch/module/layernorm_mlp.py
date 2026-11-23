@@ -1690,9 +1690,7 @@ def _layernorm_mlp_backward_impl(
             fc1_bias_grad = sum_bias_grad(dact)
             dact = args.fc1_grad_output_quantizer(dact)
         elif (
-            args.fp8
-            and args.recipe_dbias_dact_fusion
-            and _act_func(args.activation)[2] is not None
+            args.fp8 and args.recipe_dbias_dact_fusion and _act_func(args.activation)[2] is not None
         ):
             # Fusion: gemm, bias + gelu + quantize
             dbias_dact_quantize_func = _act_func(args.activation)[2]
