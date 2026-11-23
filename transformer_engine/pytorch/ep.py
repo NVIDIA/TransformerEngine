@@ -1319,15 +1319,13 @@ def _quantize_float8_blockwise(
     scale_inv = quantized._rowwise_scale_inv
     if scale_inv is None or quantized._rowwise_data is None:
         raise RuntimeError("Float8BlockScaling quantization did not produce rowwise payloads.")
-    compact = scale_inv
     expected = (rows, logical_scale_cols)
-    if compact.shape != expected or compact.dtype != torch.float32:
+    if scale_inv.shape != expected or scale_inv.dtype != torch.float32:
         raise RuntimeError(
-            f"unexpected Float8BlockScaling EP scale layout {tuple(compact.shape)} "
-            f"{compact.dtype}; expected {expected} torch.float32"
+            f"unexpected Float8BlockScaling EP scale layout {tuple(scale_inv.shape)} "
+            f"{scale_inv.dtype}; expected {expected} torch.float32"
         )
-    object.__setattr__(quantized, "_ep_scale_inv", compact)
-    return quantized, compact
+    return quantized, scale_inv
 
 
 def ep_quantize_float8_blockwise_dual_scale(

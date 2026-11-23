@@ -60,7 +60,7 @@ def main():
     carrier, wire = _quantize_float8_blockwise(source, Float8BlockScaling(), columnwise=True)
     assert not hasattr(carrier, "_original_tensor")
     assert carrier._columnwise_data is not None
-    assert carrier._ep_scale_inv is wire
+    assert carrier._rowwise_scale_inv is wire
     check_columnwise(
         carrier._columnwise_data,
         carrier._columnwise_scale_inv,
