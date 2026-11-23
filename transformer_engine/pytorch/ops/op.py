@@ -74,6 +74,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
+        # A same-named subclass wraps its parent operation and shares its custom ops.
+        if any(base.__name__ == cls.__name__ for base in cls.__mro__[1:]):
+            return
         cls._register_compile_ops()
 
     @classmethod

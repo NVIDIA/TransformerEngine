@@ -3589,3 +3589,236 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
     else:
         assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
         assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0
+
+
+def _ops_normalization_reference(normalization, x, params, *, eps, zero_centered_gamma):
+    if normalization == "L2Normalization":
+        return x * torch.rsqrt(x.square().sum(-1, keepdim=True) + eps)
+    weight = params[0] + 1 if zero_centered_gamma else params[0]
+    if normalization == "RMSNorm":
+        return x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps) * weight
+    return torch.nn.functional.layer_norm(x, weight.shape, weight, params[1], eps)
+
+
+def _check_te_ops_normalization_compile(
+    normalization,
+    *,
+    dtype=torch.float32,
+    layout="contiguous",
+    zero_centered_gamma=False,
+    autocast=False,
+    training=True,
+    dynamic=False,
+):
+    if layout == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    torch._dynamo.reset()
+    eps = 1e-5
+    if normalization == "L2Normalization":
+        model = te.ops.Sequential(te.ops.L2Normalization(eps=eps))
+    else:
+        model = te.ops.Sequential(
+            getattr(te.ops, normalization)(
+                64, eps=eps, zero_centered_gamma=zero_centered_gamma, device="cuda", dtype=dtype
+            )
+        )
+    params = tuple(model.parameters())
+    with torch.no_grad():
+        for param in params:
+            param.copy_(torch.randn_like(param))
+
+    def run(x):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            return model(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    eager_reference = autocast or dynamic
+    tols = {} if eager_reference else dtype_tols(dtype)
+    for step, rows in enumerate((16, 16, 32, 48) if dynamic else (32,)):
+        shape = (rows, 64) if dynamic else (2, 16, 64)
+        x = torch.randn(shape, device="cuda", dtype=dtype)
+        if layout == "fp8":
+            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+            x = quantizer(x)
+        if layout == "strided":
+            x = x.transpose(0, 1)
+        x = x.detach().requires_grad_(training)
+        if dynamic:
+            torch._dynamo.mark_dynamic(x, 0)
+        if eager_reference:
+            ref_x = x.detach().clone().requires_grad_(training)
+            ref_params = params
+        else:
+            ref_x = (x.dequantize() if layout == "fp8" else x).detach().double()
+            ref_x.requires_grad_(training)
+            ref_params = tuple(p.detach().double().requires_grad_(training) for p in params)
+        with torch.set_grad_enabled(training):
+            if layout == "strided":
+                with pytest.raises(
+                    Exception, match="requires contiguous inputs under torch.compile"
+                ):
+                    compiled(x)
+                actual = run(x)
+            else:
+                actual = compiled(x)
+            expected = (
+                run(ref_x)
+                if eager_reference
+                else _ops_normalization_reference(
+                    normalization,
+                    ref_x,
+                    ref_params,
+                    eps=eps,
+                    zero_centered_gamma=zero_centered_gamma,
+                )
+            )
+            torch.testing.assert_close(actual.to(expected.dtype), expected, **tols)
+            if training:
+                dy = torch.randn_like(actual)
+                got = torch.autograd.grad(actual, (x, *params), dy)
+                want = torch.autograd.grad(expected, (ref_x, *ref_params), dy.to(expected.dtype))
+                for grad, reference in zip(got, want):
+                    torch.testing.assert_close(grad.to(reference.dtype), reference, **tols)
+        if autocast and normalization != "L2Normalization":
+            assert actual.dtype == torch.bfloat16
+        if dynamic:
+            if step == 1:
+                graph_count = len(graphs)
+            elif step > 1:
+                assert len(graphs) == graph_count
+    if layout != "strided":
+        _assert_custom_ops(graphs, normalization.lower(), backward=training)
+
+
+_NORMALIZATIONS = ["LayerNorm", "RMSNorm", "L2Normalization"]
+
+
+@pytest.mark.parametrize("normalization", _NORMALIZATIONS)
+def test_te_ops_normalization_compile(normalization):
+    _check_te_ops_normalization_compile(normalization, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("normalization", _NORMALIZATIONS)
+@pytest.mark.parametrize(
+    "dtype,layout,training",
+    [
+        (torch.float32, "contiguous", True),
+        (torch.float16, "contiguous", False),
+        (torch.bfloat16, "strided", True),
+        (torch.bfloat16, "fp8", True),
+    ],
+)
+def test_te_ops_normalization_variants_compile(normalization, dtype, layout, training):
+    _check_te_ops_normalization_compile(
+        normalization, dtype=dtype, layout=layout, training=training
+    )
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("autocast", [False, True])
+def test_te_ops_normalization_gamma_autocast_compile(normalization, zero_centered_gamma, autocast):
+    _check_te_ops_normalization_compile(
+        normalization, zero_centered_gamma=zero_centered_gamma, autocast=autocast
+    )
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+def test_te_ops_normalization_dynamic_compile(normalization):
+    _check_te_ops_normalization_compile(normalization, dynamic=True)
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("training", [False, True])
+def test_te_ops_normalization_mlp_compile(normalization, quantization, training, monkeypatch):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    dtype = torch.bfloat16
+    torch._dynamo.reset()
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    in_features, hidden = (128, 128) if quantization == "nvfp4" else (32, 64)
+    model = (
+        te.ops.Sequential(
+            getattr(te.ops, normalization)(in_features, device="cuda", dtype=dtype),
+            te.ops.Linear(in_features, hidden, device="cuda", dtype=dtype),
+            te.ops.GELU(),
+            te.ops.Linear(hidden, in_features, device="cuda", dtype=dtype),
+        )
+        .train(training)
+        .requires_grad_(training)
+    )
+    with torch.no_grad():
+        for param in model.parameters():
+            param.copy_(torch.randn_like(param))
+    eager_model = copy.deepcopy(model)
+    quant_recipe = {
+        None: None,
+        "fp8": recipe.Float8CurrentScaling(backward_override=None),
+        "mxfp8": recipe.MXFP8BlockScaling(),
+        "nvfp4": recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+    }[quantization]
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    eager_optimizer = torch.optim.SGD(eager_model.parameters(), lr=0.01)
+    for step in range(3 if training else 1):
+        x = torch.randn(2, 16, in_features, device="cuda", dtype=dtype, requires_grad=training)
+        eager_x = x.detach().clone().requires_grad_(training)
+        with torch.set_grad_enabled(training):
+            actual = compiled(x)
+            expected = run(eager_x, eager_model)
+        torch.testing.assert_close(actual, expected)
+        if not training:
+            continue
+        dy = torch.randn_like(actual)
+        actual.backward(dy)
+        expected.backward(dy)
+        torch.testing.assert_close(x.grad, eager_x.grad)
+        for param, reference in zip(model.parameters(), eager_model.parameters()):
+            torch.testing.assert_close(param.grad, reference.grad)
+        optimizer.step()
+        eager_optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        eager_optimizer.zero_grad(set_to_none=True)
+        if step == 1:
+            graph_count = len(graphs)
+        elif step > 1:
+            assert len(graphs) == graph_count
+    _assert_custom_ops(graphs, normalization.lower(), backward=training)
+
+
+@pytest.mark.parametrize("module", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("training", [False, True])
+def test_te_normalization_module_compile(module, training):
+    torch._dynamo.reset()
+    model = getattr(te, module)(64, zero_centered_gamma=True, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.copy_(torch.randn_like(param))
+    eager_model = copy.deepcopy(model)
+    compiled, graphs = _compile_with_graphs(model)
+    x = torch.randn(4, 16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+    eager_x = x.detach().clone().requires_grad_(training)
+    with torch.set_grad_enabled(training):
+        actual = compiled(x)
+        expected = eager_model(eager_x)
+    torch.testing.assert_close(actual, expected)
+    if training:
+        dy = torch.randn_like(actual)
+        actual.backward(dy)
+        expected.backward(dy)
+        torch.testing.assert_close(x.grad, eager_x.grad)
+        for param, reference in zip(model.parameters(), eager_model.parameters()):
+            torch.testing.assert_close(param.grad, reference.grad)
+    _assert_custom_ops(graphs, module.lower(), backward=training)
