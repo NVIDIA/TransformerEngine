@@ -6,7 +6,7 @@
 import os
 import warnings
 import weakref
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass
 from typing import Sequence, Any, Callable, Dict, Optional, Tuple, Union, List
 
 import torch
@@ -69,7 +69,7 @@ from ._common import (
     compile_unsupported_quantizer_reason,
     apply_normalization,
     check_fp8_reduce_and_update,
-    fake_workspace_valid,
+    fake_quantized_weight,
     noop_cat,
     get_output_first_dim_size,
     set_quantizer_amax_reduction_group,
@@ -1556,10 +1556,6 @@ def _layernorm_linear_forward_fake(
     # Weight pipeline -- mirror ``quantize_weight`` / ``cast_if_needed``.
     # ------------------------------------------------------
     new_weight_workspace = None
-    workspace = None  # args.weight_workspace after validation
-    weightmat = None
-    weightmat_is_storage = False
-    weightmat_aliases_weight = False
     is_weight_param_quantized = False
     if fp8_or_debug:
         is_weight_param_quantized = args.weight.is_quantized
@@ -1572,41 +1568,20 @@ def _layernorm_linear_forward_fake(
                 and not args.is_fsdp2
                 and args.backward_override is None,
             )
-
-        if args.weight.is_quantized:
-            # Primary-quantized args.weight: the impl reuses it as ``weightmat``.
-            weightmat = args.weight
-            weightmat_is_storage = True
-            weightmat_aliases_weight = True
-        else:
-            weightmat_is_storage = True
-            workspace = args.weight_workspace
-            if workspace is not None and not fake_workspace_valid(workspace, weight_quantizer):
-                # quantize_weight drops a stale workspace and builds a new one.
-                workspace = None
-            if workspace is not None:
-                # Copy, so the ``update_usage`` below stays off the input spec.
-                weightmat = dataclass_replace(workspace)
-            else:
-                weightmat = TensorSpec(
-                    shape=tuple(args.weight.shape),
-                    dtype=args.activation_dtype,
-                    quantizer=weight_quantizer,
-                    device=args.weight.device,
-                )
-                if args.cache_weight:
-                    # Persistent cache entries are wrappers, not bare storages.
-                    if weightmat.quantizer is not None:
-                        weightmat.quantizer.internal = False
-                    new_weight_workspace = weightmat
-            weightmat.update_usage(rowwise_usage=True)
+        weightmat, new_weight_workspace, wt_alias = fake_quantized_weight(
+            args.weight,
+            weight_quantizer,
+            args.weight_workspace,
+            activation_dtype=args.activation_dtype,
+            cache_weight=args.cache_weight,
+        )
     else:
-        weightmat_aliases_weight = args.weight.dtype == args.activation_dtype
         weightmat = TensorSpec(
             shape=tuple(args.weight.shape), dtype=args.activation_dtype, device=args.weight.device
         )
+        wt_alias = "weight" if args.weight.dtype == args.activation_dtype else None
 
-    # Bias cast: cuBLAS has no FP8 GEMM with FP32 args.bias.
+    # Bias cast: cuBLAS has no FP8 GEMM with FP32 bias.
     bias_dtype = args.activation_dtype
     if fp8_or_debug and args.activation_dtype == torch.float32:
         bias_dtype = torch.bfloat16
@@ -1652,7 +1627,7 @@ def _layernorm_linear_forward_fake(
 
     # ------------------------------------------------------
     # Backward state -- saved-tensor layout
-    # (inputmat, wt_save, saved_weight, args.bias, args.ln_weight, ln_out, mu, rsigma).
+    # (inputmat, wt_save, saved_weight, bias, ln_weight, ln_out, mu, rsigma).
     # ------------------------------------------------------
     tensors_to_save_from_forward = None
     ctx_attrs = None
@@ -1685,24 +1660,11 @@ def _layernorm_linear_forward_fake(
                 ln_out_alias = "ln_out"
 
         # Slot 1 -- ``wt_save``, with the impl's alias dedup.
-        wt_alias = None
-        wt_save = None
-        if weightmat_aliases_weight:
-            wt_alias = "weight"
-        elif args.is_fsdp2:
-            pass  # FSDP2 re-quantizes from the gathered args.weight in backward.
-        elif weightmat_is_storage and new_weight_workspace is not None:
-            wt_alias = "new_weight_workspace"
-        elif weightmat_is_storage and workspace is not None:
-            wt_alias = "weight_workspace"
-        elif weightmat_is_storage:
-            wt_save = weightmat
-        else:
-            wt_save = TensorSpec(
-                shape=tuple(args.weight.shape),
-                dtype=args.activation_dtype,
-                device=args.weight.device,
-            )
+        wt_save = weightmat
+        if args.is_fsdp2 and wt_alias != "weight":
+            wt_save, wt_alias = None, None
+        if wt_alias is not None:
+            wt_save = None
 
         saved_tensor_aliases = (
             "inp" if inputmat_aliases_inp else None,
@@ -2413,12 +2375,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
 
-                             Under ``torch.compile``, the FP8 weight cache is replaced on
-                             the first microbatch and reused on subsequent microbatches.
-                             ``fuse_wgrad_accumulation=True`` remains unsupported.
-                             With ``mode="reduce-overhead"``, call
+                             With ``torch.compile`` and ``mode="reduce-overhead"``, call
                              ``torch.compiler.cudagraph_mark_step_begin()`` once before
-                             each minibatch to keep the cache live across its microbatches.
+                             each minibatch to keep the cached FP8 weights valid across
+                             microbatches. Under ``torch.compile``,
+                             ``fuse_wgrad_accumulation=True`` falls back to eager execution.
         """
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -2478,6 +2439,22 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if _layernorm_linear_op is None and torch.compiler.is_compiling():
                 warn_if_compile_disabled()
             if use_compiled_op:
+                fallback_reason = self._compile_eager_fallback_reason(
+                    inp,
+                    skip_fp8_weight_update,
+                    fp8_output,
+                    fp8_grad,
+                    is_grad_enabled,
+                    debug,
+                    quantizers,
+                )
+                if fallback_reason is not None:
+                    warn_compile_eager_fallback(fallback_reason)
+                    torch._dynamo.graph_break(
+                        msg=f"te.LayerNormLinear falling back to eager: {fallback_reason}"
+                    )
+                    use_compiled_op = False
+            if use_compiled_op:
                 # Process groups cross the op boundary separately from quantizers.
                 for quantizer in (input_quantizer, grad_output_quantizer):
                     if getattr(quantizer, "amax_reduction_group", None) is not None:
@@ -2521,23 +2498,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
-            if use_compiled_op:
-                fallback_reason = self._compile_eager_fallback_reason(
-                    inp,
-                    skip_fp8_weight_update,
-                    fp8_output,
-                    fp8_grad,
-                    is_grad_enabled,
-                    debug,
-                    quantizers,
-                )
-                if fallback_reason is not None:
-                    warn_compile_eager_fallback(fallback_reason)
-                    torch._dynamo.graph_break(
-                        msg=f"te.LayerNormLinear falling back to eager: {fallback_reason}"
-                    )
-                    use_compiled_op = False
-
             wgrad_store = None if use_compiled_op else self.wgrad_store
 
             fwd_args = LayerNormLinearFwdArgs(

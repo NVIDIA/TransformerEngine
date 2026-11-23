@@ -44,6 +44,7 @@ from ..utils import (
     get_default_init_method,
     init_method_constant,
     cast_if_needed,
+    check_gemm_dims,
     clear_tensor_data,
     needs_quantized_gemm,
     get_nvtx_range_context,
@@ -109,80 +110,41 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["LayerNormMLP"]
 
 
-def _get_act_func_supported_list(
-    recipe: Optional[Recipe] = None, dbias_fusion: Optional[bool] = None
-):
-    if dbias_fusion is False or (dbias_fusion is None and recipe is None):
-        # bf16 (recipe is None):
-        return {
-            "gelu": (tex.gelu, tex.dgelu, None),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, None),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, None),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
-    if dbias_fusion is True or recipe.delayed() or recipe.mxfp8():
-        # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-        # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-        return {
-            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
-    # no activation fusion written yet
-    # Per-tensor current scaling or fp8 blockwise scaling or custom quantization: []
-    # TODO(ksivaman): Fuse nvfp4 act once kernel is available.
+_ACT_FUNCS = {
+    "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
+    "geglu": (tex.geglu, tex.dgeglu, None),
+    "glu": (tex.glu, tex.dglu, None),
+    "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+    "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+    "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+    "reglu": (tex.reglu, tex.dreglu, None),
+    "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+    "sreglu": (tex.sreglu, tex.dsreglu, None),
+    "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
+    "swiglu": (tex.swiglu, tex.dswiglu, None),
+    "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
+}
+
+
+def _recipe_supports_dbias_dact_fusion(recipe: Optional[Recipe]) -> bool:
+    if recipe is None:
+        return False
+    if recipe.delayed() or recipe.mxfp8():
+        return True
     if (
         recipe.float8_current_scaling()
         or recipe.float8_block_scaling()
         or recipe.nvfp4()
         or recipe.custom()
     ):
-        return {
-            "gelu": (tex.gelu, tex.dgelu, None),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, None),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, None),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
+        return False
     raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
 
-def _act_func(
-    activation: str, recipe: Optional[Recipe] = None, dbias_fusion: Optional[bool] = None
-):
-    # based on each quantization mode, we have different kernel fusion supported:
-    # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # Per-tensor current scaling or fp8 blockwise scaling: []
-    funcs = _get_act_func_supported_list(recipe, dbias_fusion)
-    if activation not in funcs:
+def _act_func(activation: str):
+    if activation not in _ACT_FUNCS:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
-    return funcs[activation]
+    return _ACT_FUNCS[activation]
 
 
 # Activations whose output halves the last dim (gated linear units).
@@ -564,7 +526,7 @@ def _layernorm_mlp_forward_impl(
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
 
-    activation_func = _act_func(activation, dbias_fusion=fp8 and args.recipe_dbias_dact_fusion)[0]
+    activation_func = _act_func(activation)[0]
 
     # Cast for native AMP
     inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -1728,14 +1690,12 @@ def _layernorm_mlp_backward_impl(
             fc1_bias_grad = sum_bias_grad(dact)
             dact = args.fc1_grad_output_quantizer(dact)
         elif (
-            _act_func(args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion)[2]
-            is not None
-            and args.fp8
+            args.fp8
+            and args.recipe_dbias_dact_fusion
+            and _act_func(args.activation)[2] is not None
         ):
             # Fusion: gemm, bias + gelu + quantize
-            dbias_dact_quantize_func = _act_func(
-                args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion
-            )[2]
+            dbias_dact_quantize_func = _act_func(args.activation)[2]
             fc1_bias_grad, dact = dbias_dact_quantize_func(
                 fc2_dgrad,
                 fc1_out.to(args.activation_dtype),
@@ -1745,9 +1705,7 @@ def _layernorm_mlp_backward_impl(
         else:
             # Fusion: gemm + gelu,
             if not fc2_dgrad_gemm_gelu_fusion:
-                activation_func_bwd = _act_func(
-                    args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion
-                )[1]
+                activation_func_bwd = _act_func(args.activation)[1]
                 dact = activation_func_bwd(
                     fc2_dgrad, fc1_out.to(args.activation_dtype), None, **act_params
                 )  # activation in high precision
@@ -2102,7 +2060,12 @@ def _layernorm_mlp_forward_fake(
     Optional[Dict],
 ]:
     """Shape/metadata-only twin of :func:`_layernorm_mlp_forward_impl` for
-    torch.compile (no args.activation checkpointing: that path falls back to eager)."""
+    torch.compile (no activation checkpointing: that path falls back to eager)."""
+    assert args.backward_override is None, (
+        "NVTE_BACKWARD_OVERRIDE=high_precision/dequantized is not implemented in LayerNormMLP."
+        " Replace LayerNormMLP with LayerNormLinear + Linear to enable"
+        " high_precision/dequantized backward."
+    )
     if args.fsdp_group is not None and args.is_grad_enabled:
         raise NotImplementedError(
             "Compile-time LayerNormMLP forward does not support manual TE FSDP "
@@ -2110,7 +2073,7 @@ def _layernorm_mlp_forward_fake(
         )
     if args.checkpoint and args.is_grad_enabled:
         raise NotImplementedError(
-            "Compile-time LayerNormMLP forward does not support args.activation checkpointing"
+            "Compile-time LayerNormMLP forward does not support activation checkpointing"
         )
 
     fc1_weight_quantizer = args.fc1_weight_quantizer
@@ -2237,12 +2200,14 @@ def _layernorm_mlp_forward_fake(
     fc2_bias_aliases = args.fc2_bias is not None and args.fc2_bias.dtype == bias_dtype
 
     # ------------------------------------------------------
-    # FC1 GEMM + args.activation (see the impl for the fusion rules).
+    # FC1 GEMM + activation (see the impl for the fusion rules).
     # ------------------------------------------------------
     if args.activation != "gelu":
         gemm_gelu_fusion = bias_gelu_fusion = False
     else:
-        if not args.fp8:
+        if args.fp8:
+            assert not bias_gelu_fusion, "Bias gelu fusion is supported only for full precision"
+        else:
             gemm_gelu_fusion = True
         if gemm_gelu_fusion and bias_gelu_fusion:
             gemm_gelu_fusion = False
@@ -3050,12 +3015,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
 
-                             Under ``torch.compile``, the FP8 weight cache is replaced on
-                             the first microbatch and reused on subsequent microbatches.
-                             ``fuse_wgrad_accumulation=True`` remains unsupported.
-                             With ``mode="reduce-overhead"``, call
+                             With ``torch.compile`` and ``mode="reduce-overhead"``, call
                              ``torch.compiler.cudagraph_mark_step_begin()`` once before
-                             each minibatch to keep the cache live across its microbatches.
+                             each minibatch to keep the cached FP8 weights valid across
+                             microbatches. Under ``torch.compile``,
+                             ``fuse_wgrad_accumulation=True`` falls back to eager execution.
         """
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -3134,6 +3098,21 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if _layernorm_mlp_op is None and torch.compiler.is_compiling():
                 warn_if_compile_disabled()
             if use_compiled_op:
+                fallback_reason = self._compile_eager_fallback_reason(
+                    inp,
+                    skip_fp8_weight_update,
+                    fp8_output,
+                    is_grad_enabled,
+                    debug,
+                    quantizers,
+                )
+                if fallback_reason is not None:
+                    warn_compile_eager_fallback(fallback_reason)
+                    torch._dynamo.graph_break(
+                        msg=f"te.LayerNormMLP falling back to eager: {fallback_reason}"
+                    )
+                    use_compiled_op = False
+            if use_compiled_op:
                 # Process groups cross the op boundary separately from quantizers.
                 for quantizer in (fc1_input_quantizer, fc2_grad_output_quantizer):
                     if getattr(quantizer, "amax_reduction_group", None) is not None:
@@ -3168,7 +3147,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
                 recipe_float8_block_scaling = _recipe.float8_block_scaling()
                 recipe_custom = _recipe.custom()
-                recipe_dbias_dact_fusion = _recipe.delayed() or _recipe.mxfp8()
+                recipe_dbias_dact_fusion = _recipe_supports_dbias_dact_fusion(_recipe)
             else:
                 backward_override = None
 
@@ -3188,22 +3167,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias_tensor = (
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None
             )
-            if use_compiled_op:
-                fallback_reason = self._compile_eager_fallback_reason(
-                    inp,
-                    skip_fp8_weight_update,
-                    fp8_output,
-                    is_grad_enabled,
-                    debug,
-                    quantizers,
-                )
-                if fallback_reason is not None:
-                    warn_compile_eager_fallback(fallback_reason)
-                    torch._dynamo.graph_break(
-                        msg=f"te.LayerNormMLP falling back to eager: {fallback_reason}"
-                    )
-                    use_compiled_op = False
-
             wgrad_store = None if use_compiled_op else self.wgrad_store
 
             fwd_args = LayerNormMLPFwdArgs(
@@ -3304,6 +3267,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
 
             if use_compiled_op:
+                check_gemm_dims(inp, fc1_weight)
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_op(fwd_args)
             else:
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_eager(
