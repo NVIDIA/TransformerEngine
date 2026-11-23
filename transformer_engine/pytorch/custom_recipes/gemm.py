@@ -28,8 +28,6 @@ class MMParams:
     """Matrix multiplication parameters."""
 
     out_dtype: torch.dtype | None = None
-    # Use split accumulator for more accurate FP8 GEMM
-    use_split_accumulator: bool = True
 
 
 def _restore_activation_shape(
@@ -66,7 +64,6 @@ def custom_gemm(
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
     bias: Optional[torch.Tensor] = None,
-    use_split_accumulator: bool = False,
     grad: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
     """Dispatch GEMM to quantizer's qgemm method."""
@@ -98,10 +95,7 @@ def custom_gemm(
         raise ValueError("No quantizer found in QuantizedTensor objects")
 
     # Create MMParams
-    m_params = MMParams(
-        out_dtype=out_dtype,
-        use_split_accumulator=use_split_accumulator,
-    )
+    m_params = MMParams(out_dtype=out_dtype)
     out_dtype = A.dtype if m_params.out_dtype is None else m_params.out_dtype
 
     if gemm_type == GEMMType.FPROP:

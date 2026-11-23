@@ -54,7 +54,6 @@ struct GemmConfig {
   int64_t rhs_axis_boundary;
   bool lhs_transposed;
   bool rhs_transposed;
-  bool use_split_accumulator;
 };
 
 struct GroupedGemmV2Config {
@@ -264,8 +263,7 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
     ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
     ::xla::ffi::StructMember<bool>("lhs_transposed"),
-    ::xla::ffi::StructMember<bool>("rhs_transposed"),
-    ::xla::ffi::StructMember<bool>("use_split_accumulator"));
+    ::xla::ffi::StructMember<bool>("rhs_transposed"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::GroupedGemmV2Config, ::xla::ffi::StructMember<bool>("lhs_is_trans"),

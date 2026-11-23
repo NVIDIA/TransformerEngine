@@ -379,7 +379,7 @@ def _test_linear(
         )
     if te.module.base.using_cublasmp_backend() and not quantized_compute:
         # cuBLASMp's GEMM+RS kernel runs a slightly different GEMM algo than Userbuffers
-        # (e.g. split-accumulator is always enabled) so it very narrowly violates the default
+        # so it very narrowly violates the default
         # bf16 rtol. This is not a regression, just a quirk of how the algorithms line up at the
         # precision floor. So we relax rtol only (atol stays same) to allow for this without
         # masking real regressions.

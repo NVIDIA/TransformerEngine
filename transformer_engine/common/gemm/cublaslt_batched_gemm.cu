@@ -284,8 +284,6 @@ void strided_batched_gemm(const BatchedMatrix &A, cublasOperation_t transa, cons
   }
   if (use_mxfp8) {
 #if CUBLAS_VERSION >= 120800
-    const int8_t fast_accum_mode = config_.use_split_accumulator ? 0 : 1;
-    set_matmul_attr(CUBLASLT_MATMUL_DESC_FAST_ACCUM, fast_accum_mode);
     const void *A_scale_inv = A.scale_inv->dptr;
     const void *B_scale_inv = B.scale_inv->dptr;
     set_matmul_attr(CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, A_scale_inv);

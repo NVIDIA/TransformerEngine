@@ -29,7 +29,6 @@ from ...distributed_weight import (
     finalize_weight_grads,
     weight_grad_dtype,
 )
-from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe, get_fp8_torch_dtype
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
@@ -601,7 +600,6 @@ def _single_group_wgrad_gemm(
         out=out,
         layout="NT",
         accumulate=accumulate,
-        use_split_accumulator=_2X_ACC_WGRAD,
     )
 
 
@@ -634,7 +632,6 @@ def _single_group_fc2_gemm(
         out_dtype=dtype,
         out=out,
         layout="TN",
-        use_split_accumulator=False,
     )
 
     if bias is not None:
@@ -955,7 +952,6 @@ def _compute_grad_params(
                 general_grouped_gemm_for_grouped_tensor,
                 layout="NT",
                 accumulate=accumulate_into_main_grad,
-                use_split_accumulator=_2X_ACC_WGRAD,
             )
 
         if delay_wgrad:

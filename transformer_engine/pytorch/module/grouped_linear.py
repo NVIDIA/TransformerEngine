@@ -26,9 +26,6 @@ from .base import (
     get_dummy_wgrad,
     quantize_weight,
     TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
     _attach_high_precision_init_val,
     _clear_high_precision_init_val,
     _get_high_precision_init_val,
@@ -421,9 +418,6 @@ def _grouped_linear_forward_impl(
     )
 
     # Perform GEMM
-    fprop_use_split_accumulator = _2X_ACC_FPROP
-    if fp8 and hasattr(args.fp8_recipe, "fp8_gemm_fprop"):
-        fprop_use_split_accumulator = args.fp8_recipe.fp8_gemm_fprop.use_split_accumulator
     general_grouped_gemm(
         weights_fp8,
         inputmats,
@@ -434,7 +428,6 @@ def _grouped_linear_forward_impl(
         m_splits=m_splits,
         bias=biases,
         use_bias=use_bias,
-        use_split_accumulator=fprop_use_split_accumulator,
     )
 
     if args.fp8_calibration:
@@ -646,9 +639,6 @@ def _grouped_linear_backward_impl(
         weights = materialize_weight_for_backward(origin_weights)
 
     if args.requires_dgrad:
-        dgrad_use_split_accumulator = _2X_ACC_DGRAD
-        if (args.fp8 or args.debug) and hasattr(args.fp8_recipe, "fp8_gemm_dgrad"):
-            dgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_dgrad.use_split_accumulator
         dgrad = _GroupedLinear._validate_or_alloc_output(
             args.dgrad_out,
             sum(m_splits),
@@ -690,7 +680,6 @@ def _grouped_linear_backward_impl(
             layout="NN",
             m_splits=m_splits,
             grad=True,
-            use_split_accumulator=dgrad_use_split_accumulator,
         )
 
     if args.weights_requires_grad:
@@ -698,9 +687,6 @@ def _grouped_linear_backward_impl(
             raise RuntimeError(
                 "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
             )
-        wgrad_use_split_accumulator = _2X_ACC_WGRAD
-        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_wgrad"):
-            wgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_wgrad.use_split_accumulator
         if args.fuse_wgrad_accumulation:
             wgrad_list = main_grads
         else:
@@ -752,7 +738,6 @@ def _grouped_linear_backward_impl(
             # including when delayed wgrad no longer owns bias accumulation.
             use_bias=args.use_bias and not (args.fp8 or args.debug),
             bias=biases,
-            use_split_accumulator=wgrad_use_split_accumulator,
             accumulate=(
                 accumulate_wgrad_into_param_main_grad
                 if not is_dist_weight and not args.origin_weights_overwrite_main_grad
@@ -960,16 +945,12 @@ def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any,
             dtype=activation_dtype,
         )
 
-    fprop_use_split_accumulator = _2X_ACC_FPROP
-    if fp8 and hasattr(args.fp8_recipe, "fp8_gemm_fprop"):
-        fprop_use_split_accumulator = args.fp8_recipe.fp8_gemm_fprop.use_split_accumulator
     general_grouped_gemm_for_grouped_tensor(
         weights_for_gemm,
         grouped_x,
         grouped_out,
         layout="TN",
         bias=grouped_bias,
-        use_split_accumulator=fprop_use_split_accumulator,
     )
 
     tensors_to_save = None
@@ -1179,9 +1160,6 @@ def _grouped_linear_graph_safe_backward(
 
     dgrad = None
     if args.requires_dgrad:
-        dgrad_use_split_accumulator = _2X_ACC_DGRAD
-        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_dgrad"):
-            dgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_dgrad.use_split_accumulator
         for weight in weight_tensors:
             if isinstance(weight, QuantizedTensorStorage):
                 weight.update_usage(columnwise_usage=True)
@@ -1205,7 +1183,6 @@ def _grouped_linear_graph_safe_backward(
             grouped_dy,
             grouped_dgrad,
             layout="NN",
-            use_split_accumulator=dgrad_use_split_accumulator,
         )
 
     if is_dist_weight:
@@ -1226,9 +1203,6 @@ def _grouped_linear_graph_safe_backward(
             raise RuntimeError(
                 "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
             )
-        wgrad_use_split_accumulator = _2X_ACC_WGRAD
-        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_wgrad"):
-            wgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_wgrad.use_split_accumulator
         if args.fuse_wgrad_accumulation:
             if args.single_grouped_weight:
                 main_grad = main_grads[0]
@@ -1280,7 +1254,6 @@ def _grouped_linear_graph_safe_backward(
                 grad_output_mats,
                 grad_weights,
                 layout="NT",
-                use_split_accumulator=wgrad_use_split_accumulator,
                 accumulate=accumulate,
             )
             return None, (), None

@@ -84,9 +84,6 @@ __all__ = [
     "UserBufferQuantizationMode",
 ]
 
-_2X_ACC_FPROP = False
-_2X_ACC_DGRAD = True
-_2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False

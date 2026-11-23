@@ -1789,7 +1789,6 @@ def _run_fp8bs_grouped_gemm(
         grad=layout != "TN",
         accumulate=accumulate,
         layout=layout,
-        use_split_accumulator=True,
         single_output=False,
     )
 
@@ -1965,9 +1964,7 @@ def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layou
                 last_dim=out_last_dim,
                 dtype=dtype,
             )
-        general_grouped_gemm_for_grouped_tensor(
-            grouped_a, grouped_b, grouped_out, layout=layout, use_split_accumulator=True
-        )
+        general_grouped_gemm_for_grouped_tensor(grouped_a, grouped_b, grouped_out, layout=layout)
         return grouped_a, grouped_b, grouped_out
 
     def _prepare(splits):
@@ -2000,7 +1997,6 @@ def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layou
             m_splits=splits,
             grad=layout != "TN",
             layout=layout,
-            use_split_accumulator=True,
             single_output=False,
         )
         for e in experts:

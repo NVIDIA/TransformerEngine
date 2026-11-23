@@ -176,13 +176,11 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
       if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
         executor->split_overlap_ag(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
                                    bias_, pre_gelu_out_, dummy, false /*grad*/,
-                                   false /*accumulate*/, false /*use_split_accumulator*/, dummy,
-                                   prepare_stream);
+                                   false /*accumulate*/, dummy, prepare_stream);
       } else if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
         executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
                                    bias_, pre_gelu_out_, dummy, false /*grad*/,
-                                   false /*accumulate*/, false /*use_split_accumulator*/, dummy,
-                                   prepare_stream);
+                                   false /*accumulate*/, dummy, prepare_stream);
       }
       NVTE_CHECK_CUDA(cudaStreamSynchronize(prepare_stream));
     }
@@ -212,7 +210,7 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                                  int64_t rhs_axis_boundary, bool lhs_transposed,
                                  bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                                 bool use_split_accumulator, JAXX_Collective_Op collective_op) {
+                                 JAXX_Collective_Op collective_op) {
   static std::once_flag gemm_init_warned;
   std::call_once(gemm_init_warned, []() {
     std::cerr << "[CollectiveGemmInitFFI] Deprecation: This API is deprecated and will be removed "
@@ -221,7 +219,7 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
   });
   return GemmInitV2FFI(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
                        GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary,
-                                  lhs_transposed, rhs_transposed, use_split_accumulator});
+                                  lhs_transposed, rhs_transposed});
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
@@ -246,7 +244,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_bias")
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
-                                  .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op")
 #ifndef NVTE_WITH_CUBLASMP
                               // enable CUDA graphs only when cuBLASMp is NOT enabled
@@ -323,7 +320,6 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
 
   // Construct GEMM config
   transformer_engine::MatmulConfigWrapper matmul_config;
-  matmul_config.set_use_split_accumulator(config.use_split_accumulator);
   matmul_config.set_sm_count(num_math_sm);
   matmul_config.set_alpha_beta_on_device(is_nvfp4_scaling(config.scaling_mode));
   if (fuse_bias) matmul_config.set_bias_tensor(bias_.data());
@@ -373,15 +369,13 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
         auto rs_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
         executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, out_,
                                    bias_, pre_gelu_, workspace_, false /*grad*/,
-                                   false /*accumulate*/, config.use_split_accumulator, rs_out_,
-                                   stream);
+                                   false /*accumulate*/, rs_out_, stream);
       } else {
         // Userbuffers writes the full GEMM result into ubuf, then reduce-scatters into rs_output
         auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
         executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed,
                                    ubuf_out_, bias_, pre_gelu_, workspace_, false /*grad*/,
-                                   false /*accumulate*/, config.use_split_accumulator, out_,
-                                   stream);
+                                   false /*accumulate*/, out_, stream);
       }
 
     } else if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
@@ -397,7 +391,7 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, out_,
                                  bias_, pre_gelu_, workspace_, false /*grad*/, false /*accumulate*/,
-                                 config.use_split_accumulator, aux_out_, stream);
+                                 aux_out_, stream);
     }
   }
 
@@ -425,7 +419,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Result_Type pre_gelu_out, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                   bool use_split_accumulator, JAXX_Collective_Op collective_op) {
+                   JAXX_Collective_Op collective_op) {
   static std::once_flag once_fuse_bias;
   static std::once_flag once_fuse_gelu_grad;
   static std::once_flag once_api;
@@ -451,7 +445,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   return GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output,
                    workspace,
                    GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary,
-                              lhs_transposed, rhs_transposed, use_split_accumulator});
+                              lhs_transposed, rhs_transposed});
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
@@ -477,7 +471,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_bias")
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
-                                  .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
@@ -1240,7 +1233,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   bool grad = false;
   bool accumulate = false;
-  bool use_split_accumulator = false;
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
 
@@ -1423,8 +1415,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   nvte_multi_tensor_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
                          pre_gelu_list.data(), num_non_empty_gemms, rhs_is_trans, lhs_is_trans,
-                         grad, workspace_list.data(), accumulate, use_split_accumulator,
-                         num_math_sm, stream);
+                         grad, workspace_list.data(), accumulate, num_math_sm, stream);
 
   return ffi_with_cuda_error_check();
 }

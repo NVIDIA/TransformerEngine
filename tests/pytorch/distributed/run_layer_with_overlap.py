@@ -29,7 +29,6 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Format,
-    MMParams,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
 )
@@ -577,11 +576,6 @@ def _train(opts):
         fp8_recipe = MXFP8BlockScaling()
     elif opts.quantization == "nvfp4":
         fp8_recipe = NVFP4BlockScaling()
-
-    if opts.fp8:
-        fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
-        fp8_recipe.fp8_gemm_dgrad = MMParams(use_split_accumulator=True)
-        fp8_recipe.fp8_gemm_wgrad = MMParams(use_split_accumulator=True)
 
     layer_contexts = [
         (

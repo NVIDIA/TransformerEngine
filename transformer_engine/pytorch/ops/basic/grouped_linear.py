@@ -21,11 +21,6 @@ from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
-from ...module.base import (
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole
 from ...quantized_tensor import QuantizedTensorStorage
@@ -1373,7 +1368,6 @@ class GroupedLinear(BasicOperation):
             m_splits=split_sizes_int,
             bias=bs if use_gemm_bias else None,
             use_bias=use_gemm_bias,
-            use_split_accumulator=_2X_ACC_FPROP,
             single_output=True,
         )
 
@@ -1554,7 +1548,6 @@ class GroupedLinear(BasicOperation):
             grouped_x,
             grouped_out,
             layout="TN",
-            use_split_accumulator=_2X_ACC_FPROP,
             bias=grouped_bias,
             bias_scale=bias_scale,
         )
@@ -1739,7 +1732,6 @@ class GroupedLinear(BasicOperation):
                 ctx.dtype,
                 layout="NN",
                 m_splits=split_sizes_int,
-                use_split_accumulator=_2X_ACC_DGRAD,
                 single_output=True,
             )
 
@@ -1757,7 +1749,6 @@ class GroupedLinear(BasicOperation):
                     out_dtype=ctx.dtype,
                     layout="NT",
                     m_splits=split_sizes_int,
-                    use_split_accumulator=_2X_ACC_WGRAD,
                     accumulate=accumulate_into_main_grad,
                 )
                 self.wgrad_store.put([xs, dys, grad_weights], grouped_gemm_wgrad)
@@ -1770,7 +1761,6 @@ class GroupedLinear(BasicOperation):
                     ctx.dtype,
                     layout="NT",
                     m_splits=split_sizes_int,
-                    use_split_accumulator=_2X_ACC_WGRAD,
                     accumulate=accumulate_into_main_grad,
                 )
 
@@ -1962,7 +1952,6 @@ class GroupedLinear(BasicOperation):
                 grouped_dy,
                 grouped_grad_input,
                 layout="NN",
-                use_split_accumulator=_2X_ACC_DGRAD,
             )
 
         # params init for wgrad GEMM
@@ -2030,7 +2019,6 @@ class GroupedLinear(BasicOperation):
                 general_grouped_gemm_for_grouped_tensor,
                 layout="NT",
                 accumulate=accumulate_into_main_grad,
-                use_split_accumulator=_2X_ACC_WGRAD,
             )
             if delay_wgrad:
                 self.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], wgrad_gemm)

@@ -334,7 +334,6 @@ def benchmark_fp8_current_prequantized(
                 ws,
                 ws_size,
                 False,
-                False,
             )
 
         for _ in range(num_warmup):
@@ -368,7 +367,6 @@ def benchmark_fp8_current_prequantized(
                     False,
                     ws,
                     ws_size,
-                    False,
                     False,
                 )
 
@@ -512,7 +510,6 @@ def benchmark_fp8_prequantized(
                 ws,
                 ws_size,
                 False,
-                False,
             )
 
         for _ in range(num_warmup):
@@ -546,7 +543,6 @@ def benchmark_fp8_prequantized(
                     False,
                     ws,
                     ws_size,
-                    False,
                     False,
                 )
 
@@ -649,7 +645,6 @@ def benchmark_fp8_block_prequantized(
                 ws,
                 ws_size,
                 False,
-                False,
             )
 
         for _ in range(num_warmup):
@@ -683,7 +678,6 @@ def benchmark_fp8_block_prequantized(
                     False,
                     ws,
                     ws_size,
-                    False,
                     False,
                 )
 
@@ -784,7 +778,6 @@ def benchmark_fp4_prequantized(
                 ws,
                 ws_size,
                 False,
-                False,
             )
 
         for _ in range(num_warmup):
@@ -818,7 +811,6 @@ def benchmark_fp4_prequantized(
                     False,
                     ws,
                     ws_size,
-                    False,
                     False,
                 )
 

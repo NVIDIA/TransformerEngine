@@ -450,7 +450,6 @@ inline void validate_grouped_gemm_scaling_modes(NVTEScalingMode a_mode, NVTEScal
 }
 
 struct GroupedGemmConfig {
-  bool use_split_accumulator = false;
   bool use_fp8 = false;
   bool use_per_group_alpha_beta = false;
   void *alpha_dptr = nullptr;
@@ -871,8 +870,7 @@ inline void init_matrix_layouts(
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
-                             cublasOperation_t op_B, bool use_fp8, bool use_split_accumulator,
-                             bool use_per_group_alpha_beta) {
+                             cublasOperation_t op_B, bool use_per_group_alpha_beta) {
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescInit(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_A,
@@ -893,11 +891,6 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
                                                      CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                      &alphabeta_batch_stride, sizeof(int64_t)));
   }
-
-  // Fast accumulation is only supported for FP8 (mirrors non-grouped GEMM logic).
-  int8_t fastAccuMode = use_split_accumulator ? 0 : static_cast<int8_t>(use_fp8);
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
-                                                   &fastAccuMode, sizeof(fastAccuMode)));
 }
 
 // Configures cuBLAS for MXFP8 grouped GEMM: sets VEC32_UE8M0 scale mode and scale pointers
@@ -1132,8 +1125,7 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                       num_tensors);
 
   cublasLtMatmulDescOpaque_t matmulDesc;
-  init_matmul_desc(matmulDesc, op_A, op_B, config.use_fp8, config.use_split_accumulator,
-                   config.use_per_group_alpha_beta);
+  init_matmul_desc(matmulDesc, op_A, op_B, config.use_per_group_alpha_beta);
   if (transformer_engine::is_mxfp_scaling(A_sel.scaling_mode)) {
     set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                              setup_workspace.b_scale_inv_ptrs);
@@ -1752,7 +1744,6 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // K dimension: if transa, K is A's last dim; if not, K is A's first dim
   // Use original inputA and transa for heuristics (not modified A_sel.trans)
   GroupedGemmConfig gemm_config;
-  gemm_config.use_split_accumulator = config_.use_split_accumulator;
   gemm_config.use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
@@ -1902,7 +1893,6 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                             /*a_is_discrete=*/true, nullptr, inputC->dtype(), outputD->dtype());
 
   GroupedGemmConfig gemm_config;
-  gemm_config.use_split_accumulator = config_.use_split_accumulator;
   gemm_config.use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
@@ -1981,7 +1971,6 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                             /*a_is_discrete=*/false, A_sel.dptr, d_dtype, d_dtype);
 
   GroupedGemmConfig gemm_config;
-  gemm_config.use_split_accumulator = config_.use_split_accumulator;
   gemm_config.use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;

@@ -33,7 +33,6 @@ def cublas_gemm_fp8_blockwise_case(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
     *,
@@ -141,7 +140,6 @@ def cublas_gemm_fp8_blockwise_case(
         bias=bias,
         out=out.clone() if accumulate else None,
         accumulate=accumulate,
-        use_split_accumulator=use_split_accumulator,
     )
 
     # Allocate cuBLAS workspace
@@ -175,7 +173,6 @@ def cublas_gemm_fp8_blockwise_case(
         workspace,
         workspace.shape[0],
         accumulate,
-        use_split_accumulator,
     )[0]
 
     # just in case of accumulation, make sure y_ref and y are not the same tensor
@@ -214,7 +211,6 @@ def cublas_gemm_test_constraint_enforced(
     K,
     N,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
     *,
@@ -312,7 +308,6 @@ def cublas_gemm_test_constraint_enforced(
             workspace,
             workspace.shape[0],
             accumulate,
-            use_split_accumulator,
         )
 
 
@@ -338,7 +333,6 @@ def cublas_gemm_test_constraint_enforced(
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [False], ids=["no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -359,7 +353,6 @@ def test_cublas_gemm_fp8_blockwise_shape_varying(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ):
@@ -374,7 +367,6 @@ def test_cublas_gemm_fp8_blockwise_shape_varying(
         x_magnitude,
         w_magnitude,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
     )
@@ -394,7 +386,6 @@ def test_cublas_gemm_fp8_blockwise_shape_varying(
 @pytest.mark.parametrize("x_magnitude", [1e-28, 1, 1e3], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -415,7 +406,6 @@ def test_cublas_gemm_fp8_blockwise_accumulate_magnitude_varying(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ):
@@ -430,7 +420,6 @@ def test_cublas_gemm_fp8_blockwise_accumulate_magnitude_varying(
         x_magnitude,
         w_magnitude,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
     )
@@ -454,7 +443,6 @@ def test_cublas_gemm_fp8_blockwise_accumulate_magnitude_varying(
 @pytest.mark.parametrize("x_magnitude", [1e-3], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -475,7 +463,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ):
@@ -490,7 +477,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
         x_magnitude,
         w_magnitude,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         use_bias=True,
@@ -516,7 +502,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -546,7 +531,6 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
     is_x_columnwise,
@@ -563,7 +547,6 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
         x_magnitude,
         w_magnitude,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         x_columnwise=is_x_columnwise,
@@ -589,7 +572,6 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -617,7 +599,6 @@ def test_cublas_gemm_fp8_gelu(
     x_magnitude,
     w_magnitude,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
     use_grad,
@@ -639,7 +620,6 @@ def test_cublas_gemm_fp8_gelu(
         x_magnitude,
         w_magnitude,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         use_gelu=True,
@@ -658,54 +638,6 @@ def test_cublas_gemm_fp8_gelu(
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [False], ids=["split_acc"])
-@pytest.mark.parametrize(
-    "is_x_1d_scaled, is_w_1d_scaled",
-    [
-        (True, False),
-        (True, True),
-        (False, True),
-    ],
-    ids=["1Dx2D", "1Dx1D", "2Dx1D"],
-)
-def test_split_accumulator_enforced(
-    x_dtype,
-    w_dtype,
-    out_dtype,
-    M,
-    K,
-    N,
-    accumulate,
-    use_split_accumulator,
-    is_x_1d_scaled,
-    is_w_1d_scaled,
-) -> None:
-    cublas_gemm_test_constraint_enforced(
-        x_dtype,
-        w_dtype,
-        out_dtype,
-        M,
-        K,
-        N,
-        accumulate,
-        use_split_accumulator,
-        is_x_1d_scaled,
-        is_w_1d_scaled,
-    )
-
-
-@pytest.mark.parametrize(
-    "M, K, N",
-    [
-        # k = 128
-        (256, 128, 256),
-    ],
-)
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
-@pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -723,7 +655,6 @@ def test_bgrad_not_supported(
     K,
     N,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
@@ -736,7 +667,6 @@ def test_bgrad_not_supported(
         K,
         N,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         use_grad=True,
@@ -758,7 +688,6 @@ def test_bgrad_not_supported(
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_bias", [True, False], ids=["bias", "no_bias"])
 @pytest.mark.parametrize("use_grad", [True, False], ids=["grad", "no_grad"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -778,7 +707,6 @@ def test_gelu_unsupported_cases_error(
     accumulate,
     use_bias,
     use_grad,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
@@ -796,7 +724,6 @@ def test_gelu_unsupported_cases_error(
         K,
         N,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         use_grad=use_grad,
@@ -816,7 +743,6 @@ def test_gelu_unsupported_cases_error(
 @pytest.mark.parametrize("w_dtype", [torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -834,7 +760,6 @@ def test_illegal_dtype_enforced(
     K,
     N,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
@@ -847,7 +772,6 @@ def test_illegal_dtype_enforced(
         K,
         N,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
     )
@@ -863,7 +787,6 @@ def test_illegal_dtype_enforced(
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -879,7 +802,6 @@ def test_illegal_2D_by_2D_enforced(
     K,
     N,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
@@ -893,7 +815,6 @@ def test_illegal_2D_by_2D_enforced(
         K,
         N,
         accumulate,
-        use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
         expected_err_msg=expected_err_msg,
@@ -916,7 +837,6 @@ def test_illegal_2D_by_2D_enforced(
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("accumulate", [False], ids=["no_accumulate"])
-@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
     [
@@ -936,7 +856,6 @@ def test_unaligned_shapes(
     legalX1d,
     legalX2d,
     accumulate,
-    use_split_accumulator,
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
@@ -950,7 +869,6 @@ def test_unaligned_shapes(
             K,
             N,
             accumulate,
-            use_split_accumulator,
             is_x_1d_scaled,
             is_w_1d_scaled,
             expected_err_msg="requires (leading dimension|[mn]) .*divisible",
@@ -967,7 +885,6 @@ def test_unaligned_shapes(
             1.0,  # x_magnitude
             1.0,  # w_magnitude
             accumulate,
-            use_split_accumulator,
             is_x_1d_scaled,
             is_w_1d_scaled,
         )

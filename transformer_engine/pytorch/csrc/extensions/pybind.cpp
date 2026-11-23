@@ -267,16 +267,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
-        py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
-        py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
-        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
-        py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+        py::arg("workspace_size"), py::arg("accumulate"), py::arg("comm_overlap") = nullptr,
+        py::arg("comm_type") = std::nullopt, py::arg("extra_output") = std::nullopt,
+        py::arg("bulk_overlap") = false, py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   m.def("strided_batched_gemm", transformer_engine::pytorch::strided_batched_gemm,
         "Compute experimental strided batched GEMM", py::arg("A"), py::arg("transA"),
         py::arg("batch_dim_A"), py::arg("B"), py::arg("transB"), py::arg("batch_dim_B"),
         py::arg("D"), py::arg("batch_dim_D"), py::arg("workspace"), py::arg("accumulate"),
-        py::arg("use_split_accumulator"), py::arg("math_sm_count"), py::arg("alpha") = 1.0f,
-        py::arg("beta") = std::nullopt);
+        py::arg("math_sm_count"), py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
         py::arg("quantizer"));

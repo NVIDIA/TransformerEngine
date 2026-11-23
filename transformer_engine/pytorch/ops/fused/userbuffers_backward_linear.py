@@ -15,8 +15,6 @@ from transformer_engine.pytorch.device import te_device_type
 from ...cpp_extensions import general_gemm
 from ...distributed import gather_along_first_dim, get_distributed_world_size
 from ...module.base import (
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
     get_ub,
@@ -428,7 +426,6 @@ class UserbuffersBackwardLinear(FusedOperation):
                 quantization_params=grad_input_quantizer,
                 layout="NN",
                 out=dx,
-                use_split_accumulator=_2X_ACC_DGRAD,
                 grad=True,
                 ub=ub_comm_dgrad,
                 ub_type=ub_type_dgrad,
@@ -551,7 +548,6 @@ class UserbuffersBackwardLinear(FusedOperation):
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
                 out=dw,
-                use_split_accumulator=_2X_ACC_WGRAD,
                 grad=True,
                 ub=ub_comm_wgrad,
                 ub_type=ub_type_wgrad,

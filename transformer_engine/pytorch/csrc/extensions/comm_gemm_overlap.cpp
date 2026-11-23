@@ -282,23 +282,23 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (comm_type == te::CommOverlapType::AG) {
     if (core->is_atomic_gemm()) {
-      core->atomic_gemm_overlap_ag(
-          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
-          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+      core->atomic_gemm_overlap_ag(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                                   pre_gelu_tw, dummy,
+                                   /*grad=*/false, /*accumulate=*/false, dummy, stream);
     } else {
-      core->split_overlap_ag(
-          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
-          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+      core->split_overlap_ag(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                             pre_gelu_tw, dummy,
+                             /*grad=*/false, /*accumulate=*/false, dummy, stream);
     }
   } else {
     if (core->is_atomic_gemm()) {
-      core->atomic_gemm_overlap_rs(
-          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
-          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+      core->atomic_gemm_overlap_rs(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                                   pre_gelu_tw, dummy,
+                                   /*grad=*/false, /*accumulate=*/false, dummy, stream);
     } else {
-      core->split_overlap_rs(
-          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
-          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+      core->split_overlap_rs(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                             pre_gelu_tw, dummy,
+                             /*grad=*/false, /*accumulate=*/false, dummy, stream);
     }
   }
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));

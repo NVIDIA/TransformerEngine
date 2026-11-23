@@ -61,9 +61,6 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
     case kNVTEMatmulConfigEpilogueAuxTensor:
       std::memcpy(buf, &config_.epilogue_aux_tensor, attr_size);
       break;
-    case kNVTEMatmulConfigUseSplitAccumulator:
-      bool_to_uint8(config_.use_split_accumulator, buf);
-      break;
     case kNVTEMatmulConfigSMCount:
       *reinterpret_cast<int32_t *>(buf) = static_cast<int32_t>(config_.sm_count);
       break;
@@ -112,9 +109,6 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
       break;
     case kNVTEMatmulConfigEpilogueAuxTensor:
       std::memcpy(&config_.epilogue_aux_tensor, buf, attr_size);
-      break;
-    case kNVTEMatmulConfigUseSplitAccumulator:
-      uint8_to_bool(buf, config_.use_split_accumulator);
       break;
     case kNVTEMatmulConfigSMCount:
       config_.sm_count = static_cast<int>(*reinterpret_cast<const int32_t *>(buf));
@@ -184,9 +178,6 @@ void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
       std::memcpy(buf, &val, attr_size);
       break;
     }
-    case kNVTEGroupedMatmulConfigUseSplitAccumulator:
-      bool_to_uint8(config_.use_split_accumulator, buf);
-      break;
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(buf, &config_.sm_count, attr_size);
       break;
@@ -237,9 +228,6 @@ void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
       config_.avg_k = val;
       break;
     }
-    case kNVTEGroupedMatmulConfigUseSplitAccumulator:
-      uint8_to_bool(buf, config_.use_split_accumulator);
-      break;
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(&config_.sm_count, buf, attr_size);
       break;

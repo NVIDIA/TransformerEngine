@@ -300,16 +300,15 @@ def test_fused_mla_q_uproj_autograd() -> None:
     gy = gy_quantizer(dq2d)
 
     w.update_usage(rowwise_usage=True, columnwise_usage=True)
-    grad_ln_out_ref = _fused_general_gemm(
-        w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
-    )[0]
+    grad_ln_out_ref = _fused_general_gemm(w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16)[
+        0
+    ]
     grad_w_ref = _fused_general_gemm(
         x_saved,
         gy,
         layout="NT",
         grad=True,
         out_dtype=torch.bfloat16,
-        use_split_accumulator=True,
     )[0]
     grad_x_ref, grad_gamma_ref = tex.rmsnorm_bwd(
         grad_ln_out_ref.reshape(x2d.shape),

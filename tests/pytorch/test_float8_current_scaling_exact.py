@@ -841,7 +841,7 @@ class TestFP8CurrentScalingNativeVsRef:
         sw = qw_native._scale_inv
 
         # Reference GEMM
-        m_params = MMParams(out_dtype=out_dtype, use_split_accumulator=False)
+        m_params = MMParams(out_dtype=out_dtype)
         y_ref = ref_quant.qgemm(
             qx=qx_data,
             qw=qw_data,
@@ -875,7 +875,6 @@ class TestFP8CurrentScalingNativeVsRef:
             torch.empty(0, dtype=torch.uint8, device=device),
             0,
             accumulate,
-            False,  # use_split_accumulator
         )[0]
 
         torch.testing.assert_close(y_native, y_ref, atol=0.0, rtol=0.0)

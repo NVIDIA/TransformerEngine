@@ -236,7 +236,6 @@ def general_gemm(
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    use_split_accumulator: bool = False,
     grad: bool = False,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     ub_type: tex.CommOverlapType = None,
@@ -291,7 +290,6 @@ def general_gemm(
             layout,
             out,
             bias,
-            use_split_accumulator,
             grad,
         )
 
@@ -299,10 +297,6 @@ def general_gemm(
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
-
-    if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
-        # FP8 block-scaling requires split accumulator
-        use_split_accumulator = True
 
     args = (
         A,
@@ -320,7 +314,6 @@ def general_gemm(
         workspace,
         workspace.shape[0],
         accumulate,
-        use_split_accumulator,
     )
     kwargs = {
         "comm_overlap": ub,
@@ -421,7 +414,6 @@ def strided_batched_gemm(
     batch_dim_out: int = 0,
     layout: str = "TN",
     accumulate: bool = False,
-    use_split_accumulator: bool = False,
     alpha: float = 1.0,
     beta: Optional[float] = None,
 ) -> torch.Tensor:
@@ -492,7 +484,6 @@ def strided_batched_gemm(
         batch_dim_out,
         workspace,
         accumulate,
-        use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
         alpha,
         beta,
@@ -512,7 +503,6 @@ def general_grouped_gemm(
     accumulate: bool = False,
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
-    use_split_accumulator: bool = False,
     D_dtype: Optional[DType] = None,
     single_output=False,
 ) -> Tuple[List[torch.Tensor], ...]:
@@ -579,7 +569,6 @@ def general_grouped_gemm(
                 out=out_views[i],
                 gelu=gelu,
                 bias=bias[i] if use_bias else None,
-                use_split_accumulator=use_split_accumulator,
                 grad=grad,
             )
             if grad and use_bias:
@@ -610,7 +599,6 @@ def general_grouped_gemm(
         workspaces,
         workspaces[0].shape[0],
         accumulate,
-        use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
     )
 
@@ -666,7 +654,6 @@ def general_grouped_gemm_for_grouped_tensor(
     *,
     layout: str = "TN",
     accumulate: bool = False,
-    use_split_accumulator: bool = False,
     bias=None,
     bias_scale: Optional[torch.Tensor] = None,
     grad: bool = False,
@@ -698,26 +685,10 @@ def general_grouped_gemm_for_grouped_tensor(
             out,
             layout=layout,
             accumulate=accumulate,
-            use_split_accumulator=use_split_accumulator,
             bias=bias,
             beta=beta,
             alpha=alpha,
         )
-
-    # Discrete expert tensors share a scaling mode, so inspect only the first one.
-    is_fp8_blockwise_A = (
-        isinstance(A[0], Float8BlockwiseQTensorStorage)
-        if is_discrete_in
-        else isinstance(A.quantizer, Float8BlockQuantizer)
-    )
-    if is_fp8_blockwise_A or isinstance(B.quantizer, Float8BlockQuantizer):
-        # The fused grouped FP8 block-scaling GEMM only supports split accumulation,
-        # so force it on and intentionally override any caller-supplied value. This
-        # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
-        # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
-        # On Blackwell and newer the binding emulates this GEMM with MXFP8 (as for
-        # non-grouped GEMM); the setting is passed through unchanged.
-        use_split_accumulator = True
 
     if is_discrete_out:
         # wgrad case.
@@ -780,7 +751,6 @@ def general_grouped_gemm_for_grouped_tensor(
         beta,
         workspace_setup,
         workspace_cublas,
-        use_split_accumulator,
         sm_count,
     )
 
@@ -801,7 +771,6 @@ def _grouped_gemm_row_scaled_nvfp4(
     *,
     layout: str,
     accumulate: bool,
-    use_split_accumulator: bool,
     bias,
     beta: Optional[torch.Tensor],
     alpha: Optional[torch.Tensor],
@@ -862,7 +831,6 @@ def _grouped_gemm_row_scaled_nvfp4(
         scratch,
         layout=layout,
         accumulate=False,
-        use_split_accumulator=use_split_accumulator,
         alpha=alpha,
     )
 
