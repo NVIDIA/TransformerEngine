@@ -129,6 +129,7 @@ from transformer_engine.jax.moe import (
     record_ep_bootstrap_signature_for_moe,
 )
 from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
+from transformer_engine.jax.router import fused_topk_with_score_function
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
@@ -275,6 +276,39 @@ def mesh(use_cudnn_fusion):
 # -----------------------------------------------------------------------------
 
 
+def _reference_top_k(scores, k):
+    """Match the CUDA router's tie-breaking without changing the scores."""
+    # Radix top-k uses ascending expert indices for ties, as lax.top_k does.
+    if k >= int(os.environ.get("NVTE_RADIX_TOPK_THRESHOLD", "16")):
+        return jax.lax.top_k(scores, k)
+
+    # Naive top-k scans each warp lane's experts in ascending order, then its
+    # xor 16/8/4/2/1 reduction keeps the current candidate on equal scores.
+    # Stable top-k over this permutation reproduces that butterfly tie order.
+    def tie_rank(expert):
+        return int(f"{expert % 32:05b}"[::-1], 2), expert // 32
+
+    expert_order = jnp.asarray(sorted(range(scores.shape[-1]), key=tie_rank), dtype=jnp.int32)
+    values, indices = jax.lax.top_k(scores[..., expert_order], k)
+    return values, expert_order[indices]
+
+
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_reference_top_k_ties(score_function):
+    logits = jnp.zeros((2, NUM_EXPERTS), dtype=jnp.float32)
+    logits = logits.at[1, -3:-1].set(1.0).at[1, -1].set(2.0)
+    _, indices = _reference_top_k(logits, TOPK)
+    expected_map = (
+        jnp.zeros_like(logits, dtype=jnp.bool_)
+        .at[jnp.arange(logits.shape[0])[:, None], indices]
+        .set(True)
+    )
+    _, routing_map = fused_topk_with_score_function(
+        logits, topk=TOPK, score_function=score_function
+    )
+    np.testing.assert_array_equal(np.asarray(routing_map), np.asarray(expected_map))
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -316,7 +350,7 @@ def _pure_jax_moe_reference(
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
     elif score_function == "softmax":
         # use_pre_softmax=False: topk on raw logits, then softmax over K.
-        top_logits, top_indices = jax.lax.top_k(logits, k=K)
+        top_logits, top_indices = _reference_top_k(logits, k=K)
         weights = jax.nn.softmax(top_logits, axis=-1)  # [T, K], sums to 1
     elif score_function in ("sigmoid", "sqrtsoftplus"):
         if score_function == "sigmoid":
@@ -325,10 +359,10 @@ def _pure_jax_moe_reference(
             scores = jnp.sqrt(jax.nn.softplus(logits))  # [T, E]
         if expert_bias is not None and expert_bias.shape != (0,):
             scores_for_routing = scores + expert_bias.astype(jnp.float32)[None, :]
-            _, top_indices = jax.lax.top_k(scores_for_routing, k=K)
+            _, top_indices = _reference_top_k(scores_for_routing, k=K)
             weights = jnp.take_along_axis(scores, top_indices, axis=-1)
         else:
-            weights, top_indices = jax.lax.top_k(scores, k=K)
+            weights, top_indices = _reference_top_k(scores, k=K)
         # Sigmoid weights are normalized when K > 1 (matches the kernel).
         if K > 1:
             weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
