@@ -1202,10 +1202,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   const size_t blocks_X = ceildiv(logical_last_dim, kBlockLen);
 
   auto grouped_scale_elems = [&](bool columnwise) -> int64_t {
-    // Grouped quantization feeds GEMM directly, regardless of the ordinary tensor layout option.
-    const auto sh = !columnwise && block_scaling_dim == 1
-                        ? std::vector<size_t>{blocks_X, roundup(logical_first_dim, 4)}
-                        : get_scale_shape(logical_shape_vec, columnwise);
+    const auto sh = get_scale_shape(logical_shape_vec, columnwise);
     int64_t total = static_cast<int64_t>(product(sh));
     if (columnwise && block_scaling_dim == 2 && num_tensors > 1) {
       // sum_t roundup(blocks_y_t, 4) <= roundup(total_blocks_y, 4) + 4*(num_tensors-1).
@@ -1216,13 +1213,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
 
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    if (block_scaling_dim == 1 &&
-        rowwise_scale_option ==
-            transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
-      rowwise_scale_inv = at::empty({logical_first_dim, blocks_X}, float_opts);
-    } else {
-      rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
-    }
+    rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
   }
 
   if (columnwise_usage) {
