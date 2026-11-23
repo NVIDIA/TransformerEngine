@@ -1,12 +1,10 @@
 ---
 name: transformer-engine-convert-hf
 description: >-
-  Use when asked to convert, port or accelerate a Hugging Face PyTorch decoder model with
-  Transformer Engine (TE), or to write a TE fine-tuning recipe: Llama, Gemma, Mistral, Mixtral,
-  Qwen and other dense, mixture-of-experts or hybrid models. Produces a te_llama.py-style module
-  built on fused TE blocks (LayerNorm+QKV, LayerNorm+MLP, TransformerLayer, LayerNormLinear,
-  GroupedLinear MoE experts) with the checkpoint weight mapping, checked against the original
-  model, for BF16, FP8 or MXFP8. Not for Megatron-LM, JAX or inference serving.
+  Produce a TE based drop-in module replacement for the corresponding HF Transformer Layer module
+  for the model similar to the one in docs/examples/te_llama/te_llama.py for llama and
+  docs/examples/te_gemma/te_gemma.py for gemma. The TE based drop-in replacement should use most
+  appropriate fused implementation as necessary such as fusing layer norm into QKV.
 license: Apache-2.0
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 compatibility: >-
