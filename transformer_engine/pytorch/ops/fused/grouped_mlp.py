@@ -532,6 +532,52 @@ def _use_tmem_post_rht_amax() -> bool:
     return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
 
 
+@functools.lru_cache(maxsize=1)
+def _cudnn_unfused_gemm_disabled() -> bool:
+    """Whether the unfused GEMMs run on cuBLAS instead of the cuDNN CuTe DSL kernels.
+
+    Applies to the GEMMs without a fused activation: FC2 fprop, FC1 dgrad and wgrad. Set by
+    the environment variable ``NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP``.
+
+    ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``, which used to cover wgrad only, is
+    still honored as a deprecated alias when the new variable is unset.
+    """
+    value = os.environ.get("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP")
+    if value is None:
+        value = os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP")
+        if value is not None:
+            warnings.warn(
+                "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP is deprecated, use "
+                "NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP instead. Note that it also moves "
+                "the FC2 forward and FC1 input-gradient GEMMs to cuBLAS.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+    return int(value or "0") >= 1
+
+
+def _use_cutedsl_fprop_dgrad_gemm(
+    kernel: Callable,
+    grouped_input: GroupedTensorStorage,
+    *,
+    use_nvfp4: bool,
+) -> bool:
+    """Whether an FC2 fprop or FC1 dgrad GEMM runs on its CuTe DSL kernel instead of cuBLAS.
+
+    NVFP4 operands are passed in cuDNN's canonical layouts, so the kernel has to accept
+    them and the input scales must be swizzled for GEMM. Otherwise the NVFP4 GEMM runs
+    on cuBLAS, even when the cuDNN unfused GEMMs are not disabled.
+    """
+    if _cudnn_unfused_gemm_disabled():
+        return False
+    if not use_nvfp4:
+        return True
+    return (
+        getattr(kernel, "supports_canonical_layouts", False)
+        and grouped_input._with_gemm_swizzled_scales
+    )
+
+
 def _single_group_wgrad_gemm(
     grouped_x: GroupedTensor,
     grouped_dy: GroupedTensor,
@@ -1126,8 +1172,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation wrapper accepts ``deterministic``."""
-        return True
+        """Whether this op's dactivation kernel supports deterministic dprob on this device."""
+        return get_device_compute_capability() in ((10, 0), (10, 3))
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1139,14 +1185,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
-        """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
-
-        Returns ``None`` when the environment variable
-        ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP`` is set to ``1``.
-        """
-        if int(os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", "0")) >= 1:
-            return None
+    def grouped_gemm_wgrad_kernel(cls) -> Callable:
+        """CuTe DSL kernel for grouped GEMM wgrad on SM100+."""
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_wgrad_wrapper_sm100
@@ -1510,6 +1550,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         use_nvfp4 = isinstance(fc1_input_quantizer, NVFP4Quantizer) or isinstance(
             fc1_weight_param, NVFP4Tensor
         )
+        if use_nvfp4 and (fc1_op.single_grouped_weight or fc2_op.single_grouped_weight):
+            raise NotImplementedError(
+                "The fused grouped MLP does not support NVFP4 with single_grouped_weight=True."
+            )
         data_dtype = torch.float4_e2m1fn_x2 if use_nvfp4 else torch.float8_e4m3fn
         scale_view_dtype = torch.float8_e4m3fn if use_nvfp4 else torch.float8_e8m0fnu
         sf_vec_size = NVFP4_BLOCK_SCALING_SIZE if use_nvfp4 else MXFP8_BLOCK_SCALING_SIZE
@@ -1960,7 +2004,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
         fc2_scales = basic_op_extra_inputs[2][1] if fc2_op._scale_bias else None
-        if use_nvfp4:
+        # A single dense group keeps its dense GEMM.
+        use_cutedsl_fc2_gemm = not use_dense_single_group and _use_cutedsl_fprop_dgrad_gemm(
+            self.grouped_gemm_quant_kernel(), grouped_fc2_x, use_nvfp4=use_nvfp4
+        )
+        if not use_cutedsl_fc2_gemm:
             fc2_bias_for_gemm = None
             fc2_bias_scale = None
             if fc2_bias_packed is not None:
@@ -2007,106 +2055,150 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     bias_scale=fc2_bias_scale,
                 )
             fc2_out = fc2_out_buf
+        elif use_nvfp4:
+            # Canonical layouts: A is (sum(m), k) and its scales are the packed buffer as-is.
+            fc2_x_data = grouped_fc2_x.rowwise_data.view(dtype=data_dtype)
+            fc2_x_data = fc2_x_data.view(in_shape[0], fc2_weight_shape[1] // 2)
+            fc2_x_scales = grouped_fc2_x.scale_inv.view(dtype=scale_view_dtype)
+
+            fc2_fwd_alpha_tensor = _nvfp4_global_scale_pair(
+                grouped_fc2_x,
+                fc2_input_quantizer,
+                False,
+                grouped_fc2_weight,
+                fc2_weight_quantizer,
+                False,
+                num_groups=num_groups,
+                device=device,
+                combine="product",
+            )
+
+            fc2_scales_tensor = (
+                fc2_scales.detach().to(dtype=torch.float32).reshape(-1)
+                if fc2_scales is not None
+                else torch.ones(in_shape[0], dtype=torch.float32, device=device)
+            )
+            fc2_quant_kwargs = {
+                "a_tensor": fc2_x_data,
+                "sfa_tensor": fc2_x_scales,
+                "padded_offsets": split_points,
+                "alpha_tensor": fc2_fwd_alpha_tensor,
+                "bias_tensor": fc2_bias_packed,
+                "norm_const_tensor": None,
+                "prob_tensor": fc2_scales_tensor,
+                "acc_dtype": torch.float32,
+                "d_dtype": dtype,
+                "cd_major": "n",
+                "sf_vec_size": sf_vec_size,
+                "sf_fp8_dtype_override": _nvfp4_sf_dtype_override(fc2_input_quantizer),
+                "current_stream": current_stream,
+                "use_dynamic_sched": True,
+            }
+
+            fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    [w._rowwise_data for w in grouped_fc2_weight],
+                    [w._rowwise_scale_inv for w in grouped_fc2_weight],
+                    "nvfp4",
+                    device,
+                )
+            )
+            fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
+            fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
+            fc2_quant_kwargs["n"] = fc2_weight_shape[0]
+            fc2_quant_kwargs["b_dtype"] = data_dtype
+            fc2_quant_kwargs["b_major"] = "k"
+
+            fc2_out = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
+            fc2_quant_kwargs["d_tensor"] = fc2_out
+            self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
         else:
-            use_single_group_dense_fc2 = use_dense_single_group
             fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
-            if use_single_group_dense_fc2:
-                fc2_out = _single_group_fc2_gemm(
-                    grouped_fc2_x,
-                    grouped_fc2_weight,
-                    fc2_input_quantizer,
-                    fc2_out_buf,
-                    single_grouped_weight=fc2_op.single_grouped_weight,
-                    bias=fc2_bias_packed,
-                    bias_scale=fc2_scales,
-                    dtype=dtype,
+            fc2_scales_tensor = None
+            if fc2_scales is not None:
+                fc2_scales_tensor = (
+                    fc2_scales.detach()
+                    .to(dtype=torch.float32)
+                    .reshape((-1,) if canonical else (-1, 1, 1))
                 )
-            else:
-                fc2_scales_tensor = None
-                if fc2_scales is not None:
-                    fc2_scales_tensor = (
-                        fc2_scales.detach()
-                        .to(dtype=torch.float32)
-                        .reshape((-1,) if canonical else (-1, 1, 1))
-                    )
-                fc2_quant_kwargs = {
-                    "a_tensor": fc1_kernel_out["d_tensor"],
-                    "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
-                    "padded_offsets": split_points,
-                    "alpha_tensor": alpha_tensor,
-                    "bias_tensor": fc2_bias_packed,
-                    "norm_const_tensor": None,
-                    "prob_tensor": fc2_scales_tensor,
-                    "acc_dtype": torch.float32,
-                    "d_dtype": dtype,
-                    "cd_major": "n",
-                    "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
-                    "current_stream": current_stream,
-                    "use_dynamic_sched": True,
-                }
-                fc2_quant_kernel = self.grouped_gemm_quant_kernel()
-                if getattr(fc2_quant_kernel, "supports_optional_amax", False):
-                    # The FC2 output amax is not used.
-                    fc2_quant_kwargs["generate_amax"] = False
-                if supports_single_group_runtime_offsets:
-                    fc2_quant_kwargs["use_single_group_runtime_offsets"] = use_dense_single_group
+            fc2_quant_kwargs = {
+                "a_tensor": fc1_kernel_out["d_tensor"],
+                "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
+                "padded_offsets": split_points,
+                "alpha_tensor": alpha_tensor,
+                "bias_tensor": fc2_bias_packed,
+                "norm_const_tensor": None,
+                "prob_tensor": fc2_scales_tensor,
+                "acc_dtype": torch.float32,
+                "d_dtype": dtype,
+                "cd_major": "n",
+                "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+                "current_stream": current_stream,
+                "use_dynamic_sched": True,
+            }
+            fc2_quant_kernel = self.grouped_gemm_quant_kernel()
+            if getattr(fc2_quant_kernel, "supports_optional_amax", False):
+                # The FC2 output amax is not used.
+                fc2_quant_kwargs["generate_amax"] = False
+            if supports_single_group_runtime_offsets:
+                fc2_quant_kwargs["use_single_group_runtime_offsets"] = use_dense_single_group
 
-                if fc2_op.single_grouped_weight:
-                    # Clone and swizzle scales for GEMM
-                    # (original stays unmodified for save_for_backward).
-                    fc2_weight_for_gemm = grouped_fc2_weight.copy()
-                    tex.grouped_swizzle_for_gemm(
-                        fc2_weight_for_gemm,
-                        rowwise=True,
-                        columnwise=False,
-                    )
+            if fc2_op.single_grouped_weight:
+                # Clone and swizzle scales for GEMM
+                # (original stays unmodified for save_for_backward).
+                fc2_weight_for_gemm = grouped_fc2_weight.copy()
+                tex.grouped_swizzle_for_gemm(
+                    fc2_weight_for_gemm,
+                    rowwise=True,
+                    columnwise=False,
+                )
 
-                    fc2_w_data = fc2_weight_for_gemm.rowwise_data
-                    fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
-                    fc2_w_data = fc2_w_data.view(
+                fc2_w_data = fc2_weight_for_gemm.rowwise_data
+                fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
+                fc2_w_data = fc2_w_data.view(
+                    num_groups,
+                    fc2_weight_shape[0],
+                    fc2_weight_shape[1],
+                )
+                fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
+                if not canonical:
+                    fc2_w_data = fc2_w_data.permute(1, 2, 0)
+                    fc2_w_scales = fc2_w_scales.view(
                         num_groups,
-                        fc2_weight_shape[0],
-                        fc2_weight_shape[1],
+                        ceil_div(fc2_weight_shape[0], 128),
+                        ceil_div(fc2_weight_shape[1], 128),
+                        MXFP8_BLOCK_SCALING_SIZE,
+                        4,
+                        4,
                     )
-                    fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
-                    if not canonical:
-                        fc2_w_data = fc2_w_data.permute(1, 2, 0)
-                        fc2_w_scales = fc2_w_scales.view(
-                            num_groups,
-                            ceil_div(fc2_weight_shape[0], 128),
-                            ceil_div(fc2_weight_shape[1], 128),
-                            MXFP8_BLOCK_SCALING_SIZE,
-                            4,
-                            4,
-                        )
-                        fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
-                    fc2_quant_kwargs["b_tensor"] = fc2_w_data
-                    fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
-                else:
-                    fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
-                        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
-                            [w._rowwise_data for w in grouped_fc2_weight],
-                            [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                            "mxfp8_rowwise",
-                            device,
-                        )
-                    )
-                    fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
-                    fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
-                    fc2_quant_kwargs["n"] = fc2_weight_shape[0]
-                    fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
-                    fc2_quant_kwargs["b_major"] = "k"
-
-                fc2_quant_kwargs["d_tensor"] = (
-                    fc2_out_buf
-                    if canonical
-                    else fc2_out_buf.as_strided(
-                        (in_shape[0], fc2_weight_shape[0], 1),
-                        (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                    fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+                fc2_quant_kwargs["b_tensor"] = fc2_w_data
+                fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
+            else:
+                fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                        [w._rowwise_data for w in grouped_fc2_weight],
+                        [w._rowwise_scale_inv for w in grouped_fc2_weight],
+                        "mxfp8_rowwise",
+                        device,
                     )
                 )
-                fc2_quant_kernel(**fc2_quant_kwargs)
-                fc2_out = fc2_out_buf
+                fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
+                fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
+                fc2_quant_kwargs["n"] = fc2_weight_shape[0]
+                fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
+                fc2_quant_kwargs["b_major"] = "k"
+
+            fc2_quant_kwargs["d_tensor"] = (
+                fc2_out_buf
+                if canonical
+                else fc2_out_buf.as_strided(
+                    (in_shape[0], fc2_weight_shape[0], 1),
+                    (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                )
+            )
+            fc2_quant_kernel(**fc2_quant_kwargs)
+            fc2_out = fc2_out_buf
 
         # Save state for backward pass
         if requires_grad:
@@ -2770,7 +2862,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
 
         # FC2 wgrad GEMM
-        wgrad_kernel_fn = self.grouped_gemm_wgrad_kernel()
+        wgrad_kernel_fn = (
+            None if _cudnn_unfused_gemm_disabled() else self.grouped_gemm_wgrad_kernel()
+        )
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
             ctx=fc2_ctx,
@@ -2832,7 +2926,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     single_grouped_weight=fc1_op.single_grouped_weight,
                     dtype=dtype,
                 )
-            elif use_nvfp4:
+            elif not _use_cutedsl_fprop_dgrad_gemm(
+                self.grouped_gemm_quant_kernel(), grouped_fc1_dy, use_nvfp4=use_nvfp4
+            ):
                 grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 grouped_grad_input = GroupedTensor(
                     shape=(out_shape[0], fc1_weight_shape[1]),
@@ -2849,6 +2945,59 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     grouped_grad_input,
                     layout="NN",
                 )
+            elif use_nvfp4:
+                # Canonical layouts: A is (sum(m), k) and its scales are the packed buffer as-is.
+                fc1_dgrad_a_data = grouped_fc1_dy.rowwise_data.view(dtype=data_dtype)
+                fc1_dgrad_a_data = fc1_dgrad_a_data.view(out_shape[0], fc1_weight_shape[0] // 2)
+                fc1_dgrad_a_scales = grouped_fc1_dy.scale_inv.view(dtype=scale_view_dtype)
+
+                fc1_dgrad_alpha = _nvfp4_global_scale_pair(
+                    grouped_fc1_dy,
+                    fc1_grad_output_quantizer,
+                    False,
+                    grouped_fc1_weight,
+                    fc1_ctx.weight_quantizers[0],
+                    True,
+                    num_groups=num_groups,
+                    device=device,
+                    combine="product",
+                )
+
+                fc1_dgrad_kwargs = {
+                    "a_tensor": fc1_dgrad_a_data,
+                    "sfa_tensor": fc1_dgrad_a_scales,
+                    "padded_offsets": split_points,
+                    "alpha_tensor": fc1_dgrad_alpha,
+                    "norm_const_tensor": None,  # must be None for FP4 inputs
+                    "acc_dtype": torch.float32,
+                    "d_dtype": dtype,  # high precision -> no output quantization
+                    "cd_major": "n",
+                    "sf_vec_size": sf_vec_size,
+                    "sf_fp8_dtype_override": _nvfp4_sf_dtype_override(fc1_grad_output_quantizer),
+                    "current_stream": current_stream,
+                    "discrete_col_sfd": False,
+                    "use_dynamic_sched": True,
+                }
+
+                fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                        [w._columnwise_data for w in grouped_fc1_weight],
+                        [w._columnwise_scale_inv for w in grouped_fc1_weight],
+                        "nvfp4",
+                        device,
+                    )
+                )
+                fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
+                fc1_dgrad_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
+                fc1_dgrad_kwargs["n"] = fc1_weight_shape[1]
+                fc1_dgrad_kwargs["b_dtype"] = torch.float4_e2m1fn_x2
+                # FP4 has no N-major operand support, and the column-wise buffer is
+                # already transposed, so it is K-major.
+                fc1_dgrad_kwargs["b_major"] = "k"
+
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
+                fc1_dgrad_kwargs["d_tensor"] = grad_input
+                self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
             else:
                 fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
                 fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]

@@ -4,23 +4,33 @@
 
 """Grouped MXFP8 requantization with BF16 intermediates.
 
-The input scales use TE's compact rowwise layout. One TMA pipeline loads both
-payload and scales; consumers decode to BF16, compute columnwise scales and
-emit row-major E4M3 payloads. Optional BF16 output reuses the decoded registers
-without additional shared storage. Scale layouts and optional rowwise scale output
-follow nvte_group_requantize. No framework is imported by this module.
+Two kernels read TE's compact rowwise input scales and follow nvte_group_requantize
+for scale layouts and optional rowwise scale output:
+
+- GroupedRequantize, a persistent TMA pipeline: consumers decode to BF16, compute
+  columnwise scales and emit row-major E4M3 payloads. Optional BF16 output reuses the
+  decoded registers without additional shared storage.
+- GroupedRequantizeWarpTile, one warp per 128 x 128 tile and no shared memory, for
+  varying first dims without BF16 output.
+
+No framework is imported by this module.
 """
 
+import functools
 import logging
 import cuda.bindings.driver as cuda
 import cutlass
 from cutlass import cute
 from cutlass.cute.nvgpu import cpasync
-from cutlass.cutlass_dsl import Float32, Int32, Int64, T, Uint8, dsl_user_op
+from cutlass.cutlass_dsl import Boolean, Float32, Int32, Int64, T, Uint8, Uint32, dsl_user_op
 from cutlass._mlir.dialects import arith, llvm
 from cutlass.cute.typing import AddressSpace
 from cutlass.memory import SmemAllocator
 import tvm_ffi
+
+from transformer_engine.common.CuTeDSL.utils import exp2f_rcp
+from transformer_engine.common.CuTeDSL.utils_fp8 import cvt_f32_to_fp8e8m0fnu
+from .quantize_mxfp8_common import FP8E4M3_MAX_NORM_RCP
 
 logger = logging.getLogger("transformer_engine.cutedsl.requantize")
 
@@ -92,6 +102,12 @@ def _supports_scaled_bf16_conversion() -> bool:
     target_version = getattr(cutlass, "target_version", None)
     # Older DSL releases without this query use the portable instruction sequence.
     return target_version is not None and target_version(min_version="13.2")
+
+
+def _supports_bf16x2_to_e4m3_conversion() -> bool:
+    """Query the DSL compiler for the packed BF16 to E4M3 conversion."""
+    target_version = getattr(cutlass, "target_version", None)
+    return target_version is not None and target_version(min_version="13.1")
 
 
 @dsl_user_op
@@ -234,6 +250,44 @@ def e8m0_raw_from_bf16(bf16_bits, limit_exponent: int, *, loc=None, ip=None) -> 
 def bits_f32(x: Int32, *, loc=None, ip=None) -> Float32:
     """Interpret an integer register as IEEE FP32 bits."""
     return Float32(llvm.bitcast(T.f32(), Int32(x).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+
+
+@dsl_user_op
+def requantize_bf16x2_into(values, multipliers, word, half: int, *, loc=None, ip=None) -> Int32:
+    """Two BF16 values times two BF16 multipliers, rounded to E4M3 into one 16-bit half of word."""
+    if _supports_bf16x2_to_e4m3_conversion():
+        body = " .reg .b32 y;\n mul.rn.bf16x2 y, $1, $2;\n cvt.rn.satfinite.e4m3x2.bf16x2 q, y;\n"
+    else:
+        # A -0 addend keeps the sign of zero products, as the multiply does.
+        body = (
+            " .reg .b16 x0, x1, s0, s1;\n"
+            " .reg .f32 y0, y1;\n"
+            " mov.b32 {x0, x1}, $1;\n"
+            " mov.b32 {s0, s1}, $2;\n"
+            " fma.rn.f32.bf16 y0, x0, s0, 0f80000000;\n"
+            " fma.rn.f32.bf16 y1, x1, s1, 0f80000000;\n"
+            " cvt.rn.satfinite.e4m3x2.f32 q, y1, y0;\n"
+        )
+    merged = "{q, w1}" if half == 0 else "{w0, q}"
+    return Int32(
+        llvm.inline_asm(
+            T.i32(),
+            [
+                Int32(values).ir_value(loc=loc, ip=ip),
+                Int32(multipliers).ir_value(loc=loc, ip=ip),
+                Int32(word).ir_value(loc=loc, ip=ip),
+            ],
+            "{\n .reg .b16 q, w0, w1;\n"
+            + body
+            + f" mov.b32 {{w0, w1}}, $3;\n mov.b32 $0, {merged};\n}}",
+            "=r,r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 class GroupedRequantize:
@@ -950,6 +1004,271 @@ class GroupedRequantize:
         ) & Int32(255)
 
 
+class GroupedRequantizeWarpTile:
+    """Requantization of varying first dims without BF16 output, one warp per 128 x 128 tile.
+
+    Tiles are in row-major order. Lane l loads 8 columns (8 * (l // 2)) of the rows
+    l % 2, l % 2 + 2, ... of each 32-row block, so a column amax takes one shuffle, and
+    keeps the column scales of four of its columns in registers. No shared memory is used.
+    Rows and groups are runtime values; tensor sizes are read from offsets.
+    """
+
+    TILE = 128
+    WarpsPerCta = 2
+    RowsPerLane = 16
+    BlocksPerTile = 4
+
+    def __init__(
+        self, hidden, *, input_dtype=cutlass.Float8E4M3FN, swizzled=True, rowwise_output=True
+    ):
+        if hidden <= 0 or hidden % self.TILE:
+            raise ValueError("Grouped MXFP8 requantization requires a 128-aligned hidden size")
+        if input_dtype not in (cutlass.Float8E4M3FN, cutlass.Float8E5M2):
+            raise ValueError("Input must be E4M3 or E5M2")
+        self.hidden = int(hidden)
+        self.quant_dtype = input_dtype
+        self.use_scaled_cvt = _supports_scaled_bf16_conversion()
+        self.swizzled = bool(swizzled)
+        self.rowwise_output = bool(rowwise_output and swizzled)
+
+    @cute.jit
+    def __call__(
+        self,
+        src_data: cute.Tensor,
+        src_sf: cute.Tensor,
+        offsets: cute.Tensor,
+        dst_data: cute.Tensor,
+        dst_row_sf: cute.Tensor,
+        dst_col_sf: cute.Tensor,
+        dst_dequantized: cute.Tensor,
+        stream: cuda.CUstream,
+    ):
+        tiles = src_data.shape[0] // self.TILE * (self.hidden // self.TILE)
+        self.kernel(src_data, src_sf, offsets, dst_data, dst_row_sf, dst_col_sf).launch(
+            grid=((tiles + self.WarpsPerCta - 1) // self.WarpsPerCta, 1, 1),
+            block=(self.WarpsPerCta * 32, 1, 1),
+            # At most 96 registers: ten CTAs per SM keep enough loads in flight.
+            min_blocks_per_mp=10,
+            stream=stream,
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        src_data: cute.Tensor,
+        src_sf: cute.Tensor,
+        offsets: cute.Tensor,
+        dst_data: cute.Tensor,
+        dst_row_sf: cute.Tensor,
+        dst_col_sf: cute.Tensor,
+    ):
+        """Requantize one tile per warp and emit its row and column scales."""
+        cols = cutlass.const_expr(self.hidden)
+        tiles_x = cutlass.const_expr(cols // self.TILE)
+        sf_stride = cutlass.const_expr(cols // 32)
+        rows_per_lane = cutlass.const_expr(self.RowsPerLane)
+        tid, _, _ = cute.arch.thread_idx()
+        bid, _, _ = cute.arch.block_idx()
+        lane = tid % 32
+        tile = bid * self.WarpsPerCta + tid // 32
+        row0 = tile // tiles_x * self.TILE
+        col0 = tile % tiles_x * self.TILE
+        num_tensors = offsets.shape[0] - 1
+        tile_offset = Int64(row0) * cols
+        # Tiles past the live rows of the last tensor have no work.
+        if row0 < src_data.shape[0] and tile_offset < offsets[num_tensors]:
+            lane_row = lane % 2
+            lane_col = lane // 2 * 8
+            scale_selector = lane // 8 * 0x11 | 0x4400
+            lane_offset = tile_offset + Int64(lane_row * cols + col0 + lane_col)
+            src_base = src_data.iterator.toint() + lane_offset
+            dst_base = dst_data.iterator.toint() + lane_offset
+            sf_base = src_sf.iterator.toint() + Int64(row0 + lane) * sf_stride + col0 // 32
+            # A lane's rows are two rows (cols // 2 words) apart.
+            rows_layout = cute.make_layout((2, rows_per_lane), stride=(1, cols // 2))
+            load_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyG2ROp(), Int32, num_bits_per_copy=64, invariant=True
+            )
+            store_atom = cute.make_copy_atom(cute.nvgpu.CopyR2GOp(), Int32, num_bits_per_copy=64)
+            col_scales = cute.make_rmem_tensor((4,), Int32)
+            col_scales.fill(0)
+            for block in cutlass.range(self.BlocksPerTile, unroll=1):
+                block_offset = Int64(block * 32 * cols)
+                data = cute.make_rmem_tensor((2, rows_per_lane), Int32)
+                cute.copy(
+                    load_atom,
+                    cute.make_tensor(
+                        cute.make_ptr(
+                            Int32, src_base + block_offset, AddressSpace.gmem, assumed_align=8
+                        ),
+                        rows_layout,
+                    ),
+                    data,
+                )
+                scale_word = cute.make_tensor(
+                    cute.make_ptr(
+                        Int32,
+                        sf_base + Int64(block * 32 * sf_stride),
+                        AddressSpace.gmem,
+                        assumed_align=4,
+                    ),
+                    cute.make_layout((1,)),
+                )[0]
+                if cutlass.const_expr(self.rowwise_output):
+                    # The four K scales of a row are contiguous in the 128 x 4 GEMM atom.
+                    cute.make_tensor(
+                        cute.make_ptr(
+                            Int32,
+                            dst_row_sf.iterator.toint()
+                            + Int64(tile) * 512
+                            + Int64(lane * 16 + block * 4),
+                            AddressSpace.gmem,
+                            assumed_align=4,
+                        ),
+                        cute.make_layout((1,)),
+                    )[0] = scale_word
+                # Each row's scale of this lane's 32 columns, in both low bytes.
+                row_scales = [
+                    cute.arch.inline_ptx(
+                        "prmt.b32 {$w0}, {$r0}, 0, {$r1};",
+                        write_only_types=[Int32],
+                        read_only_args=[
+                            cute.arch.shuffle_sync(scale_word, 2 * i + lane_row),
+                            scale_selector,
+                        ],
+                    )
+                    for i in range(rows_per_lane)
+                ]
+                for pair in cutlass.range_constexpr(4):
+                    values = [None] * rows_per_lane
+                    amax = Int32(0)
+                    for i in cutlass.range_constexpr(rows_per_lane):
+                        values[i] = cvt_scaled_up_bf16x2(
+                            data[pair // 2, i],
+                            row_scales[i],
+                            pair % 2,
+                            self.quant_dtype,
+                            self.use_scaled_cvt,
+                        )
+                        amax = max_xorsign_abs_bf16x2(amax, values[i])
+                    amax = max_xorsign_abs_bf16x2(amax, cute.arch.shuffle_sync_bfly(amax, 1))
+                    # The packed max keeps the largest magnitude, not its sign.
+                    amax = amax & Int32(0x7FFF7FFF)
+                    scale_lo = cvt_f32_to_fp8e8m0fnu(
+                        bits_f32(amax << Int32(16)) * FP8E4M3_MAX_NORM_RCP
+                    )
+                    scale_hi = cvt_f32_to_fp8e8m0fnu(
+                        bits_f32(amax & Int32(-65536)) * FP8E4M3_MAX_NORM_RCP
+                    )
+                    multipliers = (exp2f_rcp(scale_lo).bitcast(Uint32) >> Uint32(16)) | (
+                        exp2f_rcp(scale_hi).bitcast(Uint32) & Uint32(0xFFFF0000)
+                    )
+                    for i in cutlass.range_constexpr(rows_per_lane):
+                        data[pair // 2, i] = requantize_bf16x2_into(
+                            values[i], multipliers, data[pair // 2, i], pair % 2
+                        )
+                    scales = Int32(scale_lo.bitcast(Uint8)) | Int32(
+                        scale_hi.bitcast(Uint8)
+                    ) << Int32(8)
+                    col_scales[pair] = col_scales[pair] | (
+                        (scales >> (lane_row * 8) & Int32(255)) << (block * 8)
+                    )
+                cute.copy(
+                    store_atom,
+                    data,
+                    cute.make_tensor(
+                        cute.make_ptr(
+                            Int32, dst_base + block_offset, AddressSpace.gmem, assumed_align=8
+                        ),
+                        rows_layout,
+                    ),
+                )
+            # Tensor of this row tile: the tensors after the first that start at or before it.
+            tensor_id = Int32(0)
+            first = Int32(1)
+            searching = Boolean(True)
+            while searching and first < num_tensors:
+                started = Boolean(False)
+                if first + lane < num_tensors:
+                    started = offsets[first + lane] <= tile_offset
+                mask = cute.arch.vote_ballot_sync(started)
+                tensor_id = tensor_id + cute.arch.popc(mask)
+                searching = mask == Int32(-1)
+                first = first + Int32(32)
+            tensor_start = offsets[tensor_id]
+            tensor_rows = (offsets[tensor_id + 1] - tensor_start) // cols
+            scale_base = tensor_start // (32 * cols) * cols
+            scale_row = (row0 - Int32(tensor_start // cols)) // 32
+            for pair in cutlass.range_constexpr(4):
+                col = lane_col + 2 * pair + lane_row
+                if cutlass.const_expr(self.swizzled):
+                    # The four 32-row blocks of a column are contiguous in the 128 x 4 GEMM atom.
+                    index = (
+                        scale_base
+                        + (Int64(col0 // self.TILE) * ((tensor_rows + 127) // 128) + scale_row // 4)
+                        * 512
+                        + col % 32 * 16
+                        + col // 32 * 4
+                    )
+                    cute.make_tensor(
+                        cute.make_ptr(
+                            Int32,
+                            dst_col_sf.iterator.toint() + index,
+                            AddressSpace.gmem,
+                            assumed_align=4,
+                        ),
+                        cute.make_layout((1,)),
+                    )[0] = col_scales[pair]
+                else:
+                    for block in cutlass.range_constexpr(self.BlocksPerTile):
+                        cute.make_tensor(
+                            cute.make_ptr(
+                                Uint8,
+                                dst_col_sf.iterator.toint()
+                                + scale_base
+                                + Int64(scale_row + block) * cols
+                                + col0
+                                + col,
+                                AddressSpace.gmem,
+                                assumed_align=1,
+                            ),
+                            cute.make_layout((1,)),
+                        )[0] = Uint8(col_scales[pair] >> (block * 8))
+
+
+@functools.lru_cache(maxsize=None)
+def _compile_warp_tile_requantization(input_dtype, hidden, swizzled, rowwise_output):
+    """Compile the warp-tile kernel once for every row and group count."""
+    rows = cute.sym_int32(divisibility=128)
+    scales = cute.sym_int32()
+
+    def tensor(element_type, shape):
+        return cute.runtime.make_fake_compact_tensor(
+            element_type,
+            shape,
+            stride_order=tuple(reversed(range(len(shape)))),
+            memspace=cute.AddressSpace.gmem,
+            assumed_align=16,
+        )
+
+    compiled = cute.compile(
+        GroupedRequantizeWarpTile(
+            hidden, input_dtype=input_dtype, swizzled=swizzled, rowwise_output=rowwise_output
+        ),
+        tensor(input_dtype, (rows, hidden)),
+        tensor(cutlass.Float8E8M0FNU, (rows, hidden // 32)),
+        tensor(cutlass.Int64, (cute.sym_int32(),)),
+        tensor(cutlass.Float8E4M3FN, (rows, hidden)),
+        tensor(cutlass.Float8E8M0FNU, (scales,)) if rowwise_output else None,
+        tensor(cutlass.Float8E8M0FNU, (scales,)),
+        None,
+        cute.runtime.make_fake_stream(),
+        options="--enable-tvm-ffi",
+    )
+    native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+    return native if native is not None else compiled
+
+
 def get_mxfp8_requantization_function(
     fn_name,
     dtype,
@@ -967,6 +1286,15 @@ def get_mxfp8_requantization_function(
         return True
     try:
         input_dtype = {"Float8E4M3": cutlass.Float8E4M3FN, "Float8E5M2": cutlass.Float8E5M2}[dtype]
+        if not uniform_rows and not return_dequantized:
+            tvm_ffi.register_global_func(
+                fn_name,
+                _compile_warp_tile_requantization(
+                    input_dtype, hidden, bool(swizzled), bool(rowwise_output)
+                ),
+                override=True,
+            )
+            return True
         kernel = GroupedRequantize(
             hidden,
             groups,

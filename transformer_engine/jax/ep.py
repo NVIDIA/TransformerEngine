@@ -312,8 +312,9 @@ def ep_finalize():
 def _default_out_partition_spec(ep_axes=None):
     """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
     outer = _ep_outer_axis(ep_axes)
+    outer_axes = (outer,) if isinstance(outer, str) else outer or ()
     resolved_ep_axes = tex.ep._resolve_ep_axes(ep_axes)
-    leading_axes = resolved_ep_axes if outer is None else (outer, *resolved_ep_axes)
+    leading_axes = (*outer_axes, *resolved_ep_axes)
     leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
 
