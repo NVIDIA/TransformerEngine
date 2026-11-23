@@ -51,6 +51,23 @@ void fused_topk_with_score_function_bwd(
     std::string score_function, bool use_dense_indices = false,
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
+bool fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk,
+                                                  std::optional<int> num_groups,
+                                                  std::optional<int> group_topk,
+                                                  std::string score_function);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> fused_topk_with_aux_loss_scores_fwd(
+    at::Tensor logits, int topk, std::optional<int> num_groups, std::optional<int> group_topk,
+    std::optional<float> scaling_factor, std::string score_function,
+    std::optional<at::Tensor> expert_bias, std::optional<at::Tensor> tokens_per_expert,
+    bool fp32_probs, at::ScalarType index_dtype);
+
+at::Tensor fused_topk_with_aux_loss_scores_bwd(at::Tensor logits, at::Tensor topk_indices,
+                                               at::Tensor grad_probs,
+                                               std::optional<at::Tensor> grad_aux_scores,
+                                               std::optional<float> scaling_factor,
+                                               std::string score_function);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     at::Tensor logits, int topk, std::string score_function,
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
