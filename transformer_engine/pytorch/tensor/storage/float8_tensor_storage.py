@@ -5,7 +5,7 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
-from typing import Annotated, Any, Dict, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, Iterable, Optional, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
@@ -16,6 +16,37 @@ from .._quantization_helpers import _resolve_view_shape, safe_quantized_repr
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
+
+
+def _columnwise_shape_for(rowwise_shape: Iterable[int]) -> torch.Size:
+    """Physical columnwise FP8 shape for a logical rowwise shape."""
+    shape = torch.Size(rowwise_shape)
+    if len(shape) == 0:
+        return shape
+    return torch.Size((shape[-1], *shape[:-1]))
+
+
+def _view_transpose_for_shape(
+    transpose: Optional[torch.Tensor],
+    out_shape: torch.Size,
+    *,
+    allow_copy: bool = False,
+) -> Optional[torch.Tensor]:
+    """View or reshape ``transpose`` for ``out_shape``, or return ``None`` if incompatible."""
+    if transpose is None:
+        return None
+    view_shape = _columnwise_shape_for(out_shape)
+    if len(out_shape) == 0:
+        if len(transpose.shape) != 0:
+            return None
+    elif len(transpose.shape) == 0 or transpose.shape[0] != view_shape[0]:
+        return None
+    if allow_copy:
+        return transpose.reshape(*view_shape)
+    try:
+        return transpose.view(*view_shape)
+    except RuntimeError:
+        return None
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -232,21 +263,13 @@ class Float8TensorStorage(QuantizedTensorStorage):
             out_shape = out_data.size()
         else:
             out_shape = _resolve_view_shape(self.size(), shape)
-        out_transpose = None if self._transpose_invalid else self._transpose
-        if out_transpose is not None:
-            if len(out_shape) == 0:
-                view_shape_for_transpose = out_shape
-            else:
-                view_shape_for_transpose = torch.Size((out_shape[-1], *out_shape[:-1]))
-            if out_transpose.shape != view_shape_for_transpose:
-                if self._data is None:
-                    raise NotImplementedError(
-                        "Float8TensorStorage view with columnwise-only data is only "
-                        "supported when the requested shape preserves the columnwise layout"
-                    )
-                out_transpose = None
-            else:
-                out_transpose = out_transpose.view(*view_shape_for_transpose)
+        raw_transpose = None if self._transpose_invalid else self._transpose
+        out_transpose = _view_transpose_for_shape(raw_transpose, out_shape)
+        if raw_transpose is not None and out_transpose is None and self._data is None:
+            raise NotImplementedError(
+                "Float8TensorStorage view with columnwise-only data is only "
+                "supported when the requested shape preserves the columnwise layout"
+            )
         if self._data is None and out_transpose is None:
             raise NotImplementedError(
                 "Float8TensorStorage view with columnwise-only data requires a valid "

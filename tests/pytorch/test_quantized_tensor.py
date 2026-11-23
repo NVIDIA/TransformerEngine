@@ -19,6 +19,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
     Float8Tensor,
+    Float8TensorStorage,
     Float8BlockwiseQTensor,
     MXFP8Tensor,
     MXFP8TensorStorage,
@@ -488,6 +489,149 @@ class TestFloat8Tensor:
         assert x.size() == y.size()
         assert x.dtype == y.dtype
         assert x.device == y.device
+
+    @pytest.mark.parametrize(
+        "src_shape,dst_shape",
+        [
+            ((32, 16), (2, 16, 16)),
+            ((2, 16, 16), (32, 16)),
+            ((32, 16), (2, -1, 16)),
+            ((2, 16, 16), (-1, 16)),
+            ((2, 16, 16), (32, -1)),
+        ],
+    )
+    def test_view_and_reshape_preserve_transpose_leading_dims(self, src_shape, dst_shape):
+        data = (
+            torch.arange(32 * 16, device="cuda", dtype=torch.int64)
+            .remainder(256)
+            .to(torch.uint8)
+            .reshape(src_shape)
+            .contiguous()
+        )
+        transpose = data.reshape(-1, 16).T.contiguous().reshape(16, *src_shape[:-1])
+        scale_inv = torch.ones(1, dtype=torch.float32, device="cuda")
+
+        tensor = Float8Tensor(
+            shape=src_shape,
+            dtype=torch.bfloat16,
+            data=data,
+            data_transpose=transpose,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        expected_shape = data.view(*dst_shape).shape
+        expected_transpose = data.reshape(-1, 16).T.contiguous().reshape(16, *expected_shape[:-1])
+
+        for out in (
+            tensor.view(*dst_shape),
+            torch.ops.aten.view.default(tensor, list(dst_shape)),
+            tensor.reshape(*dst_shape),
+        ):
+            assert tuple(out.shape) == tuple(expected_shape)
+            assert out._transpose is not None
+            assert out._transpose_invalid is False
+            assert tuple(out._transpose.shape) == tuple(expected_transpose.shape)
+            assert out._transpose.data_ptr() == transpose.data_ptr()
+            torch.testing.assert_close(out._transpose, expected_transpose, rtol=0, atol=0)
+
+        storage = Float8TensorStorage(
+            data=data,
+            data_transpose=transpose,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            fake_dtype=torch.bfloat16,
+        )
+        storage_view = storage.view(dst_shape)
+        assert storage_view._transpose is not None
+        assert storage_view._transpose_invalid is False
+        assert tuple(storage_view._transpose.shape) == tuple(expected_transpose.shape)
+        assert storage_view._transpose.data_ptr() == transpose.data_ptr()
+        torch.testing.assert_close(storage_view._transpose, expected_transpose, rtol=0, atol=0)
+
+        col_only = Float8Tensor(
+            shape=src_shape,
+            dtype=torch.bfloat16,
+            data=None,
+            data_transpose=transpose,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        col_view = col_only.view(*dst_shape)
+        assert col_view._data is None
+        assert col_view._transpose is not None
+        assert tuple(col_view._transpose.shape) == tuple(expected_transpose.shape)
+        assert col_view._transpose.data_ptr() == transpose.data_ptr()
+
+    def test_view_and_reshape_invalidate_incompatible_transpose(self):
+        data = (
+            torch.arange(32 * 16, device="cuda", dtype=torch.int64)
+            .remainder(256)
+            .to(torch.uint8)
+            .reshape(32, 16)
+            .contiguous()
+        )
+        transpose = data.T.contiguous()
+        scale_inv = torch.ones(1, dtype=torch.float32, device="cuda")
+
+        tensor = Float8Tensor(
+            shape=(32, 16),
+            dtype=torch.bfloat16,
+            data=data,
+            data_transpose=transpose,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        for out in (
+            tensor.view(16, 32),
+            torch.ops.aten.view.default(tensor, [16, 32]),
+            tensor.reshape(16, 32),
+        ):
+            assert tuple(out.shape) == (16, 32)
+            assert out._transpose is None
+            assert out._transpose_invalid is True
+
+        full_t = (
+            torch.arange(16 * 2 * 8, device="cuda", dtype=torch.int64)
+            .remainder(256)
+            .to(torch.uint8)
+            .reshape(16, 2, 8)
+        )
+        strided_t = full_t[:, :, :4]
+        data_nc = strided_t.movedim(0, -1).contiguous()
+        tensor_nc = Float8Tensor(
+            shape=(2, 4, 16),
+            dtype=torch.bfloat16,
+            data=data_nc,
+            data_transpose=strided_t,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        viewed_nc = tensor_nc.view(8, 16)
+        assert viewed_nc._transpose is None
+        assert viewed_nc._transpose_invalid is True
+
+        reshaped_nc = tensor_nc.reshape(8, 16)
+        assert reshaped_nc._transpose is not None
+        assert reshaped_nc._transpose_invalid is False
+        torch.testing.assert_close(
+            reshaped_nc._transpose, data_nc.reshape(8, 16).T.contiguous(), rtol=0, atol=0
+        )
+
+        col_only_nc = Float8Tensor(
+            shape=(2, 4, 16),
+            dtype=torch.bfloat16,
+            data=None,
+            data_transpose=strided_t,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        with pytest.raises(NotImplementedError, match="columnwise-only data"):
+            col_only_nc.view(8, 16)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
