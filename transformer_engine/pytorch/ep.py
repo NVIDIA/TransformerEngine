@@ -700,6 +700,7 @@ def _ep_prepare_and_dispatch_fwd(
     if buffer.dispatch_fwd_quant_recipe is not None:
         from ..common.recipe import Float8BlockScaling
         from .tensor.mxfp8_tensor import MXFP8Quantizer
+
         recipe = buffer.dispatch_fwd_quant_recipe
         if isinstance(recipe, Float8BlockScaling):
             if recipe.x_block_scaling_dim != 1:
@@ -707,9 +708,7 @@ def _ep_prepare_and_dispatch_fwd(
                     "NCCL EP block128 dispatch requires x_block_scaling_dim=1."
                 )
             _require_bf16("dispatch input", tokens)
-            tokens, tokens_scale_inv = _quantize_float8_blockwise(
-                tokens, recipe, columnwise=False
-            )
+            tokens, tokens_scale_inv = _quantize_float8_blockwise(tokens, recipe, columnwise=False)
         else:
             _require_bf16("dispatch input", tokens)
             quantizer = MXFP8Quantizer(
@@ -772,7 +771,11 @@ def _ep_prepare_and_dispatch_fwd(
                 recv_tokens,
                 num_recv_tokens,
                 hidden,
-                hidden // 128 if tokens_scale_inv.dtype == torch.float32 else tokens_scale_inv.shape[-1],
+                (
+                    hidden // 128
+                    if tokens_scale_inv.dtype == torch.float32
+                    else tokens_scale_inv.shape[-1]
+                ),
                 tokens_data.dtype,
                 tokens_scale_inv.dtype,
                 device,
@@ -1292,7 +1295,9 @@ def _quantize_float8_blockwise(
         raise ValueError("Float8BlockScaling EP requires hidden divisible by 128.")
     block_dim = recipe.grad_block_scaling_dim if backward else recipe.x_block_scaling_dim
     if block_dim != 1:
-        raise NotImplementedError("EP block128 wire payload requires 1D activation/gradient blocks.")
+        raise NotImplementedError(
+            "EP block128 wire payload requires 1D activation/gradient blocks."
+        )
     from ..common.recipe import Format
 
     if recipe.fp8_format != Format.E4M3:
@@ -1339,13 +1344,17 @@ def ep_quantize_float8_blockwise_dual_scale(
     """
     if not isinstance(tokens, torch.Tensor) or tokens.ndim != 2:
         raise ValueError("EP dual-scale quantization requires a 2D token tensor.")
-    return _quantize_float8_blockwise(
-        tokens, recipe, columnwise=columnwise
-    )
+    return _quantize_float8_blockwise(tokens, recipe, columnwise=columnwise)
 
 
 def _make_grouped_blockwise(
-    data, scale_inv, token_counts, fp8_dtype, fake_dtype, *, fused_gemm_layout=False,
+    data,
+    scale_inv,
+    token_counts,
+    fp8_dtype,
+    fake_dtype,
+    *,
+    fused_gemm_layout=False,
     tensor_offsets=None,
 ):
     """Wrap EP block128 payloads, preserving compact wire scales until requantization."""
@@ -1468,8 +1477,7 @@ def ep_dispatch(
             )
         if isinstance(recipe, Float8BlockScaling) and recipe.x_block_scaling_dim != 1:
             raise NotImplementedError(
-                "NCCL EP block128 dispatch requires Float8BlockScaling "
-                "with x_block_scaling_dim=1."
+                "NCCL EP block128 dispatch requires Float8BlockScaling with x_block_scaling_dim=1."
             )
 
     # Fused prepare + dispatch in one C++ op. Eager sizes the recv outputs from the per-step host

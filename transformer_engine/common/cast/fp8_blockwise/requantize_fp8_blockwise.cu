@@ -9,20 +9,19 @@
  */
 
 #include <cuda.h>
+#include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_runtime.h>
+#include <transformer_engine/cast.h>
 
 #include <cstdint>
 #include <vector>
 
-#include <cudaTypedefs.h>
-#include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
-
 #include "../../common.h"
 #include "../../recipe/recipe_common.cuh"
-#include "../../util/ptx.cuh"
 #include "../../util/cuda_runtime.h"
+#include "../../util/ptx.cuh"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/grouped_layout.cuh"
@@ -33,8 +32,8 @@ namespace {
 // Block scaling FP8 grouped requantization shares the common grouped requant entry point.
 namespace ptx = transformer_engine::ptx;
 
-constexpr int kTileDim = 128; // Fixed to 128 because we are using 1x128 quantization
-constexpr int kThreadsPerBlock = 256; // Thread block size, 8 warps in total
+constexpr int kTileDim = 128;          // Fixed to 128 because we are using 1x128 quantization
+constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 constexpr int kThreadsPerWarp = 32;
 
 // Decode four adjacent FP8 values with two packed conversion instructions.
@@ -84,16 +83,17 @@ __device__ __forceinline__ ptx::bf16x4 dequantize_fp8x4(const IType x0, const IT
 // Convert and store them directly; staging a transposed tile in shared memory
 // would only add a write/read round trip before the same strided global stores.
 template <typename OType, int kRows>
-__device__ __forceinline__ void store_columnwise_bf16(
-    OType* __restrict__ output, const ptx::bf16x4* __restrict__ values, const float scale,
-    const size_t tensor_base, const size_t column, const size_t group_rows,
-    const size_t row) {
+__device__ __forceinline__ void store_columnwise_bf16(OType* __restrict__ output,
+                                                      const ptx::bf16x4* __restrict__ values,
+                                                      const float scale, const size_t tensor_base,
+                                                      const size_t column, const size_t group_rows,
+                                                      const size_t row) {
   static_assert(kRows % 4 == 0);
   Vec<OType, kRows> packed;
 #pragma unroll
   for (int i = 0; i < kRows; ++i) {
     const ptx::bf16x4& value = values[i / 4];
-    const bf16 element = (i % 4 == 0) ? value.x1
+    const bf16 element = (i % 4 == 0)   ? value.x1
                          : (i % 4 == 1) ? value.x2
                          : (i % 4 == 2) ? value.x3
                                         : value.x4;
@@ -149,13 +149,11 @@ struct RequantizeTraits {
 template <typename Traits, typename IType, typename OType, bool kReturnDequantized,
           bool kReturnColumnwise, bool kReturnRowwiseScale>
 __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_kernel(
-    const __grid_constant__ CUtensorMap tensor_map_input,
-    const IType* __restrict__ rowwise_data, const float* __restrict__ rowwise_scale,
-    float* __restrict__ gemm_rowwise_scale,
+    const __grid_constant__ CUtensorMap tensor_map_input, const IType* __restrict__ rowwise_data,
+    const float* __restrict__ rowwise_scale, float* __restrict__ gemm_rowwise_scale,
     OType* __restrict__ colwise_data, float* __restrict__ colwise_scale,
     bf16* __restrict__ dequantized, const size_t first_logical_dim, const size_t last_logical_dim,
-    const size_t row_scale_cols, const bool compact_scale_layout,
-    const size_t col_scale_rows,
+    const size_t row_scale_cols, const bool compact_scale_layout, const size_t col_scale_rows,
     const int64_t* tensor_offsets, const int64_t* first_dims_ptr, const size_t num_groups,
     const float epsilon, const bool power_of_two) {
   const bool leading_thread = threadIdx.x == 0;
@@ -204,14 +202,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   __shared__ float row_scales[kTileDim];
   if (threadIdx.x < kTileDim) {
     const size_t row = global_row_base + threadIdx.x;
-    const size_t index = compact_scale_layout
-                             ? row * row_scale_cols + tile_x
-                             : group_start * (last_logical_dim / kTileDim) +
-                                   tile_x * group_rows + (row - group_start);
+    const size_t index = compact_scale_layout ? row * row_scale_cols + tile_x
+                                              : group_start * (last_logical_dim / kTileDim) +
+                                                    tile_x * group_rows + (row - group_start);
     const float value = rowwise_scale[index];
     if constexpr (kReturnRowwiseScale) {
-      const size_t destination = group_start * (last_logical_dim / kTileDim) +
-                                 tile_x * group_rows + (row - group_start);
+      const size_t destination =
+          group_start * (last_logical_dim / kTileDim) + tile_x * group_rows + (row - group_start);
       gemm_rowwise_scale[destination] = value;
     }
     row_scales[threadIdx.x] = value;
@@ -280,13 +277,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
         ptx::bf16x4 reg_data[kRowsPerThread / 4];
 #pragma unroll
         for (int r = 0; r < kRowsPerThread; r += 4) {
-          reg_data[r / 4] = dequantize_fp8x4(
-              input_tile[(row_start + r + 0) * kTileDim + col_local],
-              input_tile[(row_start + r + 1) * kTileDim + col_local],
-              input_tile[(row_start + r + 2) * kTileDim + col_local],
-              input_tile[(row_start + r + 3) * kTileDim + col_local], row_scales[row_start + r + 0],
-              row_scales[row_start + r + 1], row_scales[row_start + r + 2],
-              row_scales[row_start + r + 3]);
+          reg_data[r / 4] =
+              dequantize_fp8x4(input_tile[(row_start + r + 0) * kTileDim + col_local],
+                               input_tile[(row_start + r + 1) * kTileDim + col_local],
+                               input_tile[(row_start + r + 2) * kTileDim + col_local],
+                               input_tile[(row_start + r + 3) * kTileDim + col_local],
+                               row_scales[row_start + r + 0], row_scales[row_start + r + 1],
+                               row_scales[row_start + r + 2], row_scales[row_start + r + 3]);
           const ptx::bf16x4& values = reg_data[r / 4];
           amax = fmaxf(amax, fabsf(static_cast<float>(values.x1)));
           amax = fmaxf(amax, fabsf(static_cast<float>(values.x2)));
@@ -305,7 +302,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
           const ptx::bf16x4& values = reg_data[r / 4];
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
-            const bf16 value = e == 0 ? values.x1 : e == 1 ? values.x2 : e == 2 ? values.x3 : values.x4;
+            const bf16 value = e == 0   ? values.x1
+                               : e == 1 ? values.x2
+                               : e == 2 ? values.x3
+                                        : values.x4;
             const int row = row_start + r + e;
             if constexpr (kReturnDequantized) {
               dequantized[tensor_base + (local_row_base + row) * last_logical_dim + col] = value;
@@ -320,54 +320,53 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
     } else {
 #pragma unroll
       for (int pass = 0; pass < kColumnPasses; ++pass) {
-      const int col_local = pass * kColsPerPass + col_in_pass;
-      const size_t col = global_col_base + col_local;
-      float amax = 0.f;
-      // Keep the reconstructed values packed as BF16 pairs.  The previous
-      // float[64] staging consumed one 32-bit register per value even though
-      // the dequantized result is rounded to BF16 before both output paths.
-      // Packing four values cuts the staging footprint in half and leaves
-      // more room for resident CTAs on Hopper.
-      ptx::bf16x4 reg_data[kRowsPerThread / 4];
+        const int col_local = pass * kColsPerPass + col_in_pass;
+        const size_t col = global_col_base + col_local;
+        float amax = 0.f;
+        // Keep the reconstructed values packed as BF16 pairs.  The previous
+        // float[64] staging consumed one 32-bit register per value even though
+        // the dequantized result is rounded to BF16 before both output paths.
+        // Packing four values cuts the staging footprint in half and leaves
+        // more room for resident CTAs on Hopper.
+        ptx::bf16x4 reg_data[kRowsPerThread / 4];
 #pragma unroll
-      for (int r = 0; r < kRowsPerThread; r += 4) {
-        reg_data[r / 4] = dequantize_fp8x4(
-            input_tile[(row_start + r + 0) * kTileDim + col_local],
-            input_tile[(row_start + r + 1) * kTileDim + col_local],
-            input_tile[(row_start + r + 2) * kTileDim + col_local],
-            input_tile[(row_start + r + 3) * kTileDim + col_local], row_scales[row_start + r + 0],
-            row_scales[row_start + r + 1], row_scales[row_start + r + 2],
-            row_scales[row_start + r + 3]);
-        const ptx::bf16x4 &values = reg_data[r / 4];
-        amax = fmaxf(amax, fabsf(static_cast<float>(values.x1)));
-        amax = fmaxf(amax, fabsf(static_cast<float>(values.x2)));
-        amax = fmaxf(amax, fabsf(static_cast<float>(values.x3)));
-        amax = fmaxf(amax, fabsf(static_cast<float>(values.x4)));
-      }
-      amax = subwarp_reduce_max_broadcast<kThreadsPerCol>(amax);
-      const float scale = compute_scale_from_types<float, OType>(amax, epsilon, power_of_two);
-      if (sub == 0) {
-        const size_t scale_stride = DIVUP_TO_MULTIPLE(last_logical_dim, 4);
-        const size_t group_scale_base = (group_start / kTileDim) * scale_stride;
-        colwise_scale[group_scale_base + local_tile_y * scale_stride + col] = __frcp_rn(scale);
-      }
-#pragma unroll
-      for (int r = 0; r < kRowsPerThread; r += 16) {
-        if constexpr (kReturnDequantized) {
-#pragma unroll
-          for (int e = 0; e < 16; ++e) {
-            const ptx::bf16x4& value = reg_data[(r + e) / 4];
-            dequantized[tensor_base + (local_row_base + row_start + r + e) * last_logical_dim + col] =
-                (e % 4 == 0) ? value.x1
-                : (e % 4 == 1) ? value.x2
-                : (e % 4 == 2) ? value.x3
-                               : value.x4;
-          }
+        for (int r = 0; r < kRowsPerThread; r += 4) {
+          reg_data[r / 4] =
+              dequantize_fp8x4(input_tile[(row_start + r + 0) * kTileDim + col_local],
+                               input_tile[(row_start + r + 1) * kTileDim + col_local],
+                               input_tile[(row_start + r + 2) * kTileDim + col_local],
+                               input_tile[(row_start + r + 3) * kTileDim + col_local],
+                               row_scales[row_start + r + 0], row_scales[row_start + r + 1],
+                               row_scales[row_start + r + 2], row_scales[row_start + r + 3]);
+          const ptx::bf16x4& values = reg_data[r / 4];
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x1)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x2)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x3)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x4)));
         }
-        store_columnwise_bf16<OType, 16>(
-            colwise_data, &reg_data[r / 4], scale, tensor_base, col, group_rows,
-            local_row_base + row_start + r);
-      }
+        amax = subwarp_reduce_max_broadcast<kThreadsPerCol>(amax);
+        const float scale = compute_scale_from_types<float, OType>(amax, epsilon, power_of_two);
+        if (sub == 0) {
+          const size_t scale_stride = DIVUP_TO_MULTIPLE(last_logical_dim, 4);
+          const size_t group_scale_base = (group_start / kTileDim) * scale_stride;
+          colwise_scale[group_scale_base + local_tile_y * scale_stride + col] = __frcp_rn(scale);
+        }
+#pragma unroll
+        for (int r = 0; r < kRowsPerThread; r += 16) {
+          if constexpr (kReturnDequantized) {
+#pragma unroll
+            for (int e = 0; e < 16; ++e) {
+              const ptx::bf16x4& value = reg_data[(r + e) / 4];
+              dequantized[tensor_base + (local_row_base + row_start + r + e) * last_logical_dim +
+                          col] = (e % 4 == 0)   ? value.x1
+                                 : (e % 4 == 1) ? value.x2
+                                 : (e % 4 == 2) ? value.x3
+                                                : value.x4;
+            }
+          }
+          store_columnwise_bf16<OType, 16>(colwise_data, &reg_data[r / 4], scale, tensor_base, col,
+                                           group_rows, local_row_base + row_start + r);
+        }
       }
     }
   } else if constexpr (kReturnDequantized) {
@@ -392,9 +391,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
         const int row_local = row_start + r * kThreadsPerCol;
         const size_t global_row = global_row_base + row_local;
         if (global_row < live_end && col_valid) {
-          const float value = static_cast<float>(static_cast<bf16>(
-              static_cast<float>(input_tile[row_local * kTileDim + thr_col]) *
-              row_scales[row_local]));
+          const float value = static_cast<float>(
+              static_cast<bf16>(static_cast<float>(input_tile[row_local * kTileDim + thr_col]) *
+                                row_scales[row_local]));
           dequantized[tensor_base + (local_row_base + row_local) * last_logical_dim + col] =
               static_cast<bf16>(value);
         }
@@ -406,30 +405,31 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
 template <typename Traits, typename IType, bool kReturnDequantized, bool kReturnColumnwise,
           bool kReturnRowwiseScale>
 void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor* output,
-                                     Tensor* dequantized, size_t first_logical_dim,
-                                     size_t last_logical_dim, size_t row_scale_cols,
-                                     bool compact_scale_layout, size_t col_scale_rows,
-                                     float epsilon, bool power_of_two, cudaStream_t stream) {
+                                      Tensor* dequantized, size_t first_logical_dim,
+                                      size_t last_logical_dim, size_t row_scale_cols,
+                                      bool compact_scale_layout, size_t col_scale_rows,
+                                      float epsilon, bool power_of_two, cudaStream_t stream) {
   using OType = fp8e4m3;
   if (first_logical_dim == 0 || last_logical_dim == 0) return;
 
-  NVTE_CHECK(last_logical_dim % kTileDim == 0, "EP block128 requant requires hidden divisible by 128");
+  NVTE_CHECK(last_logical_dim % kTileDim == 0,
+             "EP block128 requant requires hidden divisible by 128");
   if constexpr (kReturnColumnwise) {
-    NVTE_CHECK(output->columnwise_data.dptr != nullptr && output->columnwise_scale_inv.dptr != nullptr,
-               "Columnwise requantization requires both data and scale output storage.");
+    NVTE_CHECK(
+        output->columnwise_data.dptr != nullptr && output->columnwise_scale_inv.dptr != nullptr,
+        "Columnwise requantization requires both data and scale output storage.");
   }
   if constexpr (kReturnRowwiseScale) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr,
                "Rowwise scale conversion requires output storage.");
   }
   const size_t smem_bytes = kReturnColumnwise || kReturnDequantized
-                               ? kTileDim * kTileDim * sizeof(IType) + TMA_SHMEM_ALIGNMENT - 1
-                               : 0;
+                                ? kTileDim * kTileDim * sizeof(IType) + TMA_SHMEM_ALIGNMENT - 1
+                                : 0;
 
   CUtensorMap tensor_map_input{};
-  create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim, last_logical_dim, kTileDim, kTileDim,
-                       last_logical_dim, 0, TypeInfo<IType>::size);
-
+  create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim, last_logical_dim, kTileDim,
+                       kTileDim, last_logical_dim, 0, TypeInfo<IType>::size);
 
   const unsigned int grid_x = static_cast<unsigned int>(last_logical_dim / kTileDim);
   dim3 grid(grid_x, (first_logical_dim + kTileDim - 1) / kTileDim);
@@ -440,7 +440,7 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
   }
 
   auto* kernel = block128_group_requantize_kernel<Traits, IType, OType, kReturnDequantized,
-                                                 kReturnColumnwise, kReturnRowwiseScale>;
+                                                  kReturnColumnwise, kReturnRowwiseScale>;
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        static_cast<int>(smem_bytes)));
   kernel<<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
@@ -452,16 +452,16 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
       kReturnDequantized ? reinterpret_cast<bf16*>(dequantized->data.dptr) : nullptr,
       first_logical_dim, last_logical_dim, row_scale_cols, compact_scale_layout, col_scale_rows,
       reinterpret_cast<const int64_t*>(input->tensor_offsets.dptr),
-      reinterpret_cast<const int64_t*>(input->first_dims.dptr),
-      input->num_tensors, epsilon, power_of_two);
+      reinterpret_cast<const int64_t*>(input->first_dims.dptr), input->num_tensors, epsilon,
+      power_of_two);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace
 
 void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* output,
-                                   Tensor* dequantized, const QuantizationConfig* quant_config,
-                                   cudaStream_t stream) {
+                                    Tensor* dequantized, const QuantizationConfig* quant_config,
+                                    cudaStream_t stream) {
   NVTE_CHECK(input.logical_shape.ndim == 2 && output->logical_shape.ndim == 2,
              "Block scaling requant requires 2D grouped shapes.");
   const size_t first_logical_dim = input.logical_shape.data[0];
@@ -470,19 +470,19 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
                  output->logical_shape.data[1] == last_logical_dim &&
                  input.num_tensors == output->num_tensors,
              "Block scaling requant input and output grouped shapes must match.");
-  const ShapeRepresentation shape_rep = input.all_same_shape()
-      ? ShapeRepresentation::SAME_BOTH_DIMS
-      : input.all_same_last_dim() ? ShapeRepresentation::VARYING_FIRST_DIM
+  const ShapeRepresentation shape_rep =
+      input.all_same_shape()       ? ShapeRepresentation::SAME_BOTH_DIMS
+      : input.all_same_last_dim()  ? ShapeRepresentation::VARYING_FIRST_DIM
       : input.all_same_first_dim() ? ShapeRepresentation::VARYING_LAST_DIM
-                                  : ShapeRepresentation::VARYING_BOTH_DIMS;
+                                   : ShapeRepresentation::VARYING_BOTH_DIMS;
   NVTE_CHECK(shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
                  shape_rep == ShapeRepresentation::VARYING_FIRST_DIM,
              "Block scaling requant supports only SAME_BOTH_DIMS and VARYING_FIRST_DIM.");
   NVTE_CHECK(input.all_same_first_dim() == output->all_same_first_dim() &&
                  input.all_same_last_dim() == output->all_same_last_dim(),
              "Input and output grouped shape representations must match.");
-  if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
-      input.tensor_offsets.dptr != nullptr || input.tensor_offsets.numel() != 0) {
+  if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM || input.tensor_offsets.dptr != nullptr ||
+      input.tensor_offsets.numel() != 0) {
     NVTE_CHECK(input.tensor_offsets.shape == std::vector<size_t>{input.num_tensors + 1},
                "Block scaling requant requires num_tensors + 1 offsets.");
     NVTE_CHECK(input.tensor_offsets.dtype == DType::kInt64,
@@ -509,14 +509,14 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
              "Block scaling grouped requant requires 2D FP8 input and FP32 scales.");
   NVTE_CHECK(output->scaling_mode == NVTE_BLOCK_SCALING_1D,
              "Block scaling grouped requant requires 1D block scaling output.");
-  NVTE_CHECK((output->columnwise_data.dptr == nullptr) ==
-                 (output->columnwise_scale_inv.dptr == nullptr),
-             "Block scaling columnwise data and scales must be supplied together.");
+  NVTE_CHECK(
+      (output->columnwise_data.dptr == nullptr) == (output->columnwise_scale_inv.dptr == nullptr),
+      "Block scaling columnwise data and scales must be supplied together.");
   if (dequantized != nullptr) {
-    NVTE_CHECK(dequantized->data.dtype == DType::kBFloat16 &&
-                   dequantized->data.shape ==
-                       std::vector<size_t>({first_logical_dim, last_logical_dim}),
-               "Block scaling dequantized output must be BF16 with the input shape.");
+    NVTE_CHECK(
+        dequantized->data.dtype == DType::kBFloat16 &&
+            dequantized->data.shape == std::vector<size_t>({first_logical_dim, last_logical_dim}),
+        "Block scaling dequantized output must be BF16 with the input shape.");
   }
 
   NVTE_CHECK(last_logical_dim > 0 && last_logical_dim % kTileDim == 0,
@@ -531,12 +531,13 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   }
   NVTE_CHECK(output->scale_inv.numel() == first_logical_dim * blocks,
              "Block scaling output rowwise scale capacity must match logical shape.");
-  NVTE_CHECK(input.with_gemm_swizzled_scales ==
-                 (input.scale_inv.dptr == output->scale_inv.dptr) || first_logical_dim == 0,
+  NVTE_CHECK(input.with_gemm_swizzled_scales == (input.scale_inv.dptr == output->scale_inv.dptr) ||
+                 first_logical_dim == 0,
              "Block scaling compact-to-GEMM scale conversion requires separate storage.");
   const bool compact_scale_layout = !input.with_gemm_swizzled_scales;
   const size_t row_scale_cols = compact_scale_layout && first_logical_dim != 0
-                                   ? input.scale_inv.numel() / first_logical_dim : blocks;
+                                    ? input.scale_inv.numel() / first_logical_dim
+                                    : blocks;
   NVTE_CHECK(row_scale_cols >= blocks,
              "Block scaling compact scales must have at least one scale per column block.");
   NVTE_CHECK(output->scale_inv.dtype == DType::kFloat32,
@@ -561,9 +562,9 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   NVTE_CHECK(input.data.dptr != nullptr && input.scale_inv.dptr != nullptr &&
                  output->scale_inv.dptr != nullptr,
              "Block scaling grouped requant requires rowwise data and scales.");
-  NVTE_CHECK(shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-                 input.tensor_offsets.dptr != nullptr,
-             "Block scaling grouped requant requires tensor offsets storage.");
+  NVTE_CHECK(
+      shape_rep == ShapeRepresentation::SAME_BOTH_DIMS || input.tensor_offsets.dptr != nullptr,
+      "Block scaling grouped requant requires tensor offsets storage.");
   NVTE_CHECK(dequantized == nullptr || dequantized->data.dptr != nullptr,
              "Block scaling dequantized output requires storage.");
 
@@ -584,9 +585,8 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
                   dequantized != nullptr, RETURN_DEQUANTIZED,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                       output->columnwise_data.dptr != nullptr, RETURN_COLUMNWISE,
-                      launch_block128_group_requantize<
-                          ActiveTraits, IType, RETURN_DEQUANTIZED, RETURN_COLUMNWISE,
-                          RETURN_ROWWISE_SCALE>(
+                      launch_block128_group_requantize<ActiveTraits, IType, RETURN_DEQUANTIZED,
+                                                       RETURN_COLUMNWISE, RETURN_ROWWISE_SCALE>(
                           &input, output, dequantized, first_logical_dim, last_logical_dim,
                           row_scale_cols, compact_scale_layout, col_scale_rows, epsilon,
                           power_of_two, stream);););););  // NOLINT(*)

@@ -38,8 +38,9 @@ void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
   GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
   if (input_cu->scaling_mode == NVTE_BLOCK_SCALING_1D) {
     requantize::group_requantize_block_scaling(
-        *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
-        reinterpret_cast<const QuantizationConfig*>(quant_config), stream);
+        *input_cu, output_cu,
+        dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
+        reinterpret_cast<const QuantizationConfig *>(quant_config), stream);
     return;
   }
   dispatch::mxfp8::group_requantize(

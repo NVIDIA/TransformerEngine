@@ -7,7 +7,6 @@
 #ifdef NVTE_WITH_NCCL_EP
 
 #include "transformer_engine/ep.h"
-#include "transformer_engine/swizzle.h"
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -24,6 +23,7 @@
 #include <vector>
 
 #include "transformer_engine/comm_window.h"
+#include "transformer_engine/swizzle.h"
 
 // torch's NCCL symm-mem headers (zero-copy path) exist only since torch 2.11;
 // without them NCCL_HAS_SYMMEM_SUPPORT stays undefined and zero-copy is compiled out.
@@ -164,8 +164,7 @@ NVTEScalingMode scaling_mode_for_scale_dtype(at::ScalarType st) {
 // (hidden/block). Both scales must be 2D contiguous with matching cols dividing H and numels
 // equal to their row counts times cols; the recv scale must be symm-mem-backed under zero-copy.
 size_t check_block_scale_pair(const at::Tensor& send_scale, const at::Tensor& recv_scale,
-                              size_t send_rows, size_t recv_rows, size_t H,
-                              const char* recv_name) {
+                              size_t send_rows, size_t recv_rows, size_t H, const char* recv_name) {
   NVTE_CHECK(send_scale.dim() >= 2 && recv_scale.dim() >= 2,
              "scale-inverses must be at least 2D [., H/block]");
   NVTE_CHECK(send_scale.is_contiguous() && recv_scale.is_contiguous(),
@@ -174,9 +173,8 @@ size_t check_block_scale_pair(const at::Tensor& send_scale, const at::Tensor& re
              "send/recv scale dtypes must match");
   const size_t send_cols = static_cast<size_t>(send_scale.size(-1));
   const size_t recv_cols = static_cast<size_t>(recv_scale.size(-1));
-  const size_t sc_cols = send_scale.scalar_type() == at::kFloat && H % 128 == 0
-                             ? H / 128
-                             : send_cols;
+  const size_t sc_cols =
+      send_scale.scalar_type() == at::kFloat && H % 128 == 0 ? H / 128 : send_cols;
   NVTE_CHECK(sc_cols > 0 && H % sc_cols == 0, "scale cols (", sc_cols,
              ") must be a non-zero divisor of hidden (", H, ")");
   NVTE_CHECK(send_cols >= sc_cols && recv_cols >= sc_cols,
@@ -350,8 +348,7 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   if (is_scaled) {
     NVTE_CHECK(recv_scale_inv.has_value(),
                "recv_scale_inv must be provided together with tokens_scale_inv");
-    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens),
-               "EP scaled dispatch requires E4M3 FP8 tokens");
+    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens), "EP scaled dispatch requires E4M3 FP8 tokens");
     scaling_mode = scaling_mode_for_scale_dtype(tokens_scale_inv->scalar_type());
     sc_cols = check_block_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
                                      "recv_scale_inv");
@@ -369,9 +366,8 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                 : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
-  const size_t recv_scale_cols = is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D
-                                     ? H / 128
-                                     : sc_cols;
+  const size_t recv_scale_cols =
+      is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D ? H / 128 : sc_cols;
   auto recv_tokens_te =
       is_scaled ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
                                               nullptr, nullptr, recv_scale_inv->data_ptr(),
@@ -461,8 +457,7 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
   if (is_scaled) {
     NVTE_CHECK(recv_scale_inv.has_value(),
                "recv_scale_inv must be provided together with tokens_scale_inv");
-    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens),
-               "EP scaled dispatch requires E4M3 FP8 tokens");
+    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens), "EP scaled dispatch requires E4M3 FP8 tokens");
     scaling_mode = scaling_mode_for_scale_dtype(tokens_scale_inv->scalar_type());
     sc_cols = check_block_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
                                      "recv_scale_inv");
@@ -480,9 +475,8 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
                 : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
-  const size_t recv_scale_cols = is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D
-                                     ? H / 128
-                                     : sc_cols;
+  const size_t recv_scale_cols =
+      is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D ? H / 128 : sc_cols;
   auto recv_tokens_te =
       is_scaled ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
                                               nullptr, nullptr, recv_scale_inv->data_ptr(),
@@ -703,8 +697,7 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   if (is_scaled) {
     NVTE_CHECK(grad_expert_out_scale_inv.has_value(),
                "grad_expert_out_scale_inv must be provided together with grad_scale_inv");
-    NVTE_CHECK(is_fp8_scaled(is_scaled, grad),
-               "EP scaled combine backward requires E4M3 FP8 grad");
+    NVTE_CHECK(is_fp8_scaled(is_scaled, grad), "EP scaled combine backward requires E4M3 FP8 grad");
     scaling_mode = scaling_mode_for_scale_dtype(grad_scale_inv->scalar_type());
     sc_cols = check_block_scale_pair(*grad_scale_inv, *grad_expert_out_scale_inv, T_flat, recv_pr,
                                      H, "grad_expert_out_scale_inv");
@@ -791,7 +784,6 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("grad_scale_inv") = std::nullopt,
         py::arg("grad_expert_out_scale_inv") = std::nullopt,
         py::call_guard<py::gil_scoped_release>());
-
 }
 
 }  // namespace transformer_engine::pytorch

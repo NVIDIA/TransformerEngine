@@ -470,16 +470,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
 // row-mates with shfl_xor, then quantizes and stores.
 
 template <bool kSameBothDims, typename CType, typename IType, typename OType>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-    group_block_scaled_1d_rw_kernel(const IType* __restrict__ input_base,
-                                    OType* __restrict__ output_base,
-                                    CType* __restrict__ scale_inv_base,
-                                    const int64_t* __restrict__ tensor_offsets_ptr,
-                                    const size_t num_tensors, const size_t common_first_dim_blocks,
-                                    const size_t K, const size_t total_row_blocks,
-                                    const size_t R_total, const bool compact_scales,
-                                    const float epsilon,
-                                    const bool pow_2_scales, const float* __restrict__ noop_ptr) {
+__global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_rw_kernel(
+    const IType* __restrict__ input_base, OType* __restrict__ output_base,
+    CType* __restrict__ scale_inv_base, const int64_t* __restrict__ tensor_offsets_ptr,
+    const size_t num_tensors, const size_t common_first_dim_blocks, const size_t K,
+    const size_t total_row_blocks, const size_t R_total, const bool compact_scales,
+    const float epsilon, const bool pow_2_scales, const float* __restrict__ noop_ptr) {
 #if __CUDA_ARCH__ >= 900
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
@@ -579,8 +575,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     CType* __restrict__ scale_inv_t_base, const int64_t* __restrict__ tensor_offsets_ptr,
     const size_t num_tensors, const size_t common_first_dim_blocks, const size_t K,
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_t_stride_aligned_K,
-    const size_t R_total, const bool compact_scales, const float epsilon,
-    const bool pow_2_scales,
+    const size_t R_total, const bool compact_scales, const float epsilon, const bool pow_2_scales,
     const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900
   // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
@@ -924,8 +919,7 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
 inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
                                         const bool pow_2_scales, const bool compact_scales,
-                                        cudaStream_t stream,
-                                        GroupedTensor* dbias = nullptr,
+                                        cudaStream_t stream, GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,

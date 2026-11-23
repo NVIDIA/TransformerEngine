@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "transformer_engine/cast.h"
-#include "transformer_engine/ep.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +24,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/activation.h"
+#include "transformer_engine/ep.h"
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
@@ -1067,7 +1067,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
 
   NVTE_CHECK(is_block_scale_1d || detail::IsMXFP8Quantizers(quantizer.ptr()),
              "Grouped requantization requires MXFP8 or block128 FP8.");
-  if (is_block_scale_1d && swizzled && (!need_columnwise || has_columnwise) && !return_dequantized) {
+  if (is_block_scale_1d && swizzled && (!need_columnwise || has_columnwise) &&
+      !return_dequantized) {
     return py::none();
   }
   const bool build_columnwise = need_columnwise && !has_columnwise;
@@ -1090,9 +1091,11 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // Each group's token count must be a multiple of 128 too, so that every group's scales start
   // on a swizzle-tile boundary. Those counts live on the device (host reads would break CUDA
   // graph capture), so that half is the caller's contract rather than an assertion.
-  NVTE_CHECK((is_block_scale_1d || total_tokens % 128 == 0) && hidden_dim > 0 && hidden_dim % 128 == 0,
-             "Grouped requantization requires hidden divisible by 128 and MXFP8 rows divisible by 128, got (",
-             total_tokens, ", ", hidden_dim, ").");
+  NVTE_CHECK(
+      (is_block_scale_1d || total_tokens % 128 == 0) && hidden_dim > 0 && hidden_dim % 128 == 0,
+      "Grouped requantization requires hidden divisible by 128 and MXFP8 rows divisible by 128, "
+      "got (",
+      total_tokens, ", ", hidden_dim, ").");
 
   // The common API selects the faster requantization kernel when no BF16 output
   // is requested. Its BF16 intermediate reproduces the unfused chain's numerics.
@@ -1114,10 +1117,10 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // unfused chain's dedicated empty-input handling accepts and the kernel's pointer
   // validation (correctly) rejects.
   const bool use_fused_kernel =
-      (is_block_scale_1d || transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true)) &&
+      (is_block_scale_1d ||
+       transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true)) &&
       (is_block_scale_1d || need_columnwise) && (same_both_dims || has_usable_offsets) &&
-      (is_block_scale_1d || total_tokens > 0) &&
-      otype == DType::kBFloat16 &&
+      (is_block_scale_1d || total_tokens > 0) && otype == DType::kBFloat16 &&
       op_dtype == DType::kFloat8E4M3 &&
       transformer_engine::cuda::sm_arch() >= (is_block_scale_1d ? 90 : 100);
   if (use_fused_kernel) {
@@ -1127,9 +1130,10 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     const auto tokens_i64 = static_cast<int64_t>(total_tokens);
     const auto hidden_i64 = static_cast<int64_t>(hidden_dim);
     const size_t num_scales = total_tokens * (hidden_dim / (is_block_scale_1d ? 128 : 32));
-    const size_t columnwise_num_scales = is_block_scale_1d
-        ? ((total_tokens + 127) / 128) * hidden_dim : num_scales;
-    const auto scale_options = rowwise_data.options().dtype(is_block_scale_1d ? at::kFloat : at::kByte);
+    const size_t columnwise_num_scales =
+        is_block_scale_1d ? ((total_tokens + 127) / 128) * hidden_dim : num_scales;
+    const auto scale_options =
+        rowwise_data.options().dtype(is_block_scale_1d ? at::kFloat : at::kByte);
     const auto scale_dtype = is_block_scale_1d ? DType::kFloat32 : DType::kFloat8E8M0;
     const auto scaling_mode = is_block_scale_1d ? NVTE_BLOCK_SCALING_1D : NVTE_MXFP8_1D_SCALING;
     NVTE_CHECK(rowwise_data.scalar_type() == at::kByte &&
@@ -1154,10 +1158,13 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     at::Tensor columnwise_data, columnwise_scale_inv;
     if (build_columnwise) {
       columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
-      columnwise_scale_inv = at::empty({static_cast<int64_t>(columnwise_num_scales)}, scale_options);
+      columnwise_scale_inv =
+          at::empty({static_cast<int64_t>(columnwise_num_scales)}, scale_options);
     }
-    at::Tensor swizzled_rowwise_scale_inv = is_block_scale_1d && swizzled
-        ? rowwise_scale_inv : at::empty({static_cast<int64_t>(num_scales)}, scale_options);
+    at::Tensor swizzled_rowwise_scale_inv =
+        is_block_scale_1d && swizzled
+            ? rowwise_scale_inv
+            : at::empty({static_cast<int64_t>(num_scales)}, scale_options);
     at::Tensor first_dims_i64;
     if (!same_both_dims) {
       first_dims_i64 =
@@ -1227,7 +1234,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   }
 
   NVTE_CHECK(!is_block_scale_1d,
-             "Block128 grouped requantization requires Hopper or newer, E4M3 input, BF16 output, and group offsets.");
+             "Block128 grouped requantization requires Hopper or newer, E4M3 input, BF16 output, "
+             "and group offsets.");
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
   // undefined when nothing consumes it, which skips the pass entirely.

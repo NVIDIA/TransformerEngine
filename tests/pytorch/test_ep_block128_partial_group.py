@@ -23,8 +23,11 @@ pytestmark = pytest.mark.skipif(
 
 def _compact_payload(source):
     quantizer = Float8BlockQuantizer(
-        tex.DType.kFloat8E4M3, rowwise=True, columnwise=False,
-        block_scaling_dim=1, force_pow_2_scales=True,
+        tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=False,
+        block_scaling_dim=1,
+        force_pow_2_scales=True,
         rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
     )
     tensor = quantizer.quantize(source)
@@ -51,33 +54,47 @@ def _partial_final_group(last_rows, hidden):
     capacity = 384
     live_rows = 128 + last_rows
     blocks = hidden // 128
-    parts = [torch.randn(n, hidden, device="cuda", dtype=torch.bfloat16)
-             for n in (128, last_rows)]
+    parts = [torch.randn(n, hidden, device="cuda", dtype=torch.bfloat16) for n in (128, last_rows)]
     packed = [_compact_payload(x) for x in parts]
     reference = [_columnwise_reference(p[0], p[1]) for p in packed]
     row_data = torch.full((capacity, hidden), 126, device="cuda", dtype=torch.uint8)
     row_scale = torch.full((capacity * blocks,), 1000.0, device="cuda")
     start = 0
     for n, (data, _, gemm) in zip((128, last_rows), packed):
-        row_data[start:start + n] = data
-        row_scale[start * blocks:(start + n) * blocks] = gemm[:, :n].flatten()
+        row_data[start : start + n] = data
+        row_scale[start * blocks : (start + n) * blocks] = gemm[:, :n].flatten()
         start += n
     counts = torch.tensor([128, 0, last_rows, 0], device="cuda", dtype=torch.int64)
     offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))) * hidden
     quantizer = Float8BlockQuantizer(
-        tex.DType.kFloat8E4M3, rowwise=True, columnwise=True,
-        block_scaling_dim=1, force_pow_2_scales=True,
+        tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        block_scaling_dim=1,
+        force_pow_2_scales=True,
     )
     grouped = GroupedTensor(
-        (capacity, hidden), torch.bfloat16, num_tensors=4, quantizer=quantizer,
-        data=row_data.flatten(), scale_inv=row_scale, first_dims=counts,
-        tensor_offsets=offsets, with_gemm_swizzled_scales=True,
+        (capacity, hidden),
+        torch.bfloat16,
+        num_tensors=4,
+        quantizer=quantizer,
+        data=row_data.flatten(),
+        scale_inv=row_scale,
+        first_dims=counts,
+        tensor_offsets=offsets,
+        with_gemm_swizzled_scales=True,
     )
     graph = torch.cuda.CUDAGraph()
     torch.cuda.synchronize()
     with torch.cuda.graph(graph):
         bf16 = tex.group_requantize_inplace(
-            grouped, quantizer, 4, counts, tex.DType.kBFloat16, offsets, True,
+            grouped,
+            quantizer,
+            4,
+            counts,
+            tex.DType.kBFloat16,
+            offsets,
+            True,
         )
     cw = grouped.columnwise_data.flatten()
     scales = grouped.columnwise_scale_inv.flatten()
@@ -90,11 +107,11 @@ def _partial_final_group(last_rows, hidden):
     expected_cw = torch.cat([r[0].flatten() for r in reference])
     expected_scales = torch.cat([r[1].flatten() for r in reference])
     expected_bf16 = torch.cat([r[2] for r in reference])
-    torch.testing.assert_close(cw[:live_rows * hidden], expected_cw, rtol=0, atol=0)
-    torch.testing.assert_close(scales[:2 * hidden], expected_scales, rtol=0, atol=0)
+    torch.testing.assert_close(cw[: live_rows * hidden], expected_cw, rtol=0, atol=0)
+    torch.testing.assert_close(scales[: 2 * hidden], expected_scales, rtol=0, atol=0)
     torch.testing.assert_close(bf16[:live_rows], expected_bf16, rtol=0, atol=0)
-    assert torch.all(cw[live_rows * hidden:] == 123)
-    assert torch.all(scales[2 * hidden:] == -1)
+    assert torch.all(cw[live_rows * hidden :] == 123)
+    assert torch.all(scales[2 * hidden :] == -1)
     assert torch.all(bf16[live_rows:] == 42)
 
 
@@ -103,9 +120,7 @@ def _small_capacity_group(rows, hidden):
     torch.manual_seed(321)
     source = torch.randn(rows, hidden, device="cuda", dtype=torch.bfloat16)
     data, wire, gemm = _compact_payload(source)
-    reference_cw, reference_scales, reference_bf16 = (
-        _columnwise_reference(data, wire)
-    )
+    reference_cw, reference_scales, reference_bf16 = _columnwise_reference(data, wire)
     counts = torch.tensor([0, rows, 0], device="cuda", dtype=torch.int64)
     offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))) * hidden
     quantizer = Float8BlockQuantizer(
@@ -130,7 +145,13 @@ def _small_capacity_group(rows, hidden):
     torch.cuda.synchronize()
     with torch.cuda.graph(graph):
         bf16 = tex.group_requantize_inplace(
-            grouped, quantizer, 3, counts, tex.DType.kBFloat16, offsets, True,
+            grouped,
+            quantizer,
+            3,
+            counts,
+            tex.DType.kBFloat16,
+            offsets,
+            True,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -158,7 +179,9 @@ def test_rejects_small_capacity_group(rows, hidden):
 def _expect_unaligned_rejection(case, rows, hidden):
     child = subprocess.run(
         [sys.executable, __file__, case, str(rows), str(hidden)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert child.returncode != 0
     assert "First dimension of each tensor in a group must be divisible by 128" in (

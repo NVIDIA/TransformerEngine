@@ -1049,9 +1049,8 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
   this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
-  this->rowwise_scale_option =
-      quantizer.attr("rowwise_scale_layout")
-          .cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>();
+  this->rowwise_scale_option = quantizer.attr("rowwise_scale_layout")
+                                   .cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
 }
@@ -1218,7 +1217,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
     if (block_scaling_dim == 1 &&
-        rowwise_scale_option == transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
+        rowwise_scale_option ==
+            transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
       rowwise_scale_inv = at::empty({logical_first_dim, blocks_X}, float_opts);
     } else {
       rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
@@ -1441,8 +1441,7 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
-  quant_config.set_block_scaling_1d_rowwise_option(
-      static_cast<uint8_t>(rowwise_scale_option));
+  quant_config.set_block_scaling_1d_rowwise_option(static_cast<uint8_t>(rowwise_scale_option));
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });

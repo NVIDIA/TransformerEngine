@@ -7,7 +7,7 @@
 #include "../../common.h"
 namespace transformer_engine::requantize {
 void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* output,
-                              Tensor* dequantized, const QuantizationConfig* config,
-                              cudaStream_t stream);
+                                    Tensor* dequantized, const QuantizationConfig* config,
+                                    cudaStream_t stream);
 }
 #endif
