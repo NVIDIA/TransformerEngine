@@ -1450,6 +1450,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 and ub_obj_dgrad is None
                 and grad_input_quantizer is None
                 and not (bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1)
+                # custom_gemm ignores out and accumulate
+                and not is_custom(weight_for_dgrad)
+                and not is_custom(grad_output)
             ):
                 gemm_out = _grad_fanin_dgrad_out(
                     bwd_args.grad_fanin,

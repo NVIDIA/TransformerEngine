@@ -42,6 +42,7 @@ from ..utils import (
     nvtx_range_push,
     needs_quantized_gemm,
     get_nvtx_range_context,
+    get_cudnn_version,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -1433,6 +1434,7 @@ def _layernorm_linear_backward_impl(
                 and fanin_acc.dtype == ln_weight.dtype
                 and fanin_acc.is_contiguous()
                 and fanin_acc.numel() == inputmat.numel()
+                and _rmsnorm_bwd_add_supported()
             ):
                 # Gradient fan-in: add the other consumers' gradient (the residual branch) in
                 # the norm backward kernel instead of a separate elementwise add.
@@ -1489,6 +1491,24 @@ def _layernorm_linear_backward_impl(
         wgrad,
         grad_bias,
     )
+
+
+def _env_flag(name: str) -> bool:
+    """Value of a boolean NVTE environment variable (unset or empty is False)."""
+    value = os.getenv(name, "")
+    return value != "" and int(value) != 0
+
+
+def _rmsnorm_bwd_add_supported() -> bool:
+    """Whether ``tex.rmsnorm_bwd_add`` runs with the selected normalization backend.
+
+    The cuDNN backend (``NVTE_NORM_BWD_USE_CUDNN=1``) needs cuDNN 9.21 or newer for the fused
+    add. The TE backend rejects ``NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE=1``. When unsupported, the
+    plain RMSNorm backward runs and the fan-in adds the sum in ``finish``.
+    """
+    if _env_flag("NVTE_NORM_BWD_USE_CUDNN"):
+        return get_cudnn_version() >= (9, 21, 0)
+    return not _env_flag("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE")
 
 
 def _grad_fanin_partial_sum(grad_fanin: Any) -> Optional[torch.Tensor]:

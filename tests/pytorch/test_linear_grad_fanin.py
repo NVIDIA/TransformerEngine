@@ -10,9 +10,13 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+from transformer_engine.common.recipe import CustomRecipe, Format, MXFP8BlockScaling
+from transformer_engine.pytorch.custom_recipes.reference_current_scaling import (
+    current_scaling_ref_factory,
+)
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 S, B, H, F = 256, 2, 512, 384
 
@@ -117,6 +121,20 @@ def test_linear_grad_fanin_matches_autograd(quantization, tap_first):
         assert rel < 4e-3
     else:
         torch.testing.assert_close(got, ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_linear_grad_fanin_custom_recipe_does_not_accumulate():
+    """custom_gemm ignores out/accumulate, so custom recipes report the plain dgrad."""
+    torch.manual_seed(0)
+    recipe = CustomRecipe(qfactory=current_scaling_ref_factory)
+    linear = te.Linear(H, F, bias=False, params_dtype=torch.bfloat16)
+    x, gy_tap, gy_lin = _inputs(6)
+    ref = _run(linear, x, gy_tap, gy_lin, None, recipe)
+    fanin = GradFanIn(2)
+    got = _run(linear, x, gy_tap, gy_lin, fanin, recipe)
+    assert fanin.accumulated == [False, False]
+    torch.testing.assert_close(got, ref, atol=0, rtol=0)
 
 
 def test_linear_grad_fanin_epilogue_matches_fp32_sum():

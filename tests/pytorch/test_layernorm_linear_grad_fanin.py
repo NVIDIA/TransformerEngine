@@ -12,6 +12,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import is_mxfp8_available
+from transformer_engine.pytorch.module import layernorm_linear as lnl_module
 
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 
@@ -195,3 +196,37 @@ def test_layernorm_does_not_fuse():
     got = _run(module, x, dy_branch, dy_module, fanin, None)
     assert fanin.finished == [(False, False), (False, True)]
     torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+
+def test_unsupported_rmsnorm_bwd_add_falls_back(monkeypatch):
+    """Without a backend for rmsnorm_bwd_add, the plain backward runs and finish adds the sum."""
+    monkeypatch.setattr(lnl_module, "_rmsnorm_bwd_add_supported", lambda: False)
+    torch.manual_seed(0)
+    module = te.LayerNormLinear(
+        H, F, bias=False, normalization="RMSNorm", params_dtype=torch.bfloat16
+    )
+    x, dy_branch, dy_module = _inputs(7, F)
+    ref = _run(module, x, dy_branch, dy_module, None, None)
+    fanin = FanIn(2)
+    got = _run(module, x, dy_branch, dy_module, fanin, None)
+    assert fanin.finished == [(False, False), (False, True)]
+    torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "use_cudnn, zero_centered_in_wtype, cudnn_version, expected",
+    [
+        ("0", "0", (9, 12, 0), True),
+        ("0", "1", (9, 21, 0), False),
+        ("1", "0", (9, 20, 0), False),
+        ("1", "0", (9, 21, 0), True),
+        ("1", "1", (9, 21, 0), True),
+    ],
+)
+def test_rmsnorm_bwd_add_supported(
+    monkeypatch, use_cudnn, zero_centered_in_wtype, cudnn_version, expected
+):
+    monkeypatch.setenv("NVTE_NORM_BWD_USE_CUDNN", use_cudnn)
+    monkeypatch.setenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", zero_centered_in_wtype)
+    monkeypatch.setattr(lnl_module, "get_cudnn_version", lambda: cudnn_version)
+    assert lnl_module._rmsnorm_bwd_add_supported() is expected
