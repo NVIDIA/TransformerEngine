@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
 from ..constants import TE_DType, DType
 from ..utils import (
+    get_cached_ones_tensor,
     get_device_compute_capability,
     get_sm_count,
     _empty_tensor,
@@ -553,10 +554,9 @@ def general_grouped_gemm(
     if isinstance(quantization_params[0], DebugQuantizer):
         use_general_gemm_impl = True
     elif any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in itertools.chain(A, B)):
+        has_unsupported_epilogue = gelu or (grad and use_bias) or D_dtype is not None
         if (
-            gelu
-            or (grad and use_bias)
-            or D_dtype is not None
+            has_unsupported_epilogue
             or any(q is not None for q in quantization_params)
             or not all(isinstance(t, NVFP4TensorStorage) for t in itertools.chain(A, B))
         ):

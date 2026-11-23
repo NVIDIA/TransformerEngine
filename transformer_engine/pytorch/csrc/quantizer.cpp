@@ -2673,8 +2673,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     NVTE_CHECK(!this->with_2d_quantization,
                "Row-scaled NVFP4 quantization does not support 2D quantization.");
     NVTE_CHECK(!this->with_amax_reduction,
-               "Row-scaled NVFP4 quantization does not support amax reduction "
-               "(e.g. sequence parallelism).");
+               "Row-scaled NVFP4 quantization does not support amax reduction.");
     NVTE_CHECK(cols % 16 == 0, "Row-scaled NVFP4 quantization requires last dim divisible by 16.");
   }
 

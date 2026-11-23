@@ -1811,7 +1811,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     if tensor_type == "weight"
                     else (
                         self.recipe.row_scaled_activation
-                        and tensor_type in ("input", "output", "grad_output")
+                        and tensor_type in ("input", "output", "grad_output", "grad_input")
                     )
                 ),
                 nvfp4_use_4over6=nvfp4_use_4over6,

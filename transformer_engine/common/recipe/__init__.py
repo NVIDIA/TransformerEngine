@@ -576,26 +576,17 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     row_scaled_activation : bool, default = False
-             If set to `True`, activation and gradient-output quantizers emit
-             row-scaled NVFP4 tensors. Weights follow ``row_scaled_weight``.
-             In this mode, rowwise ``amax`` metadata is stored as a vector with
-             one FP32 value per tensor row and columnwise ``amax`` metadata as a
-             vector with one FP32 value per tensor column. Random Hadamard
-             transforms and stochastic rounding follow the same settings as
-             per-tensor NVFP4. Sequence parallelism, Userbuffers
-             communication overlap, and ``te.ops.GroupedLinear`` are not
-             supported.
+             If set to `True`, activations and gradients are quantized to
+             row-scaled NVFP4, where the per-tensor ``amax`` is replaced by one
+             ``amax`` per tensor row (rowwise) and per tensor column
+             (columnwise). Sequence parallelism, Userbuffers communication
+             overlap, and ``te.ops.GroupedLinear`` are not supported.
     row_scaled_weight : bool, default = False
-             If set to `True`, weight quantizers emit row-scaled NVFP4 tensors
-             with 1D (1x16) block scales, i.e. one global scale per output
-             channel for the forward GEMM and per input channel for the dgrad
-             GEMM. Weight 2D quantization is disabled in this mode. If `False`,
-             weights use a single per-tensor global scale with 16x16 (2D)
-             block scales, or 1x16 (1D) block scales when
-             ``disable_2d_quantization=True``. Row-scaled weights require BF16
-             weight tensors with both dimensions divisible by 32. The same
-             restrictions as ``row_scaled_activation`` apply, and 4over6 on
-             weights and quantized primary weights are not supported.
+             If set to `True`, weights are quantized to row-scaled NVFP4.
+             Requires ``disable_2d_quantization=True`` and BF16 weights with
+             both dimensions divisible by 32. The restrictions of
+             ``row_scaled_activation`` apply, and 4over6 on weights and
+             quantized primary weights are not supported.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares
@@ -660,6 +651,10 @@ class NVFP4BlockScaling(Recipe):
         assert not (
             self.row_scaled_weight and self.nvfp4_4over6 in ("weights", "all")
         ), "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support 4over6."
+        assert not (self.row_scaled_weight and not self.disable_2d_quantization), (
+            "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support 2D quantization. "
+            "Set disable_2d_quantization=True."
+        )
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -672,7 +667,7 @@ class NVFP4BlockScaling(Recipe):
         self.fp4_quant_fwd_weight = QParams(
             random_hadamard_transform=False,
             stochastic_rounding=False,
-            fp4_2d_quantization=not (self.disable_2d_quantization or self.row_scaled_weight),
+            fp4_2d_quantization=not self.disable_2d_quantization,
         )
         self.fp4_quant_bwd_grad = QParams(
             random_hadamard_transform=not self.disable_rht,

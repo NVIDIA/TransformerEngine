@@ -1765,13 +1765,17 @@ def test_linear_tight_dims(recipe, inference, dtype):
         torch.testing.assert_close(te_out, ref_out, **tols)
 
         if not inference:
-            # Linear quantizes the raw gradient internally. Give the reference
-            # its quantize-dequantize equivalent rather than requantizing it.
-            bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
-            grad_output_quantizer = bwd_state.make_quantizers()[0]
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            # Linear quantizes the raw gradient internally unless the recipe
+            # overrides backward. Give the reference its quantize-dequantize
+            # equivalent rather than requantizing it.
             grad_raw = torch.randn_like(te_out)
-            grad_qdq = grad_output_quantizer(grad_raw).dequantize()
+            if recipe.backward_override is None:
+                bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
+                grad_output_quantizer = bwd_state.make_quantizers()[0]
+                grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                grad_qdq = grad_output_quantizer(grad_raw).dequantize()
+            else:
+                grad_qdq = grad_raw
 
             te_out.backward(grad_raw)
             ref_out.backward(grad_qdq)

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import pytest
 import torch
@@ -128,9 +128,8 @@ def RHT(x: torch.Tensor) -> torch.Tensor:
     return out.view(original_shape)
 
 
-def row_amaxes(x_nvfp4) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    if not x_nvfp4._row_scaled_nvfp4:
-        return None, None
+def amaxes(x_nvfp4) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Rowwise and columnwise amaxes: per-tensor, or per-row/column if row-scaled."""
     return x_nvfp4._amax_rowwise.reshape(-1, 1), x_nvfp4._amax_columnwise.reshape(-1, 1)
 
 
@@ -164,7 +163,7 @@ def quantize_fp4(
     assert x_nvfp4_sut._columnwise_scale_inv is not None
     sx_t: torch.Tensor = x_nvfp4_sut._columnwise_scale_inv
 
-    return qx, sx, qx_t, sx_t, *row_amaxes(x_nvfp4_sut)
+    return qx, sx, qx_t, sx_t, *amaxes(x_nvfp4_sut)
 
 
 def group_quantize_fp4(
@@ -185,13 +184,14 @@ def group_quantize_fp4(
         use_2D (bool): Use 2D quantization.
         use_RHT (bool): Use RHT.
         split_sections (list[int]): Split sizes for inputs.
-        use_tex_split_quantize (bool): Toggle method. If True, use tex.split_quantize (or
-            tex.group_quantize for row-scaled), else use manual split and per-quantizer invocation.
+        use_tex_split_quantize (bool): Toggle method. If True, use tex.split_quantize, else use manual split and per-quantizer invocation.
         row_scaled (bool): Use row-scaled NVFP4.
 
     Returns:
         tuple: Lists of quantized tensors and scale tensors for all sections.
     """
+    if use_tex_split_quantize and row_scaled:
+        raise ValueError("tex.split_quantize does not support row-scaled NVFP4")
     num_tensors = len(split_sections)
     nvfp4_quantizers = [
         NVFP4Quantizer(
@@ -209,13 +209,8 @@ def group_quantize_fp4(
     ]
 
     if use_tex_split_quantize:
-        if row_scaled:
-            first_dims = torch.tensor(split_sections, dtype=torch.int64, device=x.device)
-            grouped = tex.group_quantize(x, nvfp4_quantizers[0], num_tensors, first_dims)
-            outputs = grouped.split_into_quantized_tensors()
-        else:
-            outputs = tex.split_quantize(x, split_sections, nvfp4_quantizers)
-        amax_list = [row_amaxes(output) for output in outputs]
+        outputs = tex.split_quantize(x, split_sections, nvfp4_quantizers)
+        amax_list = [amaxes(output) for output in outputs]
         qx_list = [output._rowwise_data.view(dtype=torch.uint8) for output in outputs]
         sx_list = [output._rowwise_scale_inv for output in outputs]
         qx_t_list = [output._columnwise_data.view(dtype=torch.uint8) for output in outputs]
@@ -242,7 +237,7 @@ def group_quantize_fp4(
             sx_list.append(sx)
             qx_t_list.append(qx_t)
             sx_t_list.append(sx_t)
-            amax_list.append(row_amaxes(x_nvfp4_sut))
+            amax_list.append(amaxes(x_nvfp4_sut))
 
     return qx_list, sx_list, qx_t_list, sx_t_list, amax_list
 
@@ -258,13 +253,9 @@ def check_quantization_nvfp4_versus_reference(
     y = x.t().contiguous()
     if use_RHT:
         y = RHT(y)
-    amax = torch.max(torch.abs(x)).float()
-    q_rn, s_rn, q_t_rn, s_t_rn, amax_rn, amax_t_rn = quantize_fp4(
+    q_rn, s_rn, q_t_rn, s_t_rn, amax, amax_t = quantize_fp4(
         x, use_stochastic_rounding=False, use_2D=use_2D, use_RHT=use_RHT, row_scaled=row_scaled
     )
-    amax_t = amax
-    if row_scaled:
-        amax, amax_t = amax_rn, amax_t_rn
     dq_rn = dequantize_fp4(q_rn, s_rn, amax)
     dq_t_rn = dequantize_fp4(q_t_rn, s_t_rn, amax_t)
     error_rn = (dq_rn - x).float()
@@ -352,9 +343,7 @@ def check_group_quantization_nvfp4_versus_reference(
         y = x.t().contiguous()
         if use_RHT:
             y = RHT(y)
-        amax = amax_t = torch.max(torch.abs(x)).float()
-        if row_scaled:
-            amax, amax_t = amax_rn_list[i]
+        amax, amax_t = amax_rn_list[i]
 
         # fetch q_rn, s_rn, q_t_rn, s_t_rn
         q_rn = q_rn_list[i]
@@ -463,6 +452,8 @@ def test_group_stochastic_rounding_quantization_versus_reference(
 ) -> None:
     if x_dtype == torch.float32 and use_RHT:
         pytest.skip("RHT is only supported with bfloat16")
+    if use_tex_split_quantize and row_scaled:
+        pytest.skip("tex.split_quantize does not support row-scaled NVFP4")
     check_group_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         use_2D=use_2D,
@@ -488,13 +479,9 @@ def test_stochastic_rounding_picks_an_adjacent_fp4_value(
     torch.manual_seed(seed)
     M, N = 512, 1024
     x = torch.randn((M, N), dtype=x_dtype, device=device)
-    amax = amax_t = torch.max(torch.abs(x)).float()
-
-    q, s, q_t, s_t, amax_row, amax_col = quantize_fp4(
+    q, s, q_t, s_t, amax, amax_t = quantize_fp4(
         x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=False, row_scaled=row_scaled
     )
-    if row_scaled:
-        amax, amax_t = amax_row, amax_col
     q_redraw, _, q_t_redraw, _, _, _ = quantize_fp4(
         x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=False, row_scaled=row_scaled
     )
