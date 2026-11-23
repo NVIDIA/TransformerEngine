@@ -56,6 +56,16 @@
         "The response explains how to serve the model with vLLM.",
         "The model is not converted to Transformer Engine."
       ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-006",
+      "prompt": "Speed up fine-tuning of ESM-2 650M with Transformer Engine.",
+      "expected_output": "A pointer to the BioNeMo Recipes acceleration skill, which covers protein language models such as ESM-2, instead of a module built from the Llama or Mixtral tutorial.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "assertions": [
+        "ESM-2 is identified as a protein language model and the BioNeMo Recipes acceleration skill is followed or pointed to.",
+        "The Transformer Engine module is not built from the Llama or Mixtral tutorial."
+      ]
     }
   ]
 }
