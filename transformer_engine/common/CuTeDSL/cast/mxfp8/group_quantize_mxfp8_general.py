@@ -1163,6 +1163,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         member_rows,
                         member_cols,
                         ACTIVATION=cfg.ACTIVATION,
+                        ACTIVATION_TABLE="none",
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
                         TILE_X=self.TILE_COLS,
@@ -1172,7 +1173,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         WITH_DBIAS=self.DBIAS_IN_COLWISE,
                         CACHE_ACTIVATION=self.CACHE_ACTIVATION,
                         ZERO_OOB_SCALES=True,
-                        dbias_init=partial_dbias,
+                        dbias_running=partial_dbias,
                     )
                 if cutlass.const_expr(self.CACHE_ACTIVATION):
                     # The rowwise pass reads the activation the colwise pass cached in sX.
@@ -1190,6 +1191,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         member_rows,
                         member_cols,
                         ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
+                        ACTIVATION_TABLE="none",
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
                         TILE_X=self.TILE_COLS,
