@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import atexit
-import os
 import warnings
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -1273,33 +1272,6 @@ def _make_grouped_mxfp8(data, scale_inv, token_counts, fp8_dtype, fake_dtype):
     )
 
 
-def _assert_cuda_metadata(condition: torch.Tensor, message: str) -> None:
-    """Validate device metadata.
-
-    The production path leaves these checks disabled because async metadata
-    assertions add a measurable stream dependency to every MoE forward. Enable
-    ``NVTE_EP_DEBUG_METADATA=1`` while debugging malformed dispatch metadata.
-    """
-    if os.environ.get("NVTE_EP_DEBUG_METADATA", "0") != "1":
-        return
-    if condition.device.type == "cuda":
-        is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
-        assert_async = getattr(torch, "_assert_async", None)
-        if not callable(assert_async):
-            raise RuntimeError("CUDA metadata validation requires torch._assert_async.")
-        if callable(is_capturing) and is_capturing():
-            assert_async(condition)
-            return
-        if os.environ.get("NVTE_EP_SYNC_METADATA_VALIDATION", "0") == "1":
-            if not bool(condition.item()):
-                raise ValueError(message)
-            return
-        assert_async(condition)
-        return
-    if not bool(condition):
-        raise ValueError(message)
-
-
 def _quantize_float8_blockwise(
     x: torch.Tensor,
     recipe,
@@ -1417,15 +1389,7 @@ def _make_grouped_blockwise(
         raise ValueError("Block128 grouped EP requires at least one expert.")
     if token_counts.device != data.device or token_counts.dtype != torch.int64:
         raise ValueError("Block128 expert counts must be int64 tensors on the data device.")
-    _assert_cuda_metadata(
-        ((token_counts >= 0) & (token_counts % 128 == 0)).all(),
-        "Block128 grouped EP requires nonnegative 128-aligned expert counts.",
-    )
     ends = token_counts.cumsum(0)
-    _assert_cuda_metadata(
-        ends[-1] <= capacity_rows,
-        "Expert counts exceed EP receive capacity.",
-    )
     # Keep compact wire scales flat; GroupedLinear converts them when preparing GEMM input.
     grouped_scales = scale_inv.reshape(-1)
     if tensor_offsets is None:

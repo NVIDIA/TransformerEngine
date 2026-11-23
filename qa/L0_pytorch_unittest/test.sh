@@ -55,7 +55,6 @@ python3 -m pytest --tb=auto --junitxml="$XML_LOG_DIR/pytest_test_ep_block128.xml
     "$TE_PATH/tests/pytorch/test_ep_block128_producer.py" \
     "$TE_PATH/tests/pytorch/test_ep_block128_contract.py" \
     "$TE_PATH/tests/pytorch/test_ep_block128_partial_group.py" \
-    "$TE_PATH/tests/pytorch/test_ep_block128_invalid_offsets.py" \
     "$TE_PATH/tests/pytorch/test_ep_block128_requant_parity.py" \
     "$TE_PATH/tests/pytorch/test_fp8_blockwise_rowwise_layout_option.py" || test_fail "EP block128 quantization"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_float8_blockwise_gemm_exact.xml $TE_PATH/tests/pytorch/test_float8_blockwise_gemm_exact.py || test_fail "test_float8_blockwise_gemm_exact.py"

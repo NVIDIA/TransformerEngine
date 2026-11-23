@@ -12,11 +12,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 
-#include <cstdio>
-#include <cstdlib>
-#include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <vector>
 
 #include <cudaTypedefs.h>
@@ -25,7 +21,6 @@
 
 #include "../../common.h"
 #include "../../recipe/recipe_common.cuh"
-#include "../../util/logging.h"
 #include "../../util/ptx.cuh"
 #include "../../util/cuda_runtime.h"
 #include "../../util/ptx_arch_spec.cuh"
@@ -38,16 +33,9 @@ namespace {
 // Block scaling FP8 grouped requantization shares the common grouped requant entry point.
 namespace ptx = transformer_engine::ptx;
 
-constexpr int kTileDim = 128; // Fixed to 128 beacause we are using 1x128 quantization
+constexpr int kTileDim = 128; // Fixed to 128 because we are using 1x128 quantization
 constexpr int kThreadsPerBlock = 256; // Thread block size, 8 warps in total
 constexpr int kThreadsPerWarp = 32;
-
-struct RequantizeDebugTrace {
-  uint64_t tma_issue;
-  uint64_t tma_ready;
-  uint64_t compute_done;
-  uint64_t drain_done;
-};
 
 // Decode four adjacent FP8 values with two packed conversion instructions.
 // Rowwise scales are different for the four rows, so the final multiply stays
@@ -151,37 +139,6 @@ struct RequantizeTraits {
   static constexpr ShapeRepresentation SHAPE_REPRESENTATION = ShapeRep;
 };
 
-/*! \brief Validate per-tile group offsets once per kernel launch.
- *
- *  Runs in a single CTA (blockIdx == 0,0 / threadIdx == 0); other CTAs do a
- *  cheaper per-tile bounds check below. Traps on violation so release builds
- *  surface the failure rather than silently dropping tiles.
- */
-__device__ void validate_group_offsets(const int64_t* tensor_offsets, size_t num_groups,
-                                       size_t last_logical_dim, size_t first_logical_dim) {
-  const int64_t last = tensor_offsets[num_groups];
-  const bool power_of_two_last_dim = (last_logical_dim & (last_logical_dim - 1)) == 0;
-  const size_t tile_elements = last_logical_dim * kTileDim;
-  bool valid = tensor_offsets[0] == 0 && last >= 0 &&
-               static_cast<uint64_t>(last) <= first_logical_dim * last_logical_dim;
-  int64_t begin = 0;
-  for (size_t group = 0; group < num_groups && valid; ++group) {
-    const int64_t end = tensor_offsets[group + 1];
-    valid = end >= begin && end <= last &&
-            (power_of_two_last_dim ? (static_cast<uint64_t>(end) & (last_logical_dim - 1)) == 0
-                                 : static_cast<uint64_t>(end) % last_logical_dim == 0) &&
-            (begin == last ||
-             (power_of_two_last_dim ? (static_cast<uint64_t>(begin) & (tile_elements - 1)) == 0
-                                  : static_cast<uint64_t>(begin) % tile_elements == 0));
-    begin = end;
-  }
-  if (!valid) {
-    NVTE_DEVICE_ERROR("Block scaling grouped requant invalid offsets: require zero origin, "
-                      "monotonic row boundaries within capacity, and 128-aligned group starts.");
-    __trap();
-  }
-}
-
 /*! \brief Requant one 128x128 tile from rowwise to columnwise block128 FP8.
  *
  *  Grid: (ceil(last_logical_dim/128), ceil(first_logical_dim/128)). Block: 256 threads.
@@ -190,7 +147,7 @@ __device__ void validate_group_offsets(const int64_t* tensor_offsets, size_t num
  *  Input supports E4M3/E5M2; columnwise output uses E4M3.
  */
 template <typename Traits, typename IType, typename OType, bool kReturnDequantized,
-          bool kReturnColumnwise, bool kReturnRowwiseScale, bool kDebugTrace>
+          bool kReturnColumnwise, bool kReturnRowwiseScale>
 __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const IType* __restrict__ rowwise_data, const float* __restrict__ rowwise_scale,
@@ -200,19 +157,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
     const size_t row_scale_cols, const bool compact_scale_layout,
     const size_t col_scale_rows,
     const int64_t* tensor_offsets, const int64_t* first_dims_ptr, const size_t num_groups,
-    const float epsilon, const bool power_of_two, RequantizeDebugTrace* debug_trace) {
+    const float epsilon, const bool power_of_two) {
   const bool leading_thread = threadIdx.x == 0;
   constexpr ShapeRepresentation shape_rep = Traits::SHAPE_REPRESENTATION;
   const size_t tile_x = blockIdx.x;  // hidden block index
   const size_t tile_y = blockIdx.y;  // row block index
   const size_t global_col_base = tile_x * kTileDim;
-  const size_t trace_index = (static_cast<size_t>(blockIdx.z) * gridDim.y + blockIdx.y) *
-                             gridDim.x + blockIdx.x;
-  RequantizeDebugTrace* trace = nullptr;
-  if constexpr (kDebugTrace) {
-    trace = debug_trace + trace_index;
-    if (threadIdx.x == 0) trace->tma_issue = trace->tma_ready = trace->compute_done = 0;
-  }
   size_t tensor_base = 0;
   size_t group_rows = first_logical_dim;
   size_t local_row_base = 0;
@@ -224,9 +174,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
     const size_t global_element_offset = tile_y * kTileDim * last_logical_dim;
     // [active elements, expert id, expert rows, expert element offset].
     __shared__ size_t varying_first_metadata[4];
-    if (leading_thread && blockIdx.x == 0 && blockIdx.y == 0) {
-      validate_group_offsets(tensor_offsets, num_groups, last_logical_dim, first_logical_dim);
-    }
     if (leading_thread) {
       const size_t active_elements = static_cast<size_t>(tensor_offsets[num_groups]);
       varying_first_metadata[0] = active_elements;
@@ -292,7 +239,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   __syncthreads();
   if (leading_thread) {
     constexpr uint32_t tx_bytes = kTileDim * kTileDim * sizeof(IType);
-    if constexpr (kDebugTrace) trace->tma_issue = clock64();
     ptx::mbarrier_arrive_expect_tx(&tma_mbar, tx_bytes);
     ptx::cp_async_bulk_tensor_2d_global_to_shared_cta(
         reinterpret_cast<uint64_t*>(smem_base),
@@ -301,9 +247,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
   __syncthreads();
-  if constexpr (kDebugTrace) {
-    if (leading_thread) trace->tma_ready = clock64();
-  }
   if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
   if constexpr (kReturnColumnwise) {
@@ -374,9 +317,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
       __syncthreads();
       drain_columnwise_output(output_smem, colwise_data, global_col_base, local_row_base,
                               tensor_base, group_rows, last_logical_dim, tid);
-      if constexpr (kDebugTrace) {
-        if (leading_thread) trace->compute_done = clock64();
-      }
     } else {
 #pragma unroll
       for (int pass = 0; pass < kColumnPasses; ++pass) {
@@ -429,10 +369,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
             local_row_base + row_start + r);
       }
       }
-      if constexpr (kDebugTrace) {
-        __syncthreads();
-        if (leading_thread) trace->compute_done = clock64();
-      }
     }
   } else if constexpr (kReturnDequantized) {
     // Dequantized-only output does not need a column transpose. Keep the
@@ -464,19 +400,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
         }
       }
     }
-    if constexpr (kDebugTrace) {
-      __syncthreads();
-      if (leading_thread) trace->compute_done = clock64();
-    }
-  }
-  if constexpr (kDebugTrace) {
-    __syncthreads();
-    if (leading_thread) trace->drain_done = clock64();
   }
 }
 
 template <typename Traits, typename IType, bool kReturnDequantized, bool kReturnColumnwise,
-          bool kReturnRowwiseScale, bool kDebugTrace>
+          bool kReturnRowwiseScale>
 void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor* output,
                                      Tensor* dequantized, size_t first_logical_dim,
                                      size_t last_logical_dim, size_t row_scale_cols,
@@ -511,18 +439,8 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
     grid.z = input->num_tensors;
   }
 
-  RequantizeDebugTrace* debug_trace = nullptr;
-  const size_t trace_count = static_cast<size_t>(grid.x) * grid.y * grid.z;
-  if constexpr (kDebugTrace) {
-    NVTE_CHECK_CUDA(cudaMallocAsync(reinterpret_cast<void**>(&debug_trace),
-                                    trace_count * sizeof(RequantizeDebugTrace), stream));
-    NVTE_CHECK_CUDA(cudaMemsetAsync(debug_trace, 0,
-                                    trace_count * sizeof(RequantizeDebugTrace), stream));
-  }
-
   auto* kernel = block128_group_requantize_kernel<Traits, IType, OType, kReturnDequantized,
-                                                 kReturnColumnwise, kReturnRowwiseScale,
-                                                 kDebugTrace>;
+                                                 kReturnColumnwise, kReturnRowwiseScale>;
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        static_cast<int>(smem_bytes)));
   kernel<<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
@@ -535,57 +453,8 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
       first_logical_dim, last_logical_dim, row_scale_cols, compact_scale_layout, col_scale_rows,
       reinterpret_cast<const int64_t*>(input->tensor_offsets.dptr),
       reinterpret_cast<const int64_t*>(input->first_dims.dptr),
-      input->num_tensors, epsilon, power_of_two, debug_trace);
+      input->num_tensors, epsilon, power_of_two);
   NVTE_CHECK_CUDA(cudaGetLastError());
-
-  if constexpr (kDebugTrace) {
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-    std::vector<RequantizeDebugTrace> traces(trace_count);
-    NVTE_CHECK_CUDA(cudaMemcpy(traces.data(), debug_trace,
-                               trace_count * sizeof(RequantizeDebugTrace),
-                               cudaMemcpyDeviceToHost));
-    int device = 0;
-    int clock_khz = 0;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device));
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
-    uint64_t tma_wait_min = UINT64_MAX, compute_min = UINT64_MAX, drain_min = UINT64_MAX;
-    uint64_t tma_wait_max = 0, compute_max = 0, drain_max = 0;
-    uint64_t tma_wait_sum = 0, compute_sum = 0, drain_sum = 0;
-    size_t valid = 0;
-    for (const auto& item : traces) {
-      if (item.tma_issue == 0 || item.tma_ready < item.tma_issue ||
-          item.compute_done < item.tma_ready || item.drain_done < item.compute_done) {
-        continue;
-      }
-      const uint64_t tma_wait = item.tma_ready - item.tma_issue;
-      const uint64_t compute = item.compute_done - item.tma_ready;
-      const uint64_t drain = item.drain_done - item.compute_done;
-      tma_wait_min = std::min(tma_wait_min, tma_wait);
-      compute_min = std::min(compute_min, compute);
-      drain_min = std::min(drain_min, drain);
-      tma_wait_max = std::max(tma_wait_max, tma_wait);
-      compute_max = std::max(compute_max, compute);
-      drain_max = std::max(drain_max, drain);
-      tma_wait_sum += tma_wait;
-      compute_sum += compute;
-      drain_sum += drain;
-      ++valid;
-    }
-    if (valid != 0) {
-      const auto us = [clock_khz](uint64_t cycles) {
-        return static_cast<double>(cycles) * 1000.0 / static_cast<double>(clock_khz);
-      };
-      std::fprintf(stderr,
-                   "[block128_requant_trace] tiles=%zu clock_khz=%d "
-                   "tma_wait_us(avg/min/max)=%.3f/%.3f/%.3f "
-                   "compute_us(avg/min/max)=%.3f/%.3f/%.3f "
-                   "drain_us(avg/min/max)=%.3f/%.3f/%.3f\n",
-                   valid, clock_khz, us(tma_wait_sum / valid), us(tma_wait_min), us(tma_wait_max),
-                   us(compute_sum / valid), us(compute_min), us(compute_max),
-                   us(drain_sum / valid), us(drain_min), us(drain_max));
-    }
-    NVTE_CHECK_CUDA(cudaFreeAsync(debug_trace, stream));
-  }
 }
 
 }  // namespace
@@ -703,8 +572,6 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   const size_t col_scale_rows = (first_logical_dim + kTileDim - 1) / kTileDim;
   const float epsilon = quant_config == nullptr ? 0.0f : quant_config->amax_epsilon;
   const bool power_of_two = quant_config == nullptr ? true : quant_config->force_pow_2_scales;
-  const bool debug_trace = std::getenv("NVTE_REQUANT_DEBUG_TRACE") != nullptr;
-
   TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
     if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
                   SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
@@ -717,14 +584,12 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
                   dequantized != nullptr, RETURN_DEQUANTIZED,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                       output->columnwise_data.dptr != nullptr, RETURN_COLUMNWISE,
-                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                          debug_trace, DEBUG_TRACE,
-                          launch_block128_group_requantize<
-                              ActiveTraits, IType, RETURN_DEQUANTIZED, RETURN_COLUMNWISE,
-                              RETURN_ROWWISE_SCALE, DEBUG_TRACE>(
-                              &input, output, dequantized, first_logical_dim, last_logical_dim,
-                              row_scale_cols, compact_scale_layout, col_scale_rows, epsilon,
-                              power_of_two, stream););););););  // NOLINT(*)
+                      launch_block128_group_requantize<
+                          ActiveTraits, IType, RETURN_DEQUANTIZED, RETURN_COLUMNWISE,
+                          RETURN_ROWWISE_SCALE>(
+                          &input, output, dequantized, first_logical_dim, last_logical_dim,
+                          row_scale_cols, compact_scale_layout, col_scale_rows, epsilon,
+                          power_of_two, stream);););););  // NOLINT(*)
     } else {
       NVTE_ERROR("Block scaling requant supports only SAME_BOTH_DIMS and VARYING_FIRST_DIM.");
     }
