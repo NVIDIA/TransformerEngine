@@ -9,10 +9,7 @@ import transformer_engine.pytorch  # Load the common library before the extensio
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Float8BlockScaling
-from transformer_engine.pytorch.ep import (
-    _quantize_float8_blockwise,
-    ep_quantize_float8_blockwise_dual_scale,
-)
+from transformer_engine.pytorch.ep import _quantize_float8_blockwise
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
 
@@ -66,7 +63,14 @@ def test_wire_only_does_not_allocate_columnwise(rows, hidden):
     source = torch.randn(rows, hidden, device="cuda", dtype=torch.bfloat16)
     recipe = Float8BlockScaling()
     wire_only, wire = _quantize_float8_blockwise(source, recipe)
-    shared, shared_wire = ep_quantize_float8_blockwise_dual_scale(source, recipe)
+    shared_quantizer = Float8BlockQuantizer(
+        tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        block_scaling_dim=1,
+        rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
+    )
+    shared = shared_quantizer.quantize(source)
     assert wire_only._columnwise_data is None
     assert wire_only._columnwise_scale_inv is None
     assert shared._columnwise_data is not None
@@ -75,4 +79,4 @@ def test_wire_only_does_not_allocate_columnwise(rows, hidden):
     torch.testing.assert_close(
         wire_only._rowwise_scale_inv, shared._rowwise_scale_inv, rtol=0, atol=0
     )
-    torch.testing.assert_close(wire, shared_wire, rtol=0, atol=0)
+    torch.testing.assert_close(wire, shared._rowwise_scale_inv, rtol=0, atol=0)
