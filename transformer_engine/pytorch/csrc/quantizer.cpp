@@ -2005,9 +2005,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
-  }
   NVTE_CHECK(flat_last_dim % 2 == 0,
              "NVFP4 requires the last tensor dimension to be divisible by 2,"
              " got tensor with shape ",
@@ -2200,9 +2197,6 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
-  }
 
   const int64_t total_data_elements = total_elements / 2;
 
@@ -2366,9 +2360,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
-  }
   tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
   tensor.attr("_with_gemm_swizzled_scales") = this->optimize_for_gemm;
   tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);

@@ -1580,9 +1580,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
   const bool disable_second_level_scale = quantizer_cpp_list[0]->disable_second_level_scale;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-  }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const auto scale_dtype = quantizer_cpp_list[0]->scale_dtype;

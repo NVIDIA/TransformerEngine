@@ -1426,7 +1426,7 @@ using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
-template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_ROWWISE,
           bool RETURN_TRANSPOSE, bool WITH_GEMM_SWIZZLED_SCALES, bool APPLY_COLWISE_RHT>
 __device__ __forceinline__ void group_row_scaled_cast_body(
     const CUtensorMap &tensor_map_input, uint8_t *const q_row_base, ScaleType *const s_dec_row_base,
@@ -1555,10 +1555,12 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
     // Per-row encode (byte-identical to the single-tensor path): pass the
     // per-expert amax base and a local row offset so amax[row_idx] indexes the
     // expert-local row.
-    rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
-        sIn_ptr, sOut_ptr, sSFrowwise_ptr, /*S_enc_rowwise=*/1.0f, stage_Y, stage_X, buff_in,
-        buff_out, row_amax_base, static_cast<size_t>(local_row_base), static_cast<size_t>(M_t), rng,
-        random_uint4, rnd_idx);
+    if constexpr (RETURN_ROWWISE) {
+      rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+          sIn_ptr, sOut_ptr, sSFrowwise_ptr, /*S_enc_rowwise=*/1.0f, stage_Y, stage_X, buff_in,
+          buff_out, row_amax_base, static_cast<size_t>(local_row_base), static_cast<size_t>(M_t),
+          rng, random_uint4, rnd_idx);
+    }
 
     if constexpr (RETURN_TRANSPOSE) {
       colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4,
@@ -1573,7 +1575,7 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
 
     // Scatter the rowwise FP4 tile to the per-expert buffer: a verbatim copy of
     // the 64-row x 32-byte tile (2 threads x 16 B per row).
-    {
+    if constexpr (RETURN_ROWWISE) {
       auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
       const int row_in_tile = static_cast<int>(threadIdx.x) >> 1;
       const int half = static_cast<int>(threadIdx.x) & 1;
@@ -1608,7 +1610,7 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
   }
 
   // SF epilogue: store the per-chunk SMEM scale tiles to the per-expert buffers.
-  {
+  if constexpr (RETURN_ROWWISE) {
     auto &sSFrowwise = *reinterpret_cast<ScalesType2D<ScaleType> *>(sSFrowwise_ptr);
     using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_X>;
     const size_t scales_block_offset_X_rowwise = static_cast<size_t>(ctaid_X) * SCALES_PER_CHUNK_X;
@@ -1662,7 +1664,7 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
 }
 
 // Grid covers the input capacity; CTAs past the live row sum noop.
-template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_ROWWISE,
           bool RETURN_TRANSPOSE, bool WITH_GEMM_SWIZZLED_SCALES, bool APPLY_COLWISE_RHT>
 __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph_safe_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input, uint8_t *const q_row_all,
@@ -1695,17 +1697,18 @@ __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph
   // per expert with column stride M_t.
   const size_t scale_stride_col = RETURN_TRANSPOSE ? static_cast<size_t>(M_t) / SCALE_DIM : 0;
 
-  uint8_t *const q_row_base = q_row_all + row_start * (cols / 2);
-  ScaleType *const s_dec_row_base = s_dec_row_all + row_start * scale_stride_row;
-  const float *const row_amax_base = row_amax_all + row_start;
+  uint8_t *const q_row_base = RETURN_ROWWISE ? q_row_all + row_start * (cols / 2) : nullptr;
+  ScaleType *const s_dec_row_base =
+      RETURN_ROWWISE ? s_dec_row_all + row_start * scale_stride_row : nullptr;
+  const float *const row_amax_base = RETURN_ROWWISE ? row_amax_all + row_start : nullptr;
 
   uint8_t *const q_col_base = RETURN_TRANSPOSE ? q_col_all + (cols / 2) * row_start : nullptr;
   ScaleType *const s_dec_col_base =
       RETURN_TRANSPOSE ? s_dec_col_all + (cols / SCALE_DIM) * row_start : nullptr;
   const float *const col_amax_base = RETURN_TRANSPOSE ? col_amax_all + tensor_id * cols : nullptr;
 
-  group_row_scaled_cast_body<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
-                             WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT>(
+  group_row_scaled_cast_body<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_ROWWISE,
+                             RETURN_TRANSPOSE, WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT>(
       tensor_map_input, q_row_base, s_dec_row_base, row_amax_base, q_col_base, s_dec_col_base,
       col_amax_base, scale_stride_col, M_t, local_row_base, ctaid_X, ctaid_Y, cols,
       scale_stride_row, rng_state, rht_matrix);
@@ -1773,13 +1776,18 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
              "multiple of ",
              TunableConfig::CHUNK_DIM_Y, " (got ", capacity_rows, ").");
 
+  const bool return_rowwise = output->has_data();
   const bool return_transpose = output->has_columnwise_data();
+  NVTE_CHECK(return_rowwise || return_transpose,
+             "Graph-safe grouped row-scaled NVFP4 cast requires rowwise or columnwise output.");
   const bool with_gemm_swizzled = output->with_gemm_swizzled_scales;
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Graph-safe cast requires rowwise scales.");
-  NVTE_CHECK(output->amax.dptr != nullptr, "Graph-safe cast requires rowwise amax.");
+  if (return_rowwise) {
+    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Graph-safe cast requires rowwise scales.");
+    NVTE_CHECK(output->amax.dptr != nullptr, "Graph-safe cast requires rowwise amax.");
+  }
   // Per-row scale stride, from a 2D [rows, stride] scale or a flat 1D buffer.
   size_t scale_stride_row = 0;
-  {
+  if (return_rowwise) {
     const auto &scale_shape = output->scale_inv.shape;
     const size_t scale_ndim = scale_shape.size();
     if (scale_ndim >= 2) {
@@ -1838,26 +1846,30 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           use_fast_math, USE_FAST_MATH,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              return_transpose, RETURN_TRANSPOSE,
+              return_rowwise, RETURN_ROWWISE,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES,
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_colwise_rht, APPLY_COLWISE_RHT, {
-                    const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
-                    const int out_scales_transpose_mem =
-                        RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-                    const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
-                                            out_mem_colwise_data + buff_size_scales +
-                                            out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
-                    auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel < ScaleType,
-                         USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
-                         WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT && RETURN_TRANSPOSE > ;
-                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-                    kernel<<<grid, block, dshmem_size, stream>>>(
-                        tensor_map_input, q_row_all, s_dec_row_all, row_amax_all, q_col_all,
-                        s_dec_col_all, col_amax_all, offsets_ptr, first_dims_ptr, num_tensors,
-                        noop_ptr, cols, scale_stride_row, rng_state, rht_matrix_ptr);
-                  })))));
+                  return_transpose, RETURN_TRANSPOSE,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES,
+                      TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_colwise_rht, APPLY_COLWISE_RHT, {
+                        const int out_mem_colwise_data =
+                            RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+                        const int out_scales_transpose_mem =
+                            RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
+                        const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
+                                                out_mem_colwise_data + buff_size_scales +
+                                                out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+                        auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel < ScaleType,
+                             USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_ROWWISE,
+                             RETURN_TRANSPOSE, WITH_GEMM_SWIZZLED_SCALES,
+                             APPLY_COLWISE_RHT && RETURN_TRANSPOSE > ;
+                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                        kernel<<<grid, block, dshmem_size, stream>>>(
+                            tensor_map_input, q_row_all, s_dec_row_all, row_amax_all, q_col_all,
+                            s_dec_col_all, col_amax_all, offsets_ptr, first_dims_ptr, num_tensors,
+                            noop_ptr, cols, scale_stride_row, rng_state, rht_matrix_ptr);
+                      }))))));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);

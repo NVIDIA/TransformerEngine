@@ -1144,9 +1144,7 @@ def _grouped_linear_graph_safe_backward(
     if args.fp8 and needs_grouped_dy:
         grad_output_quantizer = args.grad_output_quantizers[0]
         grad_output_quantizer.set_usage(
-            rowwise=(
-                args.requires_dgrad or getattr(grad_output_quantizer, "row_scaled_nvfp4", False)
-            ),
+            rowwise=args.requires_dgrad,
             columnwise=args.weights_requires_grad,
         )
         grad_output_quantizer.optimize_for_gemm = True

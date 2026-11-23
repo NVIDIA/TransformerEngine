@@ -169,6 +169,55 @@ def test_matches_per_expert_quantize(split_sections: list[int], N: int, mode: st
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "split_sections, N",
+    [
+        ([128], 128),
+        ([384, 128, 256], 128),
+        ([256, 0, 384], 512),
+    ],
+)
+@pytest.mark.parametrize("with_rht", (False, True), ids=("no_rht", "rht"))
+def test_columnwise_only_matches_both_usages(
+    split_sections: list[int], N: int, with_rht: bool
+) -> None:
+    torch.manual_seed(7)
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+    first_dims = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+
+    def make_quantizer(rowwise: bool) -> NVFP4Quantizer:
+        return NVFP4Quantizer(
+            fp4_dtype=te.DType.kFloat4E2M1,
+            rowwise=rowwise,
+            columnwise=True,
+            with_rht=with_rht,
+            with_post_rht_amax=with_rht,
+            with_random_sign_mask=False,
+            row_scaled_nvfp4=True,
+        )
+
+    num_tensors = len(split_sections)
+    ref = tex.group_quantize(x, make_quantizer(rowwise=True), num_tensors, first_dims)
+    out = tex.group_quantize(x, make_quantizer(rowwise=False), num_tensors, first_dims)
+
+    assert out.rowwise_data is None
+    assert out.scale_inv is None
+    assert out.amax is None
+    sum_m = sum(split_sections)
+    for name, numel in (
+        ("columnwise_data", sum_m * N // 2),
+        ("columnwise_scale_inv", sum_m * N // 16),
+        ("columnwise_amax", num_tensors * N),
+    ):
+        torch.testing.assert_close(
+            getattr(out, name).view(torch.uint8).reshape(-1)[:numel],
+            getattr(ref, name).view(torch.uint8).reshape(-1)[:numel],
+            atol=0,
+            rtol=0,
+        )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("num_tensors, m, N", [(1, 128, 128), (4, 256, 256)])
 def test_uniform_shapes(num_tensors: int, m: int, N: int) -> None:
     torch.manual_seed(1)
