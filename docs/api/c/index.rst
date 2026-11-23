@@ -16,6 +16,7 @@ directly from C/C++, without Python.
    activation.h <activation>
    cast_transpose_noop.h <cast_transpose_noop>
    cast.h <cast>
+   cross_entropy.h <cross_entropy>
    cudnn.h <cudnn>
    fused_attn.h <fused_attn>
    fused_rope.h <fused_rope>

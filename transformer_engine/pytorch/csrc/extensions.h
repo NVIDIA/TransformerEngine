@@ -613,6 +613,16 @@ std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
     const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer);
 
 /***************************************************************************************************
+ * Cross entropy
+ **************************************************************************************************/
+
+py::object cross_entropy_backward_mxfp8(const at::Tensor &logits, const at::Tensor &target,
+                                        const at::Tensor &stats,
+                                        const std::optional<at::Tensor> &n_non_ignore,
+                                        const at::Tensor &grad_output, const int64_t ignore_idx,
+                                        const bool reduce_loss, py::handle grad_quantizer);
+
+/***************************************************************************************************
  * Miscellaneous
  **************************************************************************************************/
 
