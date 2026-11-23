@@ -35,6 +35,19 @@
       ]
     },
     {
+      "id": "transformer-engine-convert-hf-005",
+      "prompt": "Convert Qwen3.5-35B-A3B to Transformer Engine.",
+      "expected_output": "A te_qwen3_5_moe.py recipe that fuses the input norm of each mixer with the projections that read it through LayerNormLinear, runs the mixer cores on Transformer Engine cores or keeps them as Hugging Face code, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "assertions": [
+        "The input norm of each mixer is fused with the projections that read it through Transformer Engine's LayerNormLinear; the linear-attention and gated-attention cores are Transformer Engine cores checked against the Hugging Face model or are kept as Hugging Face code, not forced into MultiheadAttention.",
+        "The norms that multiply by 1 + weight use zero_centered_gamma=True.",
+        "The MoE experts run through GroupedLinear with at most 64 experts each, with the routing weights applied by ScaledSwiGLU and each expert's rows padded under a quantized recipe.",
+        "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, with none missing or swapped.",
+        "The recipe is compared with the Hugging Face model on the checkpoint, in slices of layers if the model does not fit on the GPU."
+      ]
+    },
+    {
       "id": "transformer-engine-convert-hf-004",
       "prompt": "How do I serve my fine-tuned Llama 3 with vLLM?",
       "expected_output": "An answer about serving the model with vLLM, with no Transformer Engine conversion.",
