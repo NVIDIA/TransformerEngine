@@ -247,6 +247,148 @@ class TestFusedAdam(TestFusedOptimizer):
                 ref_param,
             )
 
+    @pytest.mark.parametrize("bias_correction", [True, False])
+    @pytest.mark.parametrize(
+        "param_dtype,master_weights",
+        [
+            (torch.float32, False),
+            (torch.bfloat16, True),
+        ],
+    )
+    def test_capturable_large_parameter_multi_step(
+        self, param_dtype, master_weights, bias_correction
+    ):
+        """Capturable Adam matches the non-capturable kernels on a multi-block tensor.
+
+        The capturable kernels read the step count on the device and derive the bias
+        corrections from it once per CUDA block. Use a tensor that spans many blocks and
+        is not a multiple of the block or chunk size, and replay several steps so the
+        corrections are exercised at more than one step count.
+        """
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        numel = (1 << 20) + 3
+        num_replays = 5
+        init = torch.randn(numel, device="cuda").to(param_dtype)
+        ref_param = torch.nn.Parameter(init.clone())
+        tst_param = torch.nn.Parameter(init.clone())
+        options = dict(self.options, bias_correction=bias_correction)
+        ref_optim = self.fused_optim(
+            [ref_param], capturable=False, master_weights=master_weights, **options
+        )
+        tst_optim = self.fused_optim(
+            [tst_param], capturable=True, master_weights=master_weights, **options
+        )
+
+        def set_grads():
+            # Write in place: the captured graph reads the gradient from a fixed buffer.
+            grad = torch.randn(numel, device="cuda").to(param_dtype)
+            for param in (ref_param, tst_param):
+                if param.grad is None:
+                    param.grad = grad.clone()
+                else:
+                    param.grad.copy_(grad)
+
+        # Initialize optimizer state before CUDA graph capture.
+        set_grads()
+        ref_optim.step()
+        tst_optim.step()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tst_optim.step()
+        for _ in range(num_replays):
+            set_grads()
+            graph.replay()
+            ref_optim.step()
+
+        assert tst_optim.param_groups[0]["step"].item() == num_replays + 1
+        assert ref_optim.param_groups[0]["step"] == num_replays + 1
+        assert not torch.equal(tst_param.detach(), init), "the replayed steps did not update"
+        torch.testing.assert_close(tst_param, ref_param)
+        for name in ("exp_avg", "exp_avg_sq") + (("master_param",) if master_weights else ()):
+            torch.testing.assert_close(
+                tst_optim.state[tst_param][name], ref_optim.state[ref_param][name]
+            )
+
+    @pytest.mark.parametrize(
+        "param_dtype,master_weights",
+        [
+            (torch.float32, False),
+            # FP16 rather than BF16: the grad scaler's non-finite check has no BF16 kernel.
+            (torch.float16, True),
+        ],
+    )
+    def test_capturable_skips_step_on_nonfinite_grad(self, param_dtype, master_weights):
+        """Capturable Adam leaves all state untouched when the grad scaler finds an inf.
+
+        The skip is decided on the device, inside the kernel, so that it survives CUDA
+        graph capture. A skipped step must not move the parameters, the moments or the
+        master weights, must not count as a step, and the optimizer must keep working
+        afterwards.
+
+        The reference takes only the finite steps and uses no grad scaler: the scale is a
+        power of two, so unscaling is exact.
+        """
+        numel = 4099
+        init = torch.randn(numel, device="cuda").to(param_dtype)
+        ref_param = torch.nn.Parameter(init.clone())
+        tst_param = torch.nn.Parameter(init.clone())
+        ref_optim = self.fused_optim(
+            [ref_param], capturable=False, master_weights=master_weights, **self.options
+        )
+        tst_optim = self.fused_optim(
+            [tst_param], capturable=True, master_weights=master_weights, **self.options
+        )
+        # A small scale keeps the scaled FP16 gradients finite; the default 2**16 would
+        # overflow them and turn every step into a skipped one.
+        scaler = torch.amp.GradScaler("cuda", enabled=True, init_scale=16.0)
+
+        def scaled_step(coefficients):
+            tst_optim.zero_grad()
+            loss = (tst_param.float() * coefficients).sum()
+            scaler.scale(loss).backward()
+            scaler.step(tst_optim)
+            scaler.update()
+
+        def ref_step(coefficients):
+            ref_param.grad = coefficients.to(param_dtype)
+            ref_optim.step()
+
+        def tst_state():
+            names = ("exp_avg", "exp_avg_sq") + (("master_param",) if master_weights else ())
+            state = {name: tst_optim.state[tst_param][name].clone() for name in names}
+            state["param"] = tst_param.detach().clone()
+            return state
+
+        finite = torch.randn(numel, device="cuda")
+        nonfinite = finite.clone()
+        nonfinite[numel // 2] = float("inf")
+
+        scaled_step(finite)
+        ref_step(finite)
+        before = tst_state()
+        assert tst_optim.param_groups[0]["step"].item() == 1
+        assert not torch.equal(before["param"], init), "the first, finite step did not update"
+
+        scaled_step(nonfinite)
+        after = tst_state()
+        for name, expected in before.items():
+            assert torch.equal(after[name], expected), f"{name} changed in a skipped step"
+
+        # The step counter lags the skip decision by one call (it is advanced from the
+        # previous call's overflow flag), so check it once a finite step has followed.
+        scaled_step(finite)
+        ref_step(finite)
+        assert tst_optim.param_groups[0]["step"].item() == 2
+        assert not torch.equal(tst_param.detach(), before["param"]), "step after a skip was lost"
+        torch.testing.assert_close(tst_param, ref_param)
+        for name in ("exp_avg", "exp_avg_sq") + (("master_param",) if master_weights else ()):
+            torch.testing.assert_close(
+                tst_optim.state[tst_param][name], ref_optim.state[ref_param][name]
+            )
+
     def test_adam_option(self):
         nelem = 1
         adam_option = {

@@ -21,16 +21,20 @@ namespace {
 
 constexpr int amax_kernel_threads = 512;
 
-__launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
+__launch_bounds__(1) __global__
+    void zero_amax_kernel(float *rowwise_amax_ptr, float *colwise_amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
-  *amax_ptr = 0;
+  *rowwise_amax_ptr = 0;
+  if (colwise_amax_ptr != nullptr) {
+    *colwise_amax_ptr = 0;
+  }
 }
 
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
-    void amax_kernel(const InputType *input, float *amax, const size_t N,
+    void amax_kernel(const InputType *input, float *amax, float *columnwise_amax, const size_t N,
                      const size_t num_aligned_elements, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
@@ -66,14 +70,17 @@ __launch_bounds__(amax_kernel_threads) __global__
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
     atomicMaxFloat(amax, max);
+    if (columnwise_amax != nullptr) {
+      atomicMaxFloat(columnwise_amax, max);
+    }
   }
 }
 
 template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
-                        cudaStream_t stream) {
-  // Zero out amax so we can update with atomic max
-  zero_amax_kernel<<<1, 1, 0, stream>>>(amax, noop_ptr);
+                        cudaStream_t stream, float *columnwise_amax = nullptr) {
+  // Zero out amax (and the optional columnwise_amax) so we can update with atomic max
+  zero_amax_kernel<<<1, 1, 0, stream>>>(amax, columnwise_amax, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   // Return immediately if tensor is empty
@@ -94,18 +101,18 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, con
   // Launch kernel
   switch (align) {
     case Alignment::SAME_ALIGNED:
-      amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
+      amax_kernel<nvec, true, InputType><<<num_blocks, threads, 0, stream>>>(
+          input, amax, columnwise_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::SAME_UNALIGNED:
-      amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
+      amax_kernel<nvec, false, InputType><<<num_blocks, threads, 0, stream>>>(
+          input, amax, columnwise_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
       amax_kernel<1, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, N, noop_ptr);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, columnwise_amax, N, N, noop_ptr);
       break;
     }
   }
@@ -170,10 +177,16 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   // Compute amax
   float *amax_ptr = reinterpret_cast<float *>(
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
+  // Tensor with a distinct column-wise amax get the same value written there as well
+  float *columnwise_amax = nullptr;
+  if (output.scaling_mode == NVTE_NVFP4_1D_SCALING && output.columnwise_amax.dptr != nullptr &&
+      output.columnwise_amax.dptr != amax_ptr) {
+    columnwise_amax = reinterpret_cast<float *>(output.columnwise_amax.dptr);
+  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType); launch_amax_kernel<nvec>(
           reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(), noop_ptr,
-          stream););  // NOLINT(*)
+          stream, columnwise_amax););  // NOLINT(*)
 }
 
 void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor output_,
