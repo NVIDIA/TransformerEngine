@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See LICENSE for license information.
  ************************************************************************/
 #ifndef TRANSFORMER_ENGINE_REQUANTIZE_FP8_BLOCKWISE_H_

@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # See LICENSE for license information.
 # SPDX-License-Identifier: Apache-2.0
 """Block128 grouped requant must match BF16 grouped quantization exactly."""
