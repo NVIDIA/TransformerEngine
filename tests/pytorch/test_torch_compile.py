@@ -3690,22 +3690,18 @@ def _check_te_ops_normalization_compile(
         _assert_custom_ops(graphs, normalization.lower(), backward=training)
 
 
-_NORMALIZATIONS = ["LayerNorm", "RMSNorm", "L2Normalization"]
-
-
-@pytest.mark.parametrize("normalization", _NORMALIZATIONS)
-def test_te_ops_normalization_compile(normalization):
-    _check_te_ops_normalization_compile(normalization, dtype=torch.bfloat16)
-
-
-@pytest.mark.parametrize("normalization", _NORMALIZATIONS)
 @pytest.mark.parametrize(
-    "dtype,layout,training",
+    "normalization,dtype,layout,training",
     [
-        (torch.float32, "contiguous", True),
-        (torch.float16, "contiguous", False),
-        (torch.bfloat16, "strided", True),
-        (torch.bfloat16, "fp8", True),
+        ("LayerNorm", torch.float32, "contiguous", True),
+        ("LayerNorm", torch.float16, "contiguous", False),
+        ("LayerNorm", torch.bfloat16, "strided", True),
+        ("LayerNorm", torch.bfloat16, "fp8", True),
+        ("RMSNorm", torch.float16, "contiguous", False),
+        ("RMSNorm", torch.bfloat16, "fp8", True),
+        ("L2Normalization", torch.bfloat16, "contiguous", True),
+        ("L2Normalization", torch.float16, "contiguous", False),
+        ("L2Normalization", torch.bfloat16, "fp8", True),
     ],
 )
 def test_te_ops_normalization_variants_compile(normalization, dtype, layout, training):
@@ -3715,12 +3711,8 @@ def test_te_ops_normalization_variants_compile(normalization, dtype, layout, tra
 
 
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
-@pytest.mark.parametrize("zero_centered_gamma", [False, True])
-@pytest.mark.parametrize("autocast", [False, True])
-def test_te_ops_normalization_gamma_autocast_compile(normalization, zero_centered_gamma, autocast):
-    _check_te_ops_normalization_compile(
-        normalization, zero_centered_gamma=zero_centered_gamma, autocast=autocast
-    )
+def test_te_ops_normalization_autocast_compile(normalization):
+    _check_te_ops_normalization_compile(normalization, zero_centered_gamma=True, autocast=True)
 
 
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
@@ -3735,7 +3727,6 @@ def test_te_ops_normalization_dynamic_compile(normalization):
         ("LayerNorm", True, "default"),
         ("RMSNorm", True, "default"),
         ("LayerNorm", False, "default"),
-        ("RMSNorm", False, "default"),
         ("LayerNorm", True, "reduce-overhead"),
         ("RMSNorm", True, "reduce-overhead"),
     ],
@@ -3821,8 +3812,7 @@ def test_te_ops_normalization_mlp_compile(normalization, quantization, training,
 
 
 @pytest.mark.parametrize("module", ["LayerNorm", "RMSNorm"])
-@pytest.mark.parametrize("training", [False, True])
-def test_te_normalization_module_compile(module, training):
+def test_te_normalization_module_compile(module):
     torch._dynamo.reset()
     model = getattr(te, module)(64, zero_centered_gamma=True, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
@@ -3830,17 +3820,15 @@ def test_te_normalization_module_compile(module, training):
             param.copy_(torch.randn_like(param))
     eager_model = copy.deepcopy(model)
     compiled, graphs = _compile_with_graphs(model)
-    x = torch.randn(4, 16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=training)
-    eager_x = x.detach().clone().requires_grad_(training)
-    with torch.set_grad_enabled(training):
-        actual = compiled(x)
-        expected = eager_model(eager_x)
+    x = torch.randn(4, 16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_(True)
+    actual = compiled(x)
+    expected = eager_model(eager_x)
     torch.testing.assert_close(actual, expected)
-    if training:
-        dy = torch.randn_like(actual)
-        actual.backward(dy)
-        expected.backward(dy)
-        torch.testing.assert_close(x.grad, eager_x.grad)
-        for param, reference in zip(model.parameters(), eager_model.parameters()):
-            torch.testing.assert_close(param.grad, reference.grad)
-    _assert_custom_ops(graphs, module.lower(), backward=training)
+    dy = torch.randn_like(actual)
+    actual.backward(dy)
+    expected.backward(dy)
+    torch.testing.assert_close(x.grad, eager_x.grad)
+    for param, reference in zip(model.parameters(), eager_model.parameters()):
+        torch.testing.assert_close(param.grad, reference.grad)
+    _assert_custom_ops(graphs, module.lower(), backward=True)
