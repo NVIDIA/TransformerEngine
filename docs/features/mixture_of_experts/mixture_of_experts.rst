@@ -462,6 +462,48 @@ the corresponding padded counts as ``m_splits`` to both operations. For example,
 ``moe_permute_and_pad_with_probs`` with ``align_size=256`` produces the padded
 input and counts; setting ``split_alignment`` alone does not pad them.
 
+BF16 squared-ReLU fusion
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Without a quantization recipe, ``ScaledSReLU`` and ``ScaledTanhSReLU`` can fuse
+with the surrounding BF16 grouped linears on SM100 and SM103. Both linears must
+have no bias, feature dimensions divisible by 64, and 256-aligned expert token
+counts. Expert tensor parallelism must be disabled. Dense grouped weights and
+per-expert weights are supported. This path requires CuTe DSL 4.8.0 or later,
+cuDNN Frontend's canonical BF16 grouped GEMM/wgrad APIs (1.32.0 or later), and
+the BF16 sReLU forward/backward APIs introduced by cuDNN Frontend
+`PR #2885 <https://github.com/NVIDIA/cudnn-frontend/pull/2885>`_ and
+`PR #2886 <https://github.com/NVIDIA/cudnn-frontend/pull/2886>`_. TE checks these
+capabilities before choosing the fusion; unsupported configurations keep the
+existing unfused path.
+
+Both activations accept the following BF16 fusion options:
+
+* ``bf16_act_input="acc"`` (default) applies the forward activation to the FP32
+  FC1 accumulator. ``"saved"`` applies it to the BF16 pre-activation saved for
+  backward. Backward always evaluates the derivative on that saved BF16 tensor.
+* ``bf16_tanh_mode="approx"`` (default) uses hardware approximate tanh.
+  ``"accurate"`` uses cuDNN's accurate FP32 tanh. The option affects only
+  ``ScaledTanhSReLU``, and is used consistently in forward and backward.
+* ``activation_recompute_in_mlp=False`` (default) retains the actual forward
+  FC2 input for FC2 wgrad. ``True`` reconstructs it from the saved BF16
+  pre-activation in the fused backward kernel.
+
+With ``"saved"`` and recomputation, the reconstructed FC2 input is bitwise
+identical to forward under the same tanh configuration. With ``"acc"`` and
+recomputation, rounding the pre-activation to BF16 can change the reconstructed
+input and hence FC2 wgrad. This combination is supported and never changes
+``bf16_act_input`` implicitly. The default ``"acc"`` with saving uses the actual
+forward input. These statements describe FC2's input only; they do not promise
+bitwise equivalence of the whole MLP or training to unfused BF16 execution.
+The ``bf16_*`` options do not change standalone or quantized activation paths.
+
+The probability gradient uses a fixed-order deterministic reduction when
+``NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`` or PyTorch deterministic algorithms are
+enabled, and an atomic reduction otherwise. Unlike BF16 GLU, BF16 sReLU
+supports deterministic backward. TE evaluates this policy at each backward
+launch; CUDA graph replay uses the policy selected during capture.
+
 .. tabs::
 
    .. tab:: PyTorch

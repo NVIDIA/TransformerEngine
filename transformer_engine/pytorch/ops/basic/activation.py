@@ -453,9 +453,23 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
 
     num_extra_inputs: int = 1
 
-    def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        activation_recompute_in_mlp: bool = False,
+        bf16_act_input: str = "acc",
+        bf16_tanh_mode: str = "approx",
+    ) -> None:
         super().__init__()
+        if bf16_act_input not in ("acc", "saved"):
+            raise ValueError(f"bf16_act_input must be 'acc' or 'saved', got {bf16_act_input!r}")
+        if bf16_tanh_mode not in ("approx", "accurate"):
+            raise ValueError(
+                f"bf16_tanh_mode must be 'approx' or 'accurate', got {bf16_tanh_mode!r}"
+            )
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
+        self.bf16_act_input = bf16_act_input
+        self.bf16_tanh_mode = bf16_tanh_mode
 
     @abc.abstractmethod
     def _scaled_unary_forward(
@@ -581,6 +595,15 @@ class ScaledSReLU(_ScaledUnary):
         during backward when supported instead of saving them. Outside the
         fused grouped MLP path this option has no effect and a warning is
         emitted.
+    bf16_act_input : {"acc", "saved"}, default = ``"acc"``
+        In BF16 fused grouped MLP, evaluate the activation on the FP32 GEMM
+        accumulator or its saved BF16 pre-activation. Backward always uses the
+        saved BF16 value. With recomputation, FC2 wgrad uses that value too;
+        ``"acc"`` can therefore produce different saved and recomputed FC2 inputs.
+        This option does not change standalone or quantized execution.
+    bf16_tanh_mode : {"approx", "accurate"}, default = ``"approx"``
+        Accepted for compatibility with :class:`ScaledTanhSReLU`; plain SReLU
+        does not evaluate tanh, so both values have the same effect.
     """
 
     def _scaled_unary_forward(
@@ -624,6 +647,15 @@ class ScaledTanhSReLU(_ScaledUnary):
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
         during backward when supported instead of saving them.
+    bf16_act_input : {"acc", "saved"}, default = ``"acc"``
+        Activation input in BF16 fused grouped MLP, as in :class:`ScaledSReLU`.
+        ``"saved"`` makes the recomputed FC2 input bitwise identical to forward
+        with the same tanh configuration. This is not a bitwise guarantee for
+        the full MLP or for comparison with unfused execution.
+    bf16_tanh_mode : {"approx", "accurate"}, default = ``"approx"``
+        Use hardware approximate tanh or the accurate FP32 cuDNN implementation
+        in both directions of BF16 fused grouped MLP. Standalone and quantized
+        execution retain their existing implementations.
     """
 
     def __init__(
@@ -631,8 +663,14 @@ class ScaledTanhSReLU(_ScaledUnary):
         *,
         tanh_clamp_scale: float,
         activation_recompute_in_mlp: bool = False,
+        bf16_act_input: str = "acc",
+        bf16_tanh_mode: str = "approx",
     ) -> None:
-        super().__init__(activation_recompute_in_mlp=activation_recompute_in_mlp)
+        super().__init__(
+            activation_recompute_in_mlp=activation_recompute_in_mlp,
+            bf16_act_input=bf16_act_input,
+            bf16_tanh_mode=bf16_tanh_mode,
+        )
         self.tanh_clamp_scale: float = float(tanh_clamp_scale)
         if not math.isfinite(self.tanh_clamp_scale) or self.tanh_clamp_scale <= 0.0:
             raise ValueError(
