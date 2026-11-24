@@ -1,4 +1,6 @@
-datasets<4.0.0
+datasets<4.0.0; python_version < "3.14"
+# Older datasets Picklers are incompatible with Python 3.14.
+datasets>=4.4.0; python_version >= "3.14"
 flax>=0.7.1
 nltk>=3.8.2,!=3.10.1
 optax
