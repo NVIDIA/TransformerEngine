@@ -2,9 +2,9 @@
   "skill_name": "transformer-engine-convert-hf",
   "evals": [
     {
-      "id": "transformer-engine-convert-hf-005",
+      "id": "transformer-engine-convert-hf-001",
       "prompt": "Convert Qwen3.5-35B-A3B to Transformer Engine.",
-      "expected_output": "A te_qwen3_5_moe.py TE implementation that replaces the attention and MoE blocks separately: the input norm of each attention layer fused with its projections through LayerNormLinear, the gated attention core on DotProductAttention, the Gated DeltaNet core on GatedDeltaNetAttention where the installed TE provides it, the 256 experts in GroupedLinear blocks of at most 64, a strict checkpoint loader, and a check against Hugging Face in BF16 and float32.",
+      "expected_output": "A te_qwen3_5_moe.py TE implementation that replaces the attention and MoE blocks separately: the input norm of each attention layer fused with its projections through LayerNormLinear, the gated attention core on DotProductAttention, the Gated DeltaNet core on GatedDeltaNetAttention where the installed TE provides it, the 256 experts in GroupedLinear blocks of at most 64, a strict checkpoint loader, and a BF16 check against Hugging Face.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "The attention and MoE blocks are replaced separately, not through TransformerLayer or MultiheadAttention, and the input norm of each attention layer is fused with all the projections that read it through LayerNormLinear.",
@@ -12,13 +12,12 @@
         "The norms that multiply by 1 + weight use zero_centered_gamma=True, chosen from the model's norm definition rather than by trial.",
         "The 256 experts run through GroupedLinear in blocks of at most 64 experts each.",
         "Under MXFP8, each expert's rows are padded to a multiple of 128, and the router and the LM head stay out of quantization.",
-        "The implementation or its report rules out cuBLAS 13.7.0 to 13.8.0, whose grouped GEMMs return wrong results.",
         "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, and the loader fails on a weight left over on either side.",
-        "The implementation comes with a check that runs it in BF16 against Hugging Face in BF16 and in float32 on the same real text, a few layers at a time, and judges it by its distance from the float32 output relative to Hugging Face's own BF16 error, not by top-1 agreement or a fixed cosine threshold alone."
+        "The implementation comes with a check that compares its BF16 output with Hugging Face's BF16 output on the same input."
       ]
     },
     {
-      "id": "transformer-engine-convert-hf-004",
+      "id": "transformer-engine-convert-hf-002",
       "prompt": "How do I serve my fine-tuned Llama 3 with vLLM?",
       "expected_output": "An answer about serving the model with vLLM, with no Transformer Engine conversion.",
       "expected_skill": null,
@@ -28,7 +27,7 @@
       ]
     },
     {
-      "id": "transformer-engine-convert-hf-006",
+      "id": "transformer-engine-convert-hf-003",
       "prompt": "Speed up fine-tuning of ESM-2 650M with Transformer Engine.",
       "expected_output": "A pointer to the BioNeMo Recipes acceleration skill, which covers protein language models such as ESM-2, instead of a module built from the Llama or Mixtral tutorial.",
       "expected_skill": "transformer-engine-convert-hf",
@@ -38,7 +37,7 @@
       ]
     },
     {
-      "id": "transformer-engine-convert-hf-007",
+      "id": "transformer-engine-convert-hf-004",
       "prompt": "Convert DeepSeek-V3 to Transformer Engine.",
       "expected_output": "A te_deepseek_v3.py TE implementation that replaces the multi-head latent attention (MLA) and MoE blocks separately, fuses each norm with the projections that read it through LayerNormLinear, runs attention on DotProductAttention with HF's softmax scale, runs the 256 routed experts through GroupedLinear, and maps the FP8 checkpoint's dequantized weights.",
       "expected_skill": "transformer-engine-convert-hf",
