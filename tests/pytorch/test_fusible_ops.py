@@ -20,6 +20,7 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
@@ -1198,6 +1199,41 @@ class TestExtraTensorChannels:
         y_ref.backward(dy)
         y_test.backward(dy)
         torch.testing.assert_close(x_test.grad, x_ref.grad)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("activation", ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"))
+@pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
+def test_gated_activation_fp8_columnwise_output(activation: str, dtype: torch.dtype) -> None:
+    """Gated activation with an FP8 output that needs row-wise and column-wise data
+
+    Recipes request both usages on GPUs without non-TN FP8 GEMMs (e.g. SM 12.0).
+    The column-wise data must be the transpose of the row-wise data.
+
+    """
+    rows, cols = 256, 512
+    x = torch.randn(rows, 2 * cols, dtype=dtype, device="cuda")
+    dy = torch.randn(rows, cols, dtype=dtype, device="cuda")
+
+    def make_quantizer() -> Float8Quantizer:
+        return Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device="cuda"),
+            amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+        )
+
+    act = getattr(tex, activation)
+    dact = getattr(tex, f"d{activation}")
+    for out, ref in (
+        (act(x, make_quantizer()), act(x, None)),
+        (dact(dy, x, make_quantizer()), dact(dy, x, None)),
+    ):
+        rowwise = out.dequantize(dtype=torch.float32)
+        columnwise = out._transpose.view(torch.float8_e4m3fn).to(torch.float32) * out._scale_inv
+        torch.testing.assert_close(rowwise, ref.to(torch.float32), **quantization_tols("fp8"))
+        torch.testing.assert_close(columnwise.t(), rowwise, rtol=0, atol=0)
 
 
 class TestFuser:
