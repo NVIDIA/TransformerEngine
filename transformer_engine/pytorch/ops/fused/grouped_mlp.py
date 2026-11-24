@@ -2281,7 +2281,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
@@ -3206,7 +3206,7 @@ def fuse_glu_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
-    **unused,  # pylint: disable=unused-argument
+    **_unused,
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
@@ -3239,7 +3239,7 @@ def fuse_unary_activation_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
-    **unused,  # pylint: disable=unused-argument
+    **_unused,
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
@@ -3947,7 +3947,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
@@ -4208,7 +4208,7 @@ def fuse_bf16_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
-    **unused,  # pylint: disable=unused-argument
+    **_unused,
 ) -> list[FusibleOperation]:
     """Apply joint BF16 GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
