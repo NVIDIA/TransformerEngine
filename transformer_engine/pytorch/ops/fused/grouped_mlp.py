@@ -1687,21 +1687,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     kernel_impl, fc1_kernel = "gemm_act_rht_quant", rht_kernel
             elif fc2_input_quantizer.with_post_rht_amax:
                 rht_kernel = self.grouped_gemm_act_hadamard_kernel()
-                if (
-                    rht_kernel is not None
-                    and (
-                        fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
-                        or _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask()
+                supports_weight_layout = rht_kernel is not None and (
+                    not self._gate_then_up
+                    or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
+                )
+                supports_sign_mask = (
+                    fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
+                    or _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask()
+                )
+                supports_activation = (
+                    self._cudnn_act_func in ("swiglu", "situglu")
+                    or isinstance(activation_op, ScaledSReLU)
+                    or (
+                        isinstance(activation_op, ScaledTanhSReLU)
+                        and _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
                     )
-                    and (
-                        self._cudnn_act_func in ("swiglu", "situglu")
-                        or isinstance(activation_op, ScaledSReLU)
-                        or (
-                            isinstance(activation_op, ScaledTanhSReLU)
-                            and _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
-                        )
-                    )
-                ):
+                )
+                if supports_weight_layout and supports_sign_mask and supports_activation:
                     kernel_impl, fc1_kernel = "gemm_act_rht_amax", rht_kernel
 
         # Choose operand layouts
@@ -1773,15 +1775,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_prob_tensor = None
         if unit_activation_scale and kernel_impl != "gemm_act":
             # The specialized RHT wrappers require an explicit probability tensor.
-            fc1_prob_tensor = get_cached_ones_tensor(in_shape[0], torch.float32, device).reshape(
-                (-1,) if use_natural_layouts else (-1, 1, 1)
-            )
+            fc1_prob_tensor = get_cached_ones_tensor(in_shape[0], torch.float32, device)
         elif not unit_activation_scale:
             fc1_prob_tensor = scales.detach()
             if use_nvfp4:
                 # The cuDNN NVFP4 kernel only accepts FP32 router probability scales.
                 fc1_prob_tensor = fc1_prob_tensor.to(dtype=torch.float32)
-            fc1_prob_tensor = fc1_prob_tensor.reshape((-1,) if use_natural_layouts else (-1, 1, 1))
+        if fc1_prob_tensor is not None and not use_natural_layouts:
+            fc1_prob_tensor = fc1_prob_tensor.reshape(-1, 1, 1)
         if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
             # global scale factors, so alpha supplies the product of the two

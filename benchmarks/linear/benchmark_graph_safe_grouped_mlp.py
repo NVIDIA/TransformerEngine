@@ -263,23 +263,24 @@ def canonical_fc1_tile_override(tile_m):
 
 @contextmanager
 def canonical_rht_override(mode):
-    """Measure the existing separate RHT path without changing legacy selection."""
+    """Disable canonical RHT fusion for the separate control; otherwise use normal dispatch."""
+    if mode != "separate":
+        yield
+        return
     import cudnn
-    from transformer_engine.pytorch.ops.fused import grouped_mlp
 
-    kernel = getattr(cudnn, "grouped_gemm_glu_hadamard_wrapper_sm100", None)
-    layouts = getattr(kernel, "supports_glu_layouts", None)
-    preference = grouped_mlp._prefer_gate_then_up_hadamard
-    if mode == "separate" and layouts is not None:
-        kernel.supports_glu_layouts = tuple(x for x in layouts if x != "gate_then_up")
-    if mode == "fused":
-        grouped_mlp._prefer_gate_then_up_hadamard = lambda _: True
+    originals = []
     try:
+        for suffix in ("glu_hadamard", "glu_hadamard_quant"):
+            kernel = getattr(cudnn, f"grouped_gemm_{suffix}_wrapper_sm100", None)
+            layouts = getattr(kernel, "supports_glu_layouts", None)
+            if layouts is not None:
+                originals.append((kernel, layouts))
+                kernel.supports_glu_layouts = tuple(x for x in layouts if x != "gate_then_up")
         yield
     finally:
-        if layouts is not None:
+        for kernel, layouts in originals:
             kernel.supports_glu_layouts = layouts
-        grouped_mlp._prefer_gate_then_up_hadamard = preference
 
 
 def initialize_weights(module, *, seed, glu_interleave_size):
@@ -544,11 +545,14 @@ def benchmark_case(
             if call["wrapper"] == "grouped_gemm_glu_wrapper_sm100":
                 if call["mma_tiler_mn"] != (canonical_fc1_tile_m, 256):
                     raise RuntimeError("The canonical FC1 tile control was not honored")
-    if canonical_rht == "fused" and layout == "gate_then_up" and precision == "nvfp4":
-        if not any("hadamard" in call["wrapper"] for call in wrapper_calls):
+    if layout == "gate_then_up" and precision == "nvfp4":
+        fused_rht = any("hadamard" in call["wrapper"] for call in wrapper_calls)
+        if canonical_rht == "fused" and not fused_rht:
             raise RuntimeError(
                 "Requested fused canonical RHT, but the specialized wrapper was not selected"
             )
+        if canonical_rht == "separate" and fused_rht:
+            raise RuntimeError("Requested separate canonical RHT, but a fused wrapper was selected")
 
     forward_ops = module._module_groups[0]._forward_ops
     print("forward fused op:", type(forward_ops[0][0]).__name__ if forward_ops else "none")
@@ -697,7 +701,15 @@ def main() -> None:
     )
     parser.add_argument("--mode", choices=("fwd", "fwd_bwd", "both"), default="fwd_bwd")
     parser.add_argument("--precision", choices=("bf16", "nvfp4", "mxfp8", "all"), default="mxfp8")
-    parser.add_argument("--canonical-rht", choices=("auto", "separate", "fused"), default="auto")
+    parser.add_argument(
+        "--canonical-rht",
+        choices=("auto", "separate", "fused"),
+        default="auto",
+        help=(
+            "Canonical NVFP4 RHT: auto uses normal dispatch, separate disables FC1 RHT fusion,"
+            " and fused requires a specialized RHT wrapper to be selected"
+        ),
+    )
     parser.add_argument(
         "--canonical-fc1-tile-m",
         type=int,
