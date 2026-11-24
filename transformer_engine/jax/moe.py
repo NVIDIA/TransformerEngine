@@ -43,6 +43,7 @@ import math
 import warnings
 from dataclasses import replace
 from functools import partial
+from collections.abc import Mapping
 from typing import Any, Optional, Tuple, Union
 
 import flax.struct
@@ -53,13 +54,17 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
+from .cpp_extensions.activation import ActivationParams
 from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
     GroupedQuantizer,
+    Quantizer,
     QuantizerSet,
     ScaledTensorFactory,
     ScalingMode,
+    QuantizeLayout,
+    QuantizerFactory,
     ScaledTensor2x,
     TensorUsage,
     noop_quantizer_set,
@@ -77,6 +82,26 @@ __all__ = [
     "get_moe_recv_capacity_per_rank",
     "moe",
 ]
+
+
+def _resolve_moe_activation_params(activation_type, activation_params):
+    if activation_params is None:
+        activation_params = {}
+    if not isinstance(activation_params, Mapping):
+        raise TypeError("activation_params must be a mapping or None")
+    if activation_type != "situglu":
+        if activation_params:
+            raise ValueError("activation_params are only supported for activation_type='situglu'")
+        return ActivationParams()
+    unknown = activation_params.keys() - {"gate_beta", "up_beta"}
+    if unknown:
+        raise ValueError(f"Unsupported SiTU activation_params: {sorted(unknown, key=str)}")
+    return ActivationParams.create("situglu", **activation_params)
+
+
+def _fused_glu_activation_kwargs(activation_type, act_params, *, backward=False):
+    act_func = "situglu" if activation_type == "situglu" else "swiglu"
+    return {"act_func": ("d" if backward else "") + act_func, "act_params": act_params}
 
 
 @flax.struct.dataclass
@@ -210,7 +235,7 @@ _ALIGN_SIZE = 128
 _CUDNN_JAX_ALIGN_SIZE = 256
 
 
-def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
+def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="silu") -> bool:
     """Select shared cuDNN GLU/dGLU fusion or the unfused TE path."""
     from transformer_engine_jax import get_device_compute_capability
 
@@ -222,11 +247,18 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
     else:
         if capability < 100:
             reasons.append(f"fused kernels require SM100+, got SM{capability}")
+        is_situ = activation_type == "situglu"
+        if is_situ and capability not in (100, 103):
+            reasons.append(f"SiTU fusion requires SM100/SM103, got SM{capability}")
         if not reasons:
-            available, error = tex.grouped_gemm_glu_dependencies_available()
+            available, error = tex.grouped_gemm_glu_dependencies_available(
+                act_func="situglu" if is_situ else "swiglu"
+            )
             if available:
                 return True
             reasons.append(f"shared fused API is incompatible: {error}")
+    if activation_type == "situglu":
+        raise ValueError("SiTU requires cuDNN MXFP8 fusion: " + "; ".join(reasons))
     warnings.warn(
         "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
         + "; ".join(reasons)
@@ -251,8 +283,8 @@ def _cudnn_jax_fusion_rejection_reasons(
 ) -> list[str]:
     """Return reasons this call cannot use cuDNN's shared grouped GLU/dGLU JAX APIs."""
     errors = []
-    if str(activation_type).lower() != "silu":
-        errors.append("requires activation_type='silu'")
+    if activation_type != "situglu" and str(activation_type).lower() != "silu":
+        errors.append("requires activation_type='silu' or 'situglu'")
     if wi_0_bias is not None or wi_1_bias is not None:
         errors.append("does not support FC1 gate/up bias")
     hidden = x.shape[-1]
@@ -642,6 +674,27 @@ def _validate_moe_quantizer_sets(
                 )
 
 
+def _validate_dispatch_quantizer(dispatch_quantizer, fc1_x_quantizer, hidden):
+    """Check that tokens can be dispatched with ``dispatch_quantizer`` and requantized for FC1."""
+    if dispatch_quantizer.scaling_mode != ScalingMode.MXFP8_1D_SCALING:
+        raise NotImplementedError(
+            "dispatch_quantizer supports only MXFP8_1D_SCALING, got"
+            f" {dispatch_quantizer.scaling_mode}."
+        )
+    if dispatch_quantizer.q_dtype != jnp.float8_e4m3fn:
+        raise ValueError(
+            f"dispatch_quantizer supports only E4M3 payloads, got {dispatch_quantizer.q_dtype}."
+        )
+    if not isinstance(fc1_x_quantizer, GroupedQuantizer):
+        raise ValueError(
+            "dispatch_quantizer requires an MXFP8 grouped quantizer for the FC1 input."
+        )
+    if hidden % 512 != 0:
+        raise ValueError(
+            f"dispatch_quantizer requires the hidden size to be a multiple of 512, got {hidden}."
+        )
+
+
 def _with_grouped_weight_buffers(tensor, data, scale_inv, original_shape):
     """Rebuild a dense grouped weight while preserving its quantization metadata."""
     return GroupedScaledTensor1x(
@@ -883,11 +936,13 @@ def _ffn_fwd_per_shard(
     token_counts_local: jnp.ndarray,
     wi: jnp.ndarray,
     wo: jnp.ndarray,
+    recv_scale_inv_local: Optional[jnp.ndarray],
     wi_0_bias: Optional[jnp.ndarray],
     wi_1_bias: Optional[jnp.ndarray],
     wo_bias: Optional[jnp.ndarray],
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
+    compute_dtype,
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
@@ -901,27 +956,42 @@ def _ffn_fwd_per_shard(
     fsdp_size: int,
     wi_fsdp_axis: Optional[int],
     wo_fsdp_axis: Optional[int],
+    act_params: ActivationParams = ActivationParams(),
 ):
-    """Run the grouped FFN on one shard's EP receive buffer."""
+    """Run the grouped FFN on one shard's EP receive buffer.
+
+    ``recv_scale_inv_local`` is set when ``recv_tokens_local`` holds dispatched MXFP8 data. The
+    dispatched data is consumed by the forward FC1 GEMM directly, and only the FC1 operands for
+    the backward pass are requantized from it.
+    """
     hidden = recv_tokens_local.shape[-1]
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     group_sizes = token_counts_local.reshape(-1).astype(jnp.int32)
 
-    wi = wi.astype(sorted_x.dtype)
-    wo = wo.astype(sorted_x.dtype)
+    wi = wi.astype(compute_dtype)
+    wo = wo.astype(compute_dtype)
 
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
-    casted_sorted_x = tex.grouped_quantize(
-        sorted_x,
-        fc1_quantizer_set.x,
-        group_sizes,
-        flatten_axis=-1,
-    )
+    if recv_scale_inv_local is None:
+        casted_sorted_x = tex.grouped_quantize(
+            sorted_x,
+            fc1_quantizer_set.x,
+            group_sizes,
+            flatten_axis=-1,
+        )
+    else:
+        casted_sorted_x = tex.grouped_requantize(
+            sorted_x,
+            recv_scale_inv_local.reshape(sorted_x.shape[0], -1),
+            group_sizes,
+            fc1_quantizer_set.x,
+            compute_dtype,
+        )
     casted_wi = _prepare_fc1_weight(
         wi,
         fc1_quantizer_set.kernel,
@@ -965,8 +1035,9 @@ def _ffn_fwd_per_shard(
             casted_wi_rhs.scale_inv,
             padded_offsets,
             prob,
-            compute_dtype=sorted_x.dtype,
+            compute_dtype=compute_dtype,
             output_dtype=fc2_quantizer_set.x.q_dtype,
+            **_fused_glu_activation_kwargs(activation_type, act_params),
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], combined)
         if wi_0_checkpoint_name is not None:
@@ -1013,7 +1084,7 @@ def _ffn_fwd_per_shard(
             colwise_data=intermediate_col.reshape(-1),
             colwise_scale_inv=intermediate_scale_col,
             scaling_mode=scaling_mode,
-            dq_dtype=sorted_x.dtype,
+            dq_dtype=compute_dtype,
             data_layout=fc2_quantizer_set.x.data_layout,
             q_layout=fc2_quantizer_set.x.q_layout,
             flatten_axis=1,
@@ -1040,8 +1111,8 @@ def _ffn_fwd_per_shard(
     # dtype the wo GEMM / wo's quantized input consumes. For bf16 compute
     # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
     # transitions to the target precision.
-    act_fn = _convert_to_activation_function(activation_type)
     if not use_cudnn_jax_fusion:
+        act_fn = _convert_to_activation_function(activation_type)
         intermediate = act_fn(gate_proj_out) * up_proj_out
     if apply_topk_weights_early and not use_cudnn_jax_fusion:
         # Fold the per-token combine weights into the FFN intermediate;
@@ -1106,6 +1177,7 @@ def _ffn_bwd_per_shard(
     has_bias: bool,
     use_cudnn_jax_fusion: bool,
     cudnn_native_weight_layout: bool,
+    act_params: ActivationParams = ActivationParams(),
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
@@ -1153,6 +1225,7 @@ def _ffn_bwd_per_shard(
             padded_offsets,
             prob,
             output_dtype=fc1_quantizer_set.dgrad.q_dtype,
+            **_fused_glu_activation_kwargs(activation_type, act_params, backward=True),
         )
         d_recv_w_from_intermediate = (
             dprob.astype(recv_w_flat.dtype)
@@ -1297,6 +1370,7 @@ def _moe_fwd_rule(
     wi_1_bias,
     wo_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
     activation_type,
     mesh_resource,
@@ -1315,6 +1389,7 @@ def _moe_fwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    act_params: ActivationParams = ActivationParams(),
 ):
     """Forward: [gate -> route ->] ep_dispatch -> FFN -> ep_combine.
 
@@ -1351,6 +1426,8 @@ def _moe_fwd_rule(
         )
         B, S, H = x.shape
         K = _num_experts_per_tok(router_info)
+        if dispatch_quantizer is not None:
+            _validate_dispatch_quantizer(dispatch_quantizer, quantizer_sets[0].x, H)
         cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
             wi, H, cudnn_native_weight_layout
         )
@@ -1554,14 +1631,37 @@ def _moe_fwd_rule(
             dispatch_output_per_expert_alignment=dispatch_alignment,
             topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
         )
-        recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-            tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
-        )
+        dispatch_x = x
+        if dispatch_quantizer is not None:
+            dispatch_x = tex.quantize(
+                x,
+                QuantizerFactory.create(
+                    scaling_mode=dispatch_quantizer.scaling_mode,
+                    q_dtype=dispatch_quantizer.q_dtype,
+                    q_layout=QuantizeLayout.ROWWISE,
+                ),
+            )
+        (
+            recv_tokens,
+            recv_topk_weights,
+            token_counts,
+            total_recv_tokens,
+            handle_mem,
+        ) = tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, dispatch_x, topk_w_3d, recv_pr)
+        recv_scale_inv = None
+        if dispatch_quantizer is not None:
+            recv_tokens, recv_scale_inv = recv_tokens.data, recv_tokens.scale_inv
         token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
         if dispatch_checkpoint_name is not None:
             recv_tokens = checkpoint_name(recv_tokens, dispatch_checkpoint_name)
             recv_topk_weights = checkpoint_name(recv_topk_weights, dispatch_checkpoint_name)
+            if dispatch_quantizer is not None:
+                recv_scale_inv = checkpoint_name(recv_scale_inv, dispatch_checkpoint_name)
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
+        if dispatch_quantizer is not None:
+            recv_scale_inv = jax.lax.with_sharding_constraint(
+                recv_scale_inv, NamedSharding(mesh, ep3_spec)
+            )
         recv_topk_weights = jax.lax.with_sharding_constraint(
             recv_topk_weights, NamedSharding(mesh, ep2_spec)
         )
@@ -1571,6 +1671,9 @@ def _moe_fwd_rule(
         bias_spec = P(ep_axis, None)
         ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_input_spec, wo_input_spec)
         ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
+        if dispatch_quantizer is not None:
+            ffn_in_specs += (ep3_spec,)
+            ffn_in_args.append(recv_scale_inv)
         if has_bias:
             ffn_in_specs += (bias_spec, bias_spec, bias_spec)
             ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
@@ -1594,23 +1697,24 @@ def _moe_fwd_rule(
         )
 
         def _ffn_fwd_body(*args):
-            if has_bias:
-                r_tok, r_w, tc, local_wi, local_wo, w0b, w1b, wob = args
-            else:
-                r_tok, r_w, tc, local_wi, local_wo = args
-                w0b = w1b = wob = None
+            r_tok, r_w, tc, local_wi, local_wo, *rest = args
+            r_scale_inv = rest.pop(0) if dispatch_quantizer is not None else None
+            w0b, w1b, wob = rest if has_bias else (None, None, None)
             return _ffn_fwd_per_shard(
                 r_tok,
                 r_w,
                 tc,
                 local_wi,
                 local_wo,
+                r_scale_inv,
                 w0b,
                 w1b,
                 wob,
                 quantizer_sets,
+                compute_dtype=x.dtype,
                 num_local_experts=num_local_experts,
                 activation_type=activation_type,
+                act_params=act_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
                 wi_0_checkpoint_name=wi_0_checkpoint_name,
@@ -1729,6 +1833,7 @@ def _moe_bwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion,
     cudnn_native_weight_layout,
+    act_params,
     residuals,
     cotangents,
 ):
@@ -1821,6 +1926,7 @@ def _moe_bwd_rule(
                 *args,
                 ctx.quantizer_sets,
                 activation_type=activation_type,
+                act_params=act_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 has_bias=has_bias,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
@@ -1983,6 +2089,7 @@ def _moe_bwd_rule(
             d_wi_1_bias if has_bias else None,
             d_wo_bias if has_bias else None,
             ctx.quantizer_sets,
+            None,
         )
 
 
@@ -2018,7 +2125,7 @@ def _moe_aux_loss_bwd(ctx, d_aux_loss, K, num_experts, mesh, ep2_spec):
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(8, 26)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 28)))
 def _moe(
     x,
     router_info,
@@ -2028,6 +2135,7 @@ def _moe(
     wi_1_bias,
     wo_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
     activation_type,
     mesh_resource,
@@ -2046,6 +2154,7 @@ def _moe(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    act_params: ActivationParams = ActivationParams(),
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -2056,6 +2165,7 @@ def _moe(
         wi_1_bias,
         wo_bias,
         quantizer_sets,
+        dispatch_quantizer,
         num_experts,
         activation_type,
         mesh_resource,
@@ -2074,6 +2184,7 @@ def _moe(
         quant_before_fsdp_ag,
         use_cudnn_fusion,
         cudnn_native_weight_layout,
+        act_params,
     )
     return primal
 
@@ -2111,6 +2222,8 @@ def moe(
     dispatch_checkpoint_name: Optional[str] = None,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    dispatch_quantizer: Optional[Quantizer] = None,
+    activation_params: Optional[dict] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2124,6 +2237,13 @@ def moe(
 
     Parameters
     ----------
+    activation_type : str
+        Gate activation (default ``"silu"``), or ``"situglu"`` for fused MXFP8
+        SiTU-GLU on SM100/SM103. Unsupported SiTU configurations raise ``ValueError``.
+    activation_params : Optional[dict]
+        Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
+        (default 25.0). Values must be finite and positive. Other activations
+        do not accept parameters.
     router_info : Union[RouterComputationInfo, RoutingMapInfo]
         :class:`RouterComputationInfo` makes TE compute the gate and top-k
         from the given router parameters. :class:`RoutingMapInfo` supplies
@@ -2178,16 +2298,26 @@ def moe(
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
         Requires cuDNN Frontend >= 1.32.0 with compatible JAX APIs.
+        SiTU additionally requires SM100/SM103 and JAX GLU/dGLU APIs exposing
+        ``situ_beta1`` and ``situ_beta2`` with Frontend >= 1.33.0.
+        Ineligible SiTU calls raise
+        ``ValueError``; there is no unfused SiTU path.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.
-        Ineligible calls warn and fall back to TE's regular grouped-GEMM
-        implementation. API signatures and GPU capability determine support.
+        Except for SiTU, ineligible calls warn and fall back to TE's regular
+        grouped-GEMM implementation. API signatures and GPU capability determine support.
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
         gate/up blocks. Defaults to ``None``, inferring storage from the global
         shape. Ambiguous square shapes require an explicit flag. This option
         describes parameter storage independently of the selected execution path.
+    dispatch_quantizer : Optional[Quantizer]
+        Quantizer used to quantize tokens before EP dispatch so that the dispatch moves
+        quantized data and compact scales instead of high-precision activations. Only MXFP8
+        E4M3 quantizers are supported, and the hidden size must be a multiple of 512. The
+        quantizer's layout is ignored; tokens are always quantized rowwise. Defaults to
+        ``None`` (no dispatch quantization).
 
     Notes
     -----
@@ -2207,6 +2337,11 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
+    if dispatch_quantizer is not None and not isinstance(dispatch_quantizer, Quantizer):
+        raise TypeError("dispatch_quantizer must be a Quantizer or None")
+    act_params = _resolve_moe_activation_params(activation_type, activation_params)
+    if activation_type == "situglu" and not use_cudnn_fusion:
+        raise ValueError("SiTU requires use_cudnn_fusion=True")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
@@ -2264,7 +2399,9 @@ def moe(
                 activation_type=activation_type,
                 ep_axis=ep_axis,
             )
-            use_cudnn_jax_fusion = _select_cudnn_jax_fusion(rejection_reasons)
+            use_cudnn_jax_fusion = _select_cudnn_jax_fusion(
+                rejection_reasons, activation_type=activation_type
+            )
 
         output, aux_loss, total_recv_tokens, expert_counts = _moe(
             x,
@@ -2275,6 +2412,7 @@ def moe(
             wi_1_bias,
             wo_bias,
             quantizer_sets,
+            dispatch_quantizer,
             num_experts,
             activation_type,
             mesh_resource,
@@ -2293,6 +2431,7 @@ def moe(
             quant_before_fsdp_ag,
             use_cudnn_fusion,
             cudnn_native_weight_layout,
+            act_params,
         )
         if not has_aux_loss:
             aux_loss = None

@@ -59,6 +59,7 @@ import transformer_engine_jax
 
 _glu_adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
 _moe_module = importlib.import_module("transformer_engine.jax.moe")
+_gemm_module = importlib.import_module("transformer_engine.jax.cpp_extensions.gemm")
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -849,6 +850,25 @@ class TestQuantize:
                 in_dtype, scaling_mode, te_quantizer, input_shape, flatten_axis
             ),
         )
+
+
+@pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16, jnp.float32])
+@pytest_parametrize_wrapper("input_shape", [(2, 16, 512), (8, 16, 256)])
+def test_mxfp8_rowwise_quantize_short_sequence(in_dtype, input_shape):
+    """Rowwise-only MXFP8 quantize must not require the colwise axis to be a multiple of 32."""
+    if not is_mxfp8_supported:
+        pytest.skip(mxfp8_unsupported_reason)
+
+    key = jax.random.PRNGKey(0)
+    x = jax.random.uniform(key, input_shape, in_dtype)
+    quantizer = QuantizerFactory.create(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        q_dtype=jnp.float8_e4m3fn,
+        q_layout=QuantizeLayout.ROWWISE,
+    )
+    out = tex.quantize(x, quantizer=quantizer)
+    assert isinstance(out, ScaledTensor1x) and not out.is_colwise
+    assert_dequantized_scaled_tensor(out, x)
 
 
 @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
@@ -2140,6 +2160,21 @@ class TestTopK:
         assert_allclose(prim_gathered, ref_gathered, dtype=dtype)
 
 
+@pytest.mark.parametrize(
+    "capability,cublas_version,expected",
+    [(90, 130300, False), (90, 130400, True), (100, 130300, True)],
+)
+def test_v2_grouped_gemm_hopper_cublas(monkeypatch, capability, cublas_version, expected):
+    """BF16 grouped GEMM takes the V2 kernel on Hopper only with cuBLAS 13.4+."""
+    monkeypatch.setattr(_gemm_module, "_v2_grouped_gemm_available", True)
+    monkeypatch.setattr(_gemm_module, "get_min_device_compute_capability", lambda: capability)
+    monkeypatch.setattr(_gemm_module, "get_cublasLt_version", lambda: cublas_version)
+    supported, reason = _gemm_module._is_v2_grouped_gemm_supported(
+        ScalingMode.NO_SCALING, jnp.bfloat16, False
+    )
+    assert supported == expected, reason
+
+
 class TestGroupedGemmGluFallback:
     """MoE API compatibility and dispatch with mocked kernels on one JAX device."""
 
@@ -2469,6 +2504,7 @@ class TestGroupedGemmGluFallback:
             wi=jnp.ones((1, combined, 128) if native_layout else (1, 128, combined), jnp.bfloat16),
             wo=jnp.ones((1, 128, 128), jnp.bfloat16),
             quantizer_sets=(quantizers, quantizers),
+            compute_dtype=jnp.bfloat16,
             num_local_experts=1,
             use_cudnn_jax_fusion=True,
             cudnn_native_weight_layout=native_layout,

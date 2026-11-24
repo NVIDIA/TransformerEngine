@@ -34,7 +34,12 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import RouterComputationInfo, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
+from ..moe import (
+    RouterComputationInfo,
+    _moe_mesh_axes,
+    _resolve_moe_mesh_resource,
+    moe,
+)
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import MeshResource, _get_mesh, global_shard_guard
@@ -69,7 +74,13 @@ class _MoEBlock(TransformerEngineBase):
         Hidden dim of the per-expert FFN (the inner ``mlp`` axis).
     activation_type : str
         Activation between ``layer_w0 @ wi_0`` and the elementwise
-        product with ``layer_w0 @ wi_1``. Default ``"silu"``.
+        product with ``layer_w0 @ wi_1``. Default ``"silu"``. Pass
+        ``"situglu"`` for fused MXFP8
+        SiTU-GLU on SM100/SM103. SiTU requires cuDNN Frontend >= 1.33.0 with compatible JAX
+        APIs and ``use_cudnn_fusion=True``; there is no unfused SiTU path.
+    activation_params : Optional[dict]
+        Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
+        (default 25.0). Values must be finite and positive.
 
     score_function : Union[str, ScoreFunction]
         ``"softmax"`` (default), ``"sigmoid"``, or ``"sqrtsoftplus"`` for the routing scores.
@@ -115,6 +126,11 @@ class _MoEBlock(TransformerEngineBase):
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.
+    dispatch_quantization_recipe : Optional[Recipe]
+        Recipe used to quantize tokens before EP dispatch so that the dispatch moves quantized
+        data plus compact scales instead of high-precision activations. Only MXFP8 recipes are
+        supported, and the hidden size must be a multiple of 512. Defaults to ``None`` (no
+        dispatch quantization).
     collect_expert_counts : bool
         Compute global per-expert assignment counts. Set to ``False`` when
         callers do not consume the counts to avoid the associated all-reduce;
@@ -166,6 +182,7 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
+    dispatch_quantization_recipe: Optional[Recipe] = None
     collect_expert_counts: bool = True
 
     # Dtypes / init / misc
@@ -175,6 +192,7 @@ class _MoEBlock(TransformerEngineBase):
     expert_bias_init: Initializer = nn.initializers.zeros
     use_ffn_bias: bool = False
     quantization_recipe: Optional[Recipe] = None
+    activation_params: Optional[dict] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -302,6 +320,12 @@ class _MoEBlock(TransformerEngineBase):
                     dgrad=token_set.dgrad,
                 )
 
+            dispatch_quantizer = None
+            if self.dispatch_quantization_recipe is not None:
+                dispatch_quantizer = self.generate_quantizer_set(
+                    "_dispatch", fp8_recipe=self.dispatch_quantization_recipe
+                ).x
+
             quantizer_sets = (
                 make_grouped_quantizer_set("_fc1"),
                 make_grouped_quantizer_set("_fc2"),
@@ -329,6 +353,7 @@ class _MoEBlock(TransformerEngineBase):
                 wo_bias,
                 num_experts=self.num_experts,
                 activation_type=self.activation_type,
+                activation_params=self.activation_params,
                 use_cudnn_fusion=self.use_cudnn_fusion,
                 cudnn_native_weight_layout=False,
                 apply_topk_weights_early=self.apply_topk_weights_early,
@@ -342,4 +367,5 @@ class _MoEBlock(TransformerEngineBase):
                 wo_kernel_axes=self.wo_kernel_axes,
                 dtype=self.dtype,
                 dispatch_checkpoint_name=self.dispatch_checkpoint_name,
+                dispatch_quantizer=dispatch_quantizer,
             )

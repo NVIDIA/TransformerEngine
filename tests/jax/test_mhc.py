@@ -532,11 +532,12 @@ class TestMHC:
                 assert_allclose(grad, ref_grad, err_msg=name, **get_tols(dtype))
             return
 
-        # In bf16, the branch's backward and the sum of the bf16 grad_x partials amplify
-        # rounding differences on a few elements, so element-wise checks are flaky. Instead,
-        # TE must be about as close as the bf16 reference to an fp32 ground truth. That error
-        # is too noisy on the few-element alpha and beta gradients, which are checked
-        # element-wise instead.
+        # BF16 rounding in the branch and grad_x partials amplifies differences from the
+        # FP32 ground truth. Require TE to be about as accurate as the BF16 reference.
+        # Check alpha and beta errors element-wise so large components cannot hide an
+        # inaccurate small component, whose relative error can be large after cancellation.
+        # Keep the dtype tolerance as a floor when the reference happens to be very accurate,
+        # and cap the FP32 error independently so a poor BF16 reference cannot mask a regression.
         to_fp32 = lambda tree: jax.tree.map(lambda a: a.astype(jnp.float32), tree)
         true_dx, true_dparams = grad_of(self._ref_mhc)(to_fp32(x), to_fp32(params))
 
@@ -549,7 +550,18 @@ class TestMHC:
         ):
             assert grad.shape == truth.shape, name
             if grad.size <= N_MIX:
-                assert_allclose(grad, ref_grad, err_msg=name, **get_tols(dtype))
+                te_err = jnp.abs(grad.astype(jnp.float32) - truth)
+                ref_err = jnp.abs(ref_grad.astype(jnp.float32) - truth)
+                tols = get_tols(dtype)
+                tolerance = tols["atol"] + tols["rtol"] * jnp.abs(truth)
+                assert jnp.all(
+                    te_err <= ref_err + tolerance
+                ), f"{name}: TE error {te_err}, reference {ref_err}"
+                # L2 cancellation errors need a larger absolute floor for alpha than beta.
+                cap_atol = 2.0 if name == "alpha" else 0.5
+                assert_allclose(
+                    grad, truth, atol=cap_atol, rtol=tols["rtol"], err_msg=f"{name}: FP32 error cap"
+                )
                 continue
             te_err, ref_err = rel_err(grad, truth), rel_err(ref_grad, truth)
             assert te_err <= 2 * ref_err + 1e-3, f"{name}: TE error {te_err}, reference {ref_err}"
