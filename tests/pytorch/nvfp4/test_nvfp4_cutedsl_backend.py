@@ -299,10 +299,15 @@ def _philox4x32(key, counter, rounds):
     mask = 0xFFFFFFFF
     k0, k1 = key
     c = list(counter)
+    # Same magic numbers as philox_rng.py
+    PHILOX_W32_0 = 0x9E3779B9
+    PHILOX_W32_1 = 0xBB67AE85
+    PHILOX_M4x32_0 = 0xD2511F53
+    PHILOX_M4x32_1 = 0xCD9E8D57
     for r in range(rounds):
         if r > 0:
-            k0, k1 = (k0 + 0x9E3779B9) & mask, (k1 + 0xBB67AE85) & mask
-        p0, p1 = 0xD2511F53 * c[0], 0xCD9E8D57 * c[2]
+            k0, k1 = (k0 + PHILOX_W32_0) & mask, (k1 + PHILOX_W32_1) & mask
+        p0, p1 = PHILOX_M4x32_0 * c[0], PHILOX_M4x32_1 * c[2]
         c = [(p1 >> 32) ^ c[1] ^ k0, p1 & mask, (p0 >> 32) ^ c[3] ^ k1, p0 & mask]
     return c
 
