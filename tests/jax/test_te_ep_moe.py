@@ -143,6 +143,7 @@ from transformer_engine.jax.ep import (
     ep_dispatch,
     ep_finalize,
 )
+from transformer_engine.jax.router import fused_topk_with_score_function
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.quantize import ScalingMode, is_scaling_mode_supported
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
@@ -324,6 +325,39 @@ def mesh(use_cudnn_fusion):
 # -----------------------------------------------------------------------------
 
 
+def _reference_top_k(scores, k):
+    """Match the CUDA router's tie-breaking without changing the scores."""
+    # Radix top-k uses ascending expert indices for ties, as lax.top_k does.
+    if k >= int(os.environ.get("NVTE_RADIX_TOPK_THRESHOLD", "16")):
+        return jax.lax.top_k(scores, k)
+
+    # Naive top-k scans each warp lane's experts in ascending order, then its
+    # xor 16/8/4/2/1 reduction keeps the current candidate on equal scores.
+    # Stable top-k over this permutation reproduces that butterfly tie order.
+    def tie_rank(expert):
+        return int(f"{expert % 32:05b}"[::-1], 2), expert // 32
+
+    expert_order = jnp.asarray(sorted(range(scores.shape[-1]), key=tie_rank), dtype=jnp.int32)
+    values, indices = jax.lax.top_k(scores[..., expert_order], k)
+    return values, expert_order[indices]
+
+
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_reference_top_k_ties(score_function):
+    logits = jnp.zeros((2, NUM_EXPERTS), dtype=jnp.float32)
+    logits = logits.at[1, -3:-1].set(1.0).at[1, -1].set(2.0)
+    _, indices = _reference_top_k(logits, TOPK)
+    expected_map = (
+        jnp.zeros_like(logits, dtype=jnp.bool_)
+        .at[jnp.arange(logits.shape[0])[:, None], indices]
+        .set(True)
+    )
+    _, routing_map = fused_topk_with_score_function(
+        logits, topk=TOPK, score_function=score_function
+    )
+    np.testing.assert_array_equal(np.asarray(routing_map), np.asarray(expected_map))
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -331,6 +365,7 @@ def mesh(use_cudnn_fusion):
         "num_experts_per_tok",
         "aux_loss_coeff",
         "score_function",
+        "activation_type",
     ),
 )
 def _pure_jax_moe_reference(
@@ -347,6 +382,7 @@ def _pure_jax_moe_reference(
     aux_loss_coeff: float = 0.0,
     score_function: str = "softmax",
     scaling_factor: float = 1.0,
+    activation_type="silu",
 ):
     original_shape = x.shape
     H = original_shape[-1]
@@ -373,7 +409,7 @@ def _pure_jax_moe_reference(
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
     elif score_function == "softmax":
         # use_pre_softmax=False: topk on raw logits, then softmax over K.
-        top_logits, top_indices = jax.lax.top_k(logits, k=K)
+        top_logits, top_indices = _reference_top_k(logits, k=K)
         weights = jax.nn.softmax(top_logits, axis=-1)  # [T, K], sums to 1
     elif score_function in ("sigmoid", "sqrtsoftplus"):
         if score_function == "sigmoid":
@@ -382,10 +418,10 @@ def _pure_jax_moe_reference(
             scores = jnp.sqrt(jax.nn.softplus(logits))  # [T, E]
         if expert_bias is not None and expert_bias.shape != (0,):
             scores_for_routing = scores + expert_bias.astype(jnp.float32)[None, :]
-            _, top_indices = jax.lax.top_k(scores_for_routing, k=K)
+            _, top_indices = _reference_top_k(scores_for_routing, k=K)
             weights = jnp.take_along_axis(scores, top_indices, axis=-1)
         else:
-            weights, top_indices = jax.lax.top_k(scores, k=K)
+            weights, top_indices = _reference_top_k(scores, k=K)
         # Sigmoid weights are normalized when K > 1 (matches the kernel).
         if K > 1:
             weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -405,7 +441,13 @@ def _pure_jax_moe_reference(
     # Activation runs in x.dtype (typically bf16) to mirror the impl --
     # the impl keeps silu+multiply in the wi GEMM output dtype because
     # storing higher precision than the consumer (wo) GEMM buys nothing.
-    intermediate = jax.nn.silu(layer_w0) * layer_w1
+    if activation_type == "situglu":
+        gate, up = layer_w0.astype(jnp.float32), layer_w1.astype(jnp.float32)
+        capped_gate = 4.0 * jnp.tanh(gate / 4.0)
+        capped_up = 25.0 * jnp.tanh(up / 25.0)
+        intermediate = (capped_gate * jax.nn.sigmoid(gate) * capped_up).astype(x.dtype)
+    else:
+        intermediate = jax.nn.silu(layer_w0) * layer_w1
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
     output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
     output = output_2d.reshape(original_shape).astype(x.dtype)
@@ -460,10 +502,14 @@ def _make_block(
     mesh_resource=EXPLICIT_MESH_RESOURCE,
     dispatch_quantization_recipe=None,
     use_cudnn_fusion,
+    activation_type="silu",
+    activation_params=None,
 ):
     if input_axes is None:
         input_axes = ("batch", *([None] * (INPUT_RANK - 1)))
     kwargs = dict(
+        activation_type=activation_type,
+        activation_params=activation_params,
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
@@ -1377,7 +1423,9 @@ class TestTeEpMoeCudnnCutedslFusion:
         # independently forcing the baseline to execute the unfused FFN.
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         with monkeypatch.context() as baseline_patch:
-            baseline_patch.setattr(moe_module, "_select_cudnn_jax_fusion", lambda _: False)
+            baseline_patch.setattr(
+                moe_module, "_select_cudnn_jax_fusion", lambda *args, **kwargs: False
+            )
             variables, baseline_output, _, _ = _init_apply(
                 baseline, mesh, x, jax.random.PRNGKey(52)
             )
@@ -1412,8 +1460,16 @@ class TestTeEpMoeCudnnCutedslFusion:
                 _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
             )
 
-    @pytest.mark.parametrize("native_layout", [False, True])
-    @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
+    @pytest.mark.parametrize(
+        "activation_type,native_layout,apply_topk_weights_early",
+        [
+            pytest.param("silu", False, False, id="swiglu-standard-late"),
+            pytest.param("silu", False, True, id="swiglu-standard-early"),
+            pytest.param("silu", True, False, id="swiglu-native-late"),
+            pytest.param("silu", True, True, id="swiglu-native-early"),
+            pytest.param("situglu", False, False, id="situ-default"),
+        ],
+    )
     def test_mxfp8_forward_and_backward(
         self,
         mesh,
@@ -1422,12 +1478,15 @@ class TestTeEpMoeCudnnCutedslFusion:
         make_block,
         use_cudnn_fusion,
         native_layout,
+        activation_type,
     ):
         if not use_cudnn_fusion:
             pytest.skip("requires the cuDNN fusion fixture parameter")
         from transformer_engine.jax import cpp_extensions as tex
 
-        available, reason = tex.grouped_gemm_glu_dependencies_available()
+        available, reason = tex.grouped_gemm_glu_dependencies_available(
+            act_func="situglu" if activation_type == "situglu" else "swiglu"
+        )
         if not available:
             pytest.skip(reason)
 
@@ -1450,10 +1509,18 @@ class TestTeEpMoeCudnnCutedslFusion:
         original_dglu = tex.grouped_gemm_dglu
 
         def checked_glu(*args, **kwargs):
+            if activation_type == "situglu":
+                assert kwargs["act_func"] == "situglu"
+                caps = kwargs["act_params"].situglu
+                assert (caps.gate_beta, caps.up_beta) == (4.0, 25.0)
             shared_calls.append("glu")
             return original_glu(*args, **kwargs)
 
         def checked_dglu(*args, **kwargs):
+            if activation_type == "situglu":
+                assert kwargs["act_func"] == "dsituglu"
+                caps = kwargs["act_params"].situglu
+                assert (caps.gate_beta, caps.up_beta) == (4.0, 25.0)
             shared_calls.append("dglu")
             return original_dglu(*args, **kwargs)
 
@@ -1462,6 +1529,10 @@ class TestTeEpMoeCudnnCutedslFusion:
         block = make_block(
             apply_topk_weights_early=apply_topk_weights_early,
             quantization_recipe=MXFP8BlockScaling(),
+            activation_type=activation_type,
+            activation_params=(
+                {"gate_beta": 4.0, "up_beta": 25.0} if activation_type == "situglu" else None
+            ),
         )
         x = _make_inputs(jax.random.PRNGKey(30))
         variables, output, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
@@ -1497,6 +1568,7 @@ class TestTeEpMoeCudnnCutedslFusion:
                 num_experts_per_tok=TOPK,
                 score_function="softmax",
                 expert_bias=None,
+                activation_type=activation_type,
             )
             return jnp.mean(out.astype(jnp.float32) ** 2)
 
@@ -1505,16 +1577,19 @@ class TestTeEpMoeCudnnCutedslFusion:
             jnp.asarray(x_np),
         )
         for name in ("gate_kernel", "wi", "wo"):
+            grad_np = _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32)
+            grad_ref_np = np.asarray(jax.device_get(grads_ref[name])).astype(np.float32)
             np.testing.assert_allclose(
-                _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
-                np.asarray(jax.device_get(grads_ref[name])).astype(np.float32),
-                **(
-                    GRAD_GATE_TOLERANCE["mxfp8"]
-                    if name == "gate_kernel"
-                    else GRAD_FFN_TOLERANCE["mxfp8"]
-                ),
+                grad_np,
+                grad_ref_np,
+                atol=3e-6,
+                rtol=1.3e-6,
                 err_msg=f"{name} fused MXFP8 gradient parity breach",
             )
+            relative_error = np.linalg.norm(grad_np - grad_ref_np) / np.linalg.norm(grad_ref_np)
+            assert (
+                relative_error < 0.1
+            ), f"{name} MXFP8 relative L2 error {relative_error:.3%} >= 10%"
         grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref)).astype(np.float32)
         np.testing.assert_allclose(
             grad_x_np,
