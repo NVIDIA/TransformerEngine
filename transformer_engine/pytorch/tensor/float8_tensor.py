@@ -21,7 +21,6 @@ from .storage.float8_tensor_storage import (
     Float8TensorStorage,
     _FromFloat8Func,
     _columnwise_shape_for,
-    _view_transpose_for_shape,
 )
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
@@ -648,17 +647,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             else:
                 out_shape = _resolve_view_shape(tensor.shape, args[1:])
 
-            raw_transpose = None if tensor._transpose_invalid else tensor._transpose
-            out_transpose = _view_transpose_for_shape(raw_transpose, out_shape)
-            if raw_transpose is not None and out_transpose is None and data is None:
-                raise NotImplementedError(
-                    "Float8Tensor view with columnwise-only data is only supported "
-                    "when the requested shape preserves the columnwise layout"
-                )
-            if data is None and out_transpose is None:
-                raise NotImplementedError(
-                    "Float8Tensor view with columnwise-only data requires a valid columnwise buffer"
-                )
             return Float8Tensor(
                 shape=out_shape,
                 dtype=tensor.dtype,
@@ -666,7 +654,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 data=out_data,
                 fp8_scale_inv=tensor._scale_inv,
                 fp8_dtype=tensor._fp8_dtype,
-                data_transpose=out_transpose,
+                data_transpose=tensor._view_transpose(out_shape),
                 quantizer=tensor._quantizer,
                 device=tensor.device,
             )
@@ -1229,23 +1217,10 @@ class _ViewFunc(torch.autograd.Function):
         ctx.shape = tensor.shape
         if shape is None:
             return tensor.detach()
-        out_data = None
-        if tensor._data is not None:
-            out_data = tensor._data.view(*shape)
-            out_shape = out_data.size()
-        else:
-            out_shape = _resolve_view_shape(tensor.shape, shape)
-        raw_transpose = None if tensor._transpose_invalid else tensor._transpose
-        out_transpose = _view_transpose_for_shape(raw_transpose, out_shape)
-        if raw_transpose is not None and out_transpose is None and tensor._data is None:
-            raise NotImplementedError(
-                "Float8Tensor view with columnwise-only data is only supported "
-                "when the requested shape preserves the columnwise layout"
-            )
-        if tensor._data is None and out_transpose is None:
-            raise NotImplementedError(
-                "Float8Tensor view with columnwise-only data requires a valid columnwise buffer"
-            )
+        out_data = tensor._data.view(*shape) if tensor._data is not None else None
+        out_shape = (
+            out_data.size() if out_data is not None else _resolve_view_shape(tensor.shape, shape)
+        )
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -1253,7 +1228,7 @@ class _ViewFunc(torch.autograd.Function):
             data=out_data,
             fp8_scale_inv=tensor._scale_inv,
             fp8_dtype=tensor._fp8_dtype,
-            data_transpose=out_transpose,
+            data_transpose=tensor._view_transpose(out_shape),
             quantizer=tensor._quantizer,
             device=tensor.device,
         )
@@ -1286,8 +1261,6 @@ class _ReshapeFunc(torch.autograd.Function):
             return tensor.detach()
         out_data = tensor._data.reshape(*shape)
         out_shape = out_data.size()
-        raw_transpose = None if tensor._transpose_invalid else tensor._transpose
-        out_transpose = _view_transpose_for_shape(raw_transpose, out_shape, allow_copy=True)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -1295,7 +1268,7 @@ class _ReshapeFunc(torch.autograd.Function):
             data=out_data,
             fp8_scale_inv=tensor._scale_inv,
             fp8_dtype=tensor._fp8_dtype,
-            data_transpose=out_transpose,
+            data_transpose=tensor._view_transpose(out_shape, allow_copy=True),
             quantizer=tensor._quantizer,
             device=tensor.device,
         )

@@ -21,32 +21,7 @@ from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 def _columnwise_shape_for(rowwise_shape: Iterable[int]) -> torch.Size:
     """Physical columnwise FP8 shape for a logical rowwise shape."""
     shape = torch.Size(rowwise_shape)
-    if len(shape) == 0:
-        return shape
-    return torch.Size((shape[-1], *shape[:-1]))
-
-
-def _view_transpose_for_shape(
-    transpose: Optional[torch.Tensor],
-    out_shape: torch.Size,
-    *,
-    allow_copy: bool = False,
-) -> Optional[torch.Tensor]:
-    """View or reshape ``transpose`` for ``out_shape``, or return ``None`` if incompatible."""
-    if transpose is None:
-        return None
-    view_shape = _columnwise_shape_for(out_shape)
-    if len(out_shape) == 0:
-        if len(transpose.shape) != 0:
-            return None
-    elif len(transpose.shape) == 0 or transpose.shape[0] != view_shape[0]:
-        return None
-    if allow_copy:
-        return transpose.reshape(*view_shape)
-    try:
-        return transpose.view(*view_shape)
-    except RuntimeError:
-        return None
+    return torch.Size((shape[-1], *shape[:-1])) if shape else shape
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -256,32 +231,50 @@ class Float8TensorStorage(QuantizedTensorStorage):
             return self._transpose.device
         raise RuntimeError("Float8TensorStorage has no data!")
 
+    def _view_transpose(
+        self,
+        out_shape: torch.Size,
+        *,
+        allow_copy: bool = False,
+    ) -> Optional[torch.Tensor]:
+        """View or reshape ``_transpose`` for ``out_shape``, or return ``None`` if incompatible."""
+        transpose = None if self._transpose_invalid else self._transpose
+        if transpose is None:
+            if self._data is None:
+                raise NotImplementedError(
+                    f"{type(self).__name__} view with columnwise-only data requires a valid "
+                    "columnwise buffer"
+                )
+            return None
+
+        view_shape = _columnwise_shape_for(out_shape)
+        if not view_shape or not transpose.shape or transpose.shape[0] == view_shape[0]:
+            if allow_copy:
+                return transpose.reshape(*view_shape)
+            try:
+                return transpose.view(*view_shape)
+            except RuntimeError:
+                pass
+
+        if self._data is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} view with columnwise-only data is only supported "
+                "when the requested shape preserves the columnwise layout"
+            )
+        return None
+
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
         out_data = self._data.view(shape) if self._data is not None else None
-        if out_data is not None:
-            out_shape = out_data.size()
-        else:
-            out_shape = _resolve_view_shape(self.size(), shape)
-        raw_transpose = None if self._transpose_invalid else self._transpose
-        out_transpose = _view_transpose_for_shape(raw_transpose, out_shape)
-        if raw_transpose is not None and out_transpose is None and self._data is None:
-            raise NotImplementedError(
-                "Float8TensorStorage view with columnwise-only data is only "
-                "supported when the requested shape preserves the columnwise layout"
-            )
-        if self._data is None and out_transpose is None:
-            raise NotImplementedError(
-                "Float8TensorStorage view with columnwise-only data requires a valid "
-                "columnwise buffer"
-            )
-
+        out_shape = (
+            out_data.size() if out_data is not None else _resolve_view_shape(self.size(), shape)
+        )
         return Float8TensorStorage(
             data=out_data,
             fp8_scale_inv=self._scale_inv,
             fp8_dtype=self._fp8_dtype,
             fake_dtype=self._dtype,
-            data_transpose=out_transpose,
+            data_transpose=self._view_transpose(out_shape),
             quantizer=self._quantizer,
         )
 
