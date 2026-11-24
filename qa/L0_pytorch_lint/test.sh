@@ -6,7 +6,7 @@ set -e
 
 : "${TE_PATH:=/opt/transformerengine}"
 
-pip3 install cpplint==1.6.0 pylint==3.3.1
+pip3 install cpplint==1.6.0 pylint==4.1.3
 if [ -z "${PYTHON_ONLY}" ]
 then
   cd $TE_PATH

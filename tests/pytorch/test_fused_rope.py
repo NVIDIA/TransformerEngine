@@ -5,8 +5,12 @@ from typing import Callable, Tuple, Union, List
 import math
 import torch
 import pytest
+from transformer_engine.pytorch.attention import rope
 from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
+    _triton_rope_module,
+    apply_mla_rope_kv,
+    build_mla_rope_tables,
     apply_rotary_pos_emb,
     apply_fused_qkv_rotary_pos_emb,
 )
@@ -497,3 +501,172 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+@pytest.mark.parametrize("layout", ["batched_q", "packed_kv"])
+def test_dsa_triton_rope_adapters(monkeypatch, layout):
+    """Compare production Q/KV adapter roles with eager outputs, gradients and aliasing."""
+    if not torch.cuda.is_available():
+        pytest.skip("Triton DSA RoPE requires CUDA")
+    if rope._triton_rope_module() is None:
+        pytest.skip("Triton DSL is unavailable")
+    torch.manual_seed(23)
+    inplace = layout == "batched_q"
+    if inplace:
+        x = torch.randn(2, 17, 64, 512, device="cuda", dtype=torch.bfloat16)
+        boundaries, seq = [0, 17, 34], 17
+    else:
+        # Ragged lengths 3 and 5, followed by one padded compressed-token position.
+        x = torch.randn(9, 1, 512, device="cuda", dtype=torch.bfloat16)
+        boundaries, seq = [0, 3, 8], 5
+    (cos, sin), _ = rope.build_dsv4_rope_tables(seq, 4, 64, 160000.0, x.device)
+    cu = torch.tensor(boundaries, device=x.device, dtype=torch.int32)
+    gradient = torch.randn_like(x)
+
+    eager = rope.apply_dsa_rope_eager
+    reference_input = x.detach().clone().requires_grad_()
+    reference = eager(reference_input, cos, sin, cu)
+    if not inplace:
+        # Check eager packed indexing against separate sequences, including padding at position 0.
+        with torch.no_grad():
+            expected = torch.cat(
+                [
+                    eager(
+                        x[start:end].unsqueeze(0), cos[:, : end - start], sin[:, : end - start]
+                    ).squeeze(0)
+                    for start, end in ((0, 3), (3, 8), (8, 9))
+                ]
+            )
+        torch.testing.assert_close(reference, expected)
+    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+
+    if inplace:
+        with pytest.raises(ValueError, match="power of two"):
+            eager(x, cos[..., :48], sin[..., :48], cu)
+        with pytest.raises(ValueError, match="allow_inplace=True"):
+            rope.apply_dsa_rope(x, cos, sin, allow_inplace=True)
+        with pytest.raises(ValueError, match="allow_inplace=True"):
+            rope.apply_dsa_rope(x.transpose(0, 1), cos, sin, cu, allow_inplace=True)
+        with pytest.raises(ValueError, match="allow_inplace=True"):
+            rope.apply_dsa_rope(reference_input, cos, sin, cu, allow_inplace=True)
+        torch.testing.assert_close(reference_input, x, rtol=0, atol=0)
+
+    monkeypatch.setattr(
+        rope,
+        "apply_dsa_rope_eager",
+        lambda *_: pytest.fail("Triton dispatch fell back to eager RoPE"),
+    )
+    candidate_source = x.detach().clone().requires_grad_()
+    candidate_input = candidate_source.clone() if inplace else candidate_source
+    candidate_ptr = candidate_input.data_ptr()
+    candidate = rope.apply_dsa_rope(candidate_input, cos, sin, cu, allow_inplace=inplace)
+    candidate_grad = torch.autograd.grad(candidate, candidate_source, gradient)[0]
+
+    assert (candidate.data_ptr() == candidate_ptr) == inplace
+    torch.testing.assert_close(candidate, reference, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(candidate_grad, reference_grad, atol=0.03125, rtol=0.002)
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_dsa_mla_rope_q_kernel_packed(interleaved):
+    """Check both Q output layouts and gradients for the current CP1/noninverse callers."""
+    if not torch.cuda.is_available():
+        pytest.skip("Triton RoPE requires CUDA")
+    kernels = rope._triton_rope_module()
+    if kernels is None:
+        pytest.skip("Triton DSL is unavailable")
+    import triton
+
+    torch.manual_seed(53)
+    # Two sequences of lengths 4 and 6, then one padded token using position zero.
+    positions = [0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0]
+    cu = torch.tensor([0, 4, 10], device="cuda", dtype=torch.int32)
+    x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
+    # Contiguous columns with a larger row stride exercise explicit table strides.
+    cos = torch.randn(6, 128, device="cuda")[:, :64]
+    sin = torch.randn(6, 128, device="cuda")[:, :64]
+    reference_input = x.detach().requires_grad_()
+    tail = reference_input[..., 16:].float()
+    c, s = cos[positions, None], sin[positions, None]
+    left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
+    right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
+    rotated = (
+        torch.stack((left, right), -1).flatten(-2) if interleaved else torch.cat((left, right), -1)
+    )
+    reference = torch.cat((reference_input[..., :16], rotated.to(x.dtype)), -1)
+    gradient = torch.randn_like(x)
+    expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+    candidate, actual_grad = x.clone(), gradient.clone()
+    grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
+    for kernel, tensor in (
+        (kernels.rotary_fwd_q_kernel, candidate),
+        (kernels.rotary_bwd_q_kernel, actual_grad),
+    ):
+        kernel[grid](
+            tensor,
+            cos,
+            sin,
+            16,
+            64,
+            3,
+            1,
+            2,
+            cu,
+            None,
+            tensor.stride(0),
+            tensor.stride(1),
+            cos.stride(0),
+            sin.stride(0),
+            0,
+            1,
+            INVERSE=False,
+            REMOVE_INTERLEAVING=interleaved,
+        )
+    torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
+    torch.testing.assert_close(actual_grad, expected_grad, atol=0.03125, rtol=0.002)
+
+
+@pytest.mark.launch_on_gb200
+@pytest.mark.skipif(_triton_rope_module() is None, reason="MLA RoPE requires Triton")
+def test_mla_rope_kv(monkeypatch):
+    """Compare MLA keys, values, and input gradients with independent PyTorch equations.
+
+    Split the KV input into per-head key and value channels. Rotate the shared
+    positional key for each token and append it to every head's key. The value
+    channels pass through unchanged. Backward sums the positional-key gradients
+    across heads.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("MLA RoPE requires CUDA")
+    kernels = _triton_rope_module()
+    # Force a partial block for the three heads without changing the shared autotune cache.
+    backward_kernel = kernels.triton.autotune(
+        configs=[kernels.triton.Config({"BLOCK_H": 4})], key=[]
+    )(kernels.rotary_bwd_kv_kernel.fn)
+    monkeypatch.setattr(kernels, "rotary_bwd_kv_kernel", backward_kernel)
+    torch.manual_seed(59)
+    kv = torch.randn(7, 2, 3, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    positional = torch.randn(7, 2, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    cos, sin = build_mla_rope_tables(7, emb_dim=64, device=kv.device)
+    key, value = apply_mla_rope_kv(
+        kv,
+        positional,
+        cos_table=cos,
+        sin_table=sin,
+        head_dim_nope=16,
+        head_dim_v=16,
+    )
+    ref_kv = kv.detach().requires_grad_()
+    ref_pos = positional.detach().requires_grad_()
+    c, s = cos[:, None, None], sin[:, None, None]
+    left = ref_pos[..., 0::2].float() * c[..., :32] - ref_pos[..., 1::2].float() * s[..., :32]
+    right = ref_pos[..., 1::2].float() * c[..., 32:] + ref_pos[..., 0::2].float() * s[..., 32:]
+    ref_key = torch.cat(
+        (ref_kv[..., :16], torch.cat((left, right), -1).to(kv.dtype).expand(-1, -1, 3, -1)), -1
+    )
+    ref_value = ref_kv[..., 16:]
+    gradients = (torch.randn_like(key), torch.randn_like(value))
+    actual_grads = torch.autograd.grad((key, value), (kv, positional), gradients)
+    ref_grads = torch.autograd.grad((ref_key, ref_value), (ref_kv, ref_pos), gradients)
+    for actual, expected in zip((key, value, *actual_grads), (ref_key, ref_value, *ref_grads)):
+        torch.testing.assert_close(actual, expected, atol=0.03125, rtol=0.02)

@@ -25,6 +25,19 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.DotProductAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward, set_context_parallel_group
 
+.. autoapiclass:: transformer_engine.pytorch.DSv4Attention(hidden_size, q_lora_rank, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.Compressor(hidden_size, width, ratio, overlap, eps, device, params_dtype, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.Indexer(hidden_size, q_lora_rank, head_dim, n_heads, top_k, ratio, eps, device, params_dtype, **kwargs)
+  :members: forward
+
+.. autoapifunction:: transformer_engine.pytorch.dense_indexer_loss_scores
+
+.. autoapifunction:: transformer_engine.pytorch.dense_indexer_loss_backward
+
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 
@@ -118,6 +131,8 @@ expert layers) is documented above with the other modules.
 .. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_score_function
 
 .. autoapifunction:: transformer_engine.pytorch.router.fused_compute_score_for_moe_aux_loss
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_aux_loss_scores
 
 .. autoapifunction:: transformer_engine.pytorch.router.fused_moe_aux_loss
 
