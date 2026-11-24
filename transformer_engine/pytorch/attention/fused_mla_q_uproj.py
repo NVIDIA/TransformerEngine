@@ -4,8 +4,7 @@
 
 """Fused MLA Q up-projection + per-head RoPE + MXFP8 quantize.
 
-The MLA RoPE Triton kernels are taken from:
-Megatron-LM megatron/core/fusions/fused_mla_yarn_rope_apply.py
+cuDNN applies RoPE during fused query forward. Backward uses ``rotary_bwd_q_kernel``.
 """
 
 from __future__ import annotations
@@ -21,10 +20,12 @@ import transformer_engine_torch as tex
 
 try:
     import triton
-    import triton.language as tl
+    from transformer_engine.common.triton.dsa_mla_rope import (
+        rotary_bwd_q_kernel,
+    )
 except ImportError:
     triton = None
-    tl = None
+    rotary_bwd_q_kernel = None
 
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..distributed import get_distributed_world_size
@@ -43,110 +44,6 @@ def _cudnn_frontend_version_supported() -> bool:
         )
     except PackageNotFoundError:
         return False
-
-
-if triton is not None:
-
-    @triton.jit
-    def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
-        token_idx = -1
-        this_seq_len = 0
-        seq_idx = 0
-        last_cum_seqlen = tl.load(cu_seqlens) // cp_size
-        while seq_idx < seq_num:
-            cur_cum_seqlen = tl.load(cu_seqlens + seq_idx + 1) // cp_size
-            if token_idx == -1 and cur_cum_seqlen > pid_m:
-                token_idx = pid_m - last_cum_seqlen
-                this_seq_len = cur_cum_seqlen - last_cum_seqlen
-            last_cum_seqlen = cur_cum_seqlen
-            seq_idx += 1
-        if cp_size > 1:
-            if token_idx < this_seq_len // 2:
-                token_idx = token_idx + cp_rank * this_seq_len // 2
-            else:
-                token_idx = (token_idx - this_seq_len // 2) + (
-                    2 * cp_size - cp_rank - 1
-                ) * this_seq_len // 2
-        return token_idx
-
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "head_num"],
-        restore_value=["DO"],
-    )
-    @triton.jit
-    def rotary_bwd_q_kernel(
-        DO,
-        COS,
-        SIN,
-        qk_head_dim,
-        emb_dim: tl.constexpr,
-        head_num: tl.constexpr,
-        batch_size,
-        seq_num,
-        cu_seqlens_q,
-        stride_x_seq,
-        stride_x_nheads,
-        cp_rank,
-        cp_size,
-        BLOCK_H: tl.constexpr,
-    ):
-        """
-        Triton kernel of the backward pass for applying YARN RoPE to MLA's query.
-        This kernel inplace modifies the input tensor DO.
-
-        Input:
-            DO: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-                or [total_seq_len, head_num, qk_head_dim + emb_dim]
-            COS/SIN: [max_seq_len, emb_dim]
-
-            batch_size, seq_num, and cu_seqlens_q are the same as in the forward pass
-        """
-        pid_m = tl.program_id(axis=0)
-        pid_head = tl.program_id(axis=1)
-
-        if cu_seqlens_q is None:
-            token_idx = pid_m // batch_size
-        else:
-            token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
-
-        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-
-        DO = DO + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
-
-        x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + qk_head_dim
-        mask = x_off < head_num * stride_x_nheads
-        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
-        x_right_off = x_left_off + emb_dim // 2
-        x_left = tl.load(DO + x_left_off, mask=mask)
-        x_right = tl.load(DO + x_right_off, mask=mask)
-
-        x_1 = x_left * cos_left + x_right * sin_right
-        x_2 = -x_left * sin_left + x_right * cos_right
-
-        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
-        x_2_off = x_1_off + 1
-        tl.store(DO + x_1_off, x_1, mask=mask)
-        tl.store(DO + x_2_off, x_2, mask=mask)
-
-else:
-    rotary_bwd_q_kernel = None
 
 
 class FusedMLAQUpProjRopeQuant:
@@ -458,7 +355,8 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         tokens = s * b
         act_dtype = ctx.act_dtype
 
-        # --- RoPE backward (unchanged: bf16, same rotary_bwd_q_kernel as the unfused path) ---
+        # Apply BF16 RoPE backward with rotary_bwd_q_kernel.
+        # The DSA and MLA adapters also use this kernel.
         dq3 = dq.reshape(tokens, nh, q_head_dim).contiguous()
 
         def grid(META):
@@ -474,10 +372,15 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
             1,
             None,
             None,
+            None,
             dq3.stride(0),
             dq3.stride(1),
+            cos.shape[-1],
+            sin.shape[-1],
             0,
             1,
+            INVERSE=False,
+            REMOVE_INTERLEAVING=False,
         )
         # grad w.r.t. the (pre-RoPE) up-proj GEMM output; bf16.
         dq2d = dq3.reshape(tokens, nh * q_head_dim).contiguous()
