@@ -177,7 +177,7 @@ std::shared_ptr<EpResources> AcquireEpResources() {
 }  // namespace
 
 // top_k, dispatch_output_per_expert_alignment, and topk_idx_dtype are baked as static
-// FFI attributes; every op passes them to the *_v2 C API as NVTEEpLayerConfig.
+// FFI attributes; every op passes them to the C API as NVTEEpLayerConfig.
 struct EpConfig {
   int64_t top_k;
   int64_t dispatch_output_per_expert_alignment;
@@ -462,7 +462,7 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP dispatch failed: ", [&] {
-    nvte_ep_dispatch_v2(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
+    nvte_ep_dispatch(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
                         bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
                         bufs.recv_topk_weights.data(), no_win, &layer_cfg, stream);
   });
@@ -570,7 +570,7 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP combine failed: ", [&] {
-    nvte_ep_combine_v2(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
+    nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
                        stream);
   });
 }
@@ -643,7 +643,7 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP dispatch_bwd failed: ", [&] {
-    nvte_ep_dispatch_bwd_v2(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
+    nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
                             no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
                             stream);
   });
@@ -695,7 +695,7 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP combine_bwd failed: ", [&] {
-    nvte_ep_combine_bwd_v2(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(),
+    nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(),
                            no_win, &layer_cfg, stream);
   });
 }

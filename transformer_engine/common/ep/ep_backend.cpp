@@ -116,12 +116,12 @@ inline void* handle_mem_ptr(NVTETensor handle_mem) {
   return p;
 }
 
-// Destroys an owned handle on scope exit. No-op for cache-owned handles (owned=false).
+// Destroys the handle on scope exit.
 class ScopedHandle {
  public:
-  ScopedHandle(ncclEpHandle_t handle, bool owned) : handle_(handle), owned_(owned) {}
+  explicit ScopedHandle(ncclEpHandle_t handle) : handle_(handle) {}
   ~ScopedHandle() {
-    if (owned_ && handle_ != nullptr) nccl_ep::handle_destroy(handle_);
+    if (handle_ != nullptr) nccl_ep::handle_destroy(handle_);
   }
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
@@ -129,7 +129,6 @@ class ScopedHandle {
 
  private:
   ncclEpHandle_t handle_;
-  bool owned_;
 };
 
 }  // namespace
@@ -256,11 +255,6 @@ void EPBackend::shutdown() {
 
 void EPBackend::shutdown_locked() {
   if (!initialized_) return;
-  for (auto& e : handles_) {
-    if (e.handle != nullptr) nccl_ep::handle_destroy(e.handle);
-  }
-  handles_.clear();
-  index_.clear();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (ep_group_ != nullptr) {
     nccl_ep::group_destroy(ep_group_);
@@ -311,21 +305,6 @@ ncclEpHandle_t EPBackend::import_handle_locked(void* handle_mem, size_t handle_m
   return handle;
 }
 
-ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
-                                                     int num_tokens,
-                                                     const NVTEEpLayerConfig* layer_cfg,
-                                                     bool* owned) {
-  if (layer_cfg != nullptr) {
-    *owned = true;
-    return import_handle_locked(handle_mem, handle_mem_size, num_tokens, *layer_cfg);
-  }
-  NVTE_CHECK(cache_cap_locked() > 0,
-             "EP op without layer_cfg requires the handle cache; use the *_v2 ops when "
-             "NVTE_EP_HANDLE_CACHE_SIZE=0");
-  *owned = false;
-  return lookup_handle_locked(handle_mem, handle_mem_size);
-}
-
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -335,8 +314,6 @@ ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t ha
 EPBackend::~EPBackend() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!initialized_) return;
-  handles_.clear();
-  index_.clear();
   ep_group_ = nullptr;
   ep_comm_ = nullptr;
   initialized_ = false;
@@ -346,7 +323,6 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   NVTE_CHECK(!initialized_, "EPBackend already initialized");
 
   group_config_ = group_config;
-  handle_cache_cap_set_ = false;
 
   ncclEpGroupConfig_t cfg = NCCL_EP_GROUP_CONFIG_INIT;
   cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
@@ -388,76 +364,6 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   ep_comm_ = ep_comm;
 
   initialized_ = true;
-}
-
-// ---------------------------------------------------------------------------
-// Pointer-keyed handle cache
-// ---------------------------------------------------------------------------
-
-size_t EPBackend::cache_cap_locked() {
-  if (!handle_cache_cap_set_) {
-    handle_cache_cap_set_ = true;
-    const char* cap_env = std::getenv("NVTE_EP_HANDLE_CACHE_SIZE");
-    if (cap_env != nullptr) {
-      const int64_t v = static_cast<int64_t>(std::atol(cap_env));
-      if (v < 0) {
-        handle_cache_cap_ = SIZE_MAX;
-      } else {
-        handle_cache_cap_ = static_cast<size_t>(v);
-      }
-    } else {
-      handle_cache_cap_ = 0;
-    }
-  }
-  return handle_cache_cap_;
-}
-
-ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
-                                                NVTEEpLayerConfig layer_cfg) {
-  auto it = index_.find(handle_mem);
-  if (it != index_.end()) {
-    const NVTEEpLayerConfig& cached = it->second->layer_cfg;
-    const bool same_cfg =
-        cached.top_k == layer_cfg.top_k && cached.dispatch_output_per_expert_alignment ==
-                                               layer_cfg.dispatch_output_per_expert_alignment;
-    if (same_cfg) {
-      NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
-                 "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
-                 it->second->handle_mem_size);
-      return it->second->handle;
-    }
-    // Same address with a new config: replace the stale handle.
-    if (it->second->handle != nullptr) nccl_ep::handle_destroy(it->second->handle);
-    handles_.erase(it->second);
-    index_.erase(it);
-  }
-  NVTE_CHECK(handles_.size() < cache_cap_locked(), "EP: live handle limit (", cache_cap_locked(),
-             ") reached; raise NVTE_EP_HANDLE_CACHE_SIZE");
-  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
-  hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
-  size_t hm_size = 0;
-  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                           layer_cfg.top_k));
-  ncclEpHandle_t h = open_handle(handle_mem, handle_mem_size, layer_cfg.top_k,
-                                 layer_cfg.dispatch_output_per_expert_alignment);
-  handles_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
-  index_.emplace(handle_mem, handles_.begin());
-  return h;
-}
-
-ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_mem_size) {
-  auto it = index_.find(handle_mem);
-  if (it != index_.end()) {
-    NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
-               "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
-               it->second->handle_mem_size);
-    return it->second->handle;
-  }
-  // Callers with unstable handle_mem addresses must use the *_v2 ops with the cache disabled.
-  const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
-  NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
-             " with no cached entry; call nvte_ep_prepare first.");
-  return nullptr;  // unreachable
 }
 
 // ---------------------------------------------------------------------------
@@ -522,16 +428,10 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  if (cache_cap_locked() == 0) {
-    // Cache disabled: later ops rebind via ncclEpImportHandle.
-    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
-                                   layer_cfg.dispatch_output_per_expert_alignment),
-                       /*owned=*/true);
-    NVTE_CHECK_NCCL(nccl_ep::update_handle(guard.get(), &nccl_topk_idx, &layout_info, stream));
-    return;
-  }
-  ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
-  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
+  // Later per-step ops rebind handle_mem via ncclEpImportHandle.
+  ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                 layer_cfg.dispatch_output_per_expert_alignment));
+  NVTE_CHECK_NCCL(nccl_ep::update_handle(guard.get(), &nccl_topk_idx, &layout_info, stream));
 }
 
 void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
@@ -564,7 +464,7 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
   ncclEpTensor_t nccl_tokens_out =
       make_nccl_ep_tensor(recv_tokens, recv_tokens_shape, recv_tokens_win);
 
-  // Routing is cached in handle_mem by ep_prepare; dispatch only needs
+  // Routing is stored in handle_mem by ep_prepare; dispatch only needs
   // topk_weights to reconstruct the sparse-to-dense prob map.
   const bool is_forward = (topk_weights != nullptr);
   NVTEShape topk_weights_shape, recv_topk_weights_shape;
@@ -649,15 +549,14 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
                          const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                          const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                          const NVTECommWindow& recv_topk_weights_win,
-                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                         const NVTEEpLayerConfig& layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(tokens).data[0]);
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  bool owned = false;
-  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
-                                                num_tokens, layer_cfg, &owned);
-  ScopedHandle guard(h, owned);
+  ncclEpHandle_t h =
+      import_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), num_tokens, layer_cfg);
+  ScopedHandle guard(h);
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
                         /*recv_tokens_per_expert=*/nullptr,
@@ -683,28 +582,19 @@ void EPBackend::prepare_and_dispatch(
   // fused path stays active, then wire both tensors into the dispatch below.
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  if (cache_cap_locked() == 0) {
-    // Cache disabled: use a fresh uncached handle for both steps.
-    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
-                                   layer_cfg.dispatch_output_per_expert_alignment),
-                       /*owned=*/true);
-    NVTE_CHECK_NCCL(
-        nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
-    issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
-                          recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
-                          recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
-    return;
-  }
-  ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
-  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
-  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+  // A single fresh handle serves both the routing update and the fused dispatch.
+  ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                 layer_cfg.dispatch_output_per_expert_alignment));
+  NVTE_CHECK_NCCL(
+      nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+  issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
                         recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
 }
 
 void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
                         const NVTECommWindow& expert_out_win, NVTETensor result,
-                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                        const NVTEEpLayerConfig& layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
@@ -722,17 +612,16 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  bool owned = false;
-  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
-                                                num_tokens, layer_cfg, &owned);
-  ScopedHandle guard(h, owned);
+  ncclEpHandle_t h =
+      import_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), num_tokens, layer_cfg);
+  ScopedHandle guard(h);
   NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
 void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
                              const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
                              const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
-                             NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
+                             NVTETensor grad_topk_weights, const NVTEEpLayerConfig& layer_cfg,
                              cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(grad_tokens).data[0]);
@@ -765,17 +654,16 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  bool owned = false;
-  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
-                                                num_tokens, layer_cfg, &owned);
-  ScopedHandle guard(h, owned);
+  ncclEpHandle_t h =
+      import_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), num_tokens, layer_cfg);
+  ScopedHandle guard(h);
   NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
 void EPBackend::combine_bwd(NVTETensor handle_mem, const NVTETensor grad,
                             const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
                             const NVTECommWindow& grad_expert_out_win,
-                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                            const NVTEEpLayerConfig& layer_cfg, cudaStream_t stream) {
   // Backward of combine = reverse-direction dispatch.
   dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
            /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
