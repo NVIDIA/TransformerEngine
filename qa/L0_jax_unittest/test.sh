@@ -44,6 +44,9 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     SPLIT_ACROSS_GPUS="-n $NUM_GPUS -p gpu_per_xdist_worker"
 fi
 
+# TODO: This picks up every new file under tests/jax, and each worker sees only one GPU. If your test
+# needs multiple GPUs, --ignore its file here and run it in a separate command without
+# $SPLIT_ACROSS_GPUS, otherwise it will be silently skipped.
 python3 -m pytest $SPLIT_ACROSS_GPUS -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax --ignore=$TE_PATH/tests/jax/test_multi_process_ep.py --ignore=$TE_PATH/tests/jax/test_mhc.py --ignore=$TE_PATH/tests/jax/moe/test_moe_fsdp_layout.py --ignore=$TE_PATH/tests/jax/test_dense_mesh_resource.py -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
 # These need multiple GPUs in one process, so they can't be split across GPUs.
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_moe_fsdp_layout.xml $TE_PATH/tests/jax/moe/test_moe_fsdp_layout.py -k 'not distributed' || test_fail "tests/jax/moe/test_moe_fsdp_layout.py"
