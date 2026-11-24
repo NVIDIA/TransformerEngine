@@ -326,3 +326,17 @@ html[data-theme="dark"] .dequantize { fill: #5c3a10; stroke: #ffb74d; }
 html[data-theme="dark"] .rowlabel,
 html[data-theme="dark"] .legend,
 html[data-theme="dark"] .op { fill: #e0e0e0; }
+
+/* model profile timeline diagrams */
+html[data-theme="dark"] .prof-title,
+html[data-theme="dark"] .prof-label-lg { fill: #f3f4f6; }
+html[data-theme="dark"] .prof-label { fill: #d1d5db; }
+html[data-theme="dark"] .prof-axis { fill: #9ca3af; }
+html[data-theme="dark"] .prof-tick,
+html[data-theme="dark"] .prof-leader { stroke: #6b7280; }
+html[data-theme="dark"] .prof-sep { stroke: #1f1f1f; }
+html[data-theme="dark"] .prof-bar-border { stroke: #4b5563; }
+html[data-theme="dark"] .prof-run:hover .prof-label,
+html[data-theme="dark"] .prof-run:hover .prof-label-lg { fill: #f9fafb; }
+html[data-theme="dark"] .prof-run:hover .prof-leader { stroke: #f9fafb; }
+html[data-theme="dark"] .prof-run:hover rect.k { stroke: #f9fafb; }

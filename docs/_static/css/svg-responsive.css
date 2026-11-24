@@ -80,3 +80,34 @@ article.bd-article,
     font-size: 0.95em;
     line-height: 1.4;
 }
+
+/* Wide timelines (profiles): keep the image at its native width and scroll it */
+.scroll-x {
+    overflow-x: auto;
+    margin: 12px 0;
+}
+
+.scroll-x img,
+article.bd-article .scroll-x img {
+    max-width: none;
+    width: auto;
+}
+
+/* inline SVG timelines inside a scroll container keep their native width */
+article.bd-article .scroll-x svg {
+    max-width: none;
+    height: auto;
+}
+
+/* Profile timelines: highlight the kernel under the cursor */
+article.bd-article svg rect.k {
+    transition: filter 0.08s;
+}
+article.bd-article svg rect.k:hover {
+    filter: brightness(1.18);
+    stroke: #111827;
+    stroke-width: 1px;
+}
+html[data-theme="dark"] article.bd-article svg rect.k:hover {
+    stroke: #f9fafb;
+}

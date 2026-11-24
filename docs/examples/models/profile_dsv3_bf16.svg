@@ -1,0 +1,625 @@
+<svg class='profile-timeline' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 912 2357' width='100%' style='max-width:912px;'>
+<defs><style>rect.k{transition:filter .08s;}rect.k:hover{filter:brightness(1.18);stroke:#111827;stroke-width:1px;}.prof-title{font:600 14.5px Helvetica,Arial,sans-serif;fill:#111827;}.prof-axis{font:400 10.5px Helvetica,Arial,sans-serif;fill:#6b7280;}.prof-label{font:400 11px Helvetica,Arial,sans-serif;fill:#374151;}.prof-label-lg{font:400 13px Helvetica,Arial,sans-serif;fill:#111827;}.prof-tick{stroke:#9ca3af;stroke-width:1;}.prof-leader{stroke:#9ca3af;stroke-width:0.75;stroke-opacity:0.75;fill:none;pointer-events:none;}.prof-sep{stroke:#ffffff;stroke-width:1.2;stroke-opacity:0.85;pointer-events:none;}.prof-bar-border{fill:none;stroke:#cbd5e1;stroke-width:0.75;pointer-events:none;}.prof-run:hover .prof-label,.prof-run:hover .prof-label-lg{text-decoration:underline;fill:#111827;}.prof-run:hover .prof-leader{stroke:#111827;stroke-width:1.2;stroke-opacity:1;}.prof-run:hover rect.k{filter:brightness(1.15);stroke:#111827;stroke-width:1px;}</style></defs>
+<text class='prof-title' x='46' y='22'>Forward  (22.9 ms)</text>
+<line class='prof-tick' x1='41' y1='35.0' x2='46' y2='35.0'/>
+<text class='prof-axis' x='38' y='38.5' text-anchor='end'>0 ms</text>
+<line class='prof-tick' x1='41' y1='84.9' x2='46' y2='84.9'/>
+<text class='prof-axis' x='38' y='88.4' text-anchor='end'>1 ms</text>
+<line class='prof-tick' x1='41' y1='134.8' x2='46' y2='134.8'/>
+<text class='prof-axis' x='38' y='138.3' text-anchor='end'>2 ms</text>
+<line class='prof-tick' x1='41' y1='184.7' x2='46' y2='184.7'/>
+<text class='prof-axis' x='38' y='188.2' text-anchor='end'>3 ms</text>
+<line class='prof-tick' x1='41' y1='234.6' x2='46' y2='234.6'/>
+<text class='prof-axis' x='38' y='238.1' text-anchor='end'>4 ms</text>
+<line class='prof-tick' x1='41' y1='284.5' x2='46' y2='284.5'/>
+<text class='prof-axis' x='38' y='288.0' text-anchor='end'>5 ms</text>
+<line class='prof-tick' x1='41' y1='334.3' x2='46' y2='334.3'/>
+<text class='prof-axis' x='38' y='337.8' text-anchor='end'>6 ms</text>
+<line class='prof-tick' x1='41' y1='384.2' x2='46' y2='384.2'/>
+<text class='prof-axis' x='38' y='387.7' text-anchor='end'>7 ms</text>
+<line class='prof-tick' x1='41' y1='434.1' x2='46' y2='434.1'/>
+<text class='prof-axis' x='38' y='437.6' text-anchor='end'>8 ms</text>
+<line class='prof-tick' x1='41' y1='484.0' x2='46' y2='484.0'/>
+<text class='prof-axis' x='38' y='487.5' text-anchor='end'>9 ms</text>
+<line class='prof-tick' x1='41' y1='533.9' x2='46' y2='533.9'/>
+<text class='prof-axis' x='38' y='537.4' text-anchor='end'>10 ms</text>
+<line class='prof-tick' x1='41' y1='583.8' x2='46' y2='583.8'/>
+<text class='prof-axis' x='38' y='587.3' text-anchor='end'>11 ms</text>
+<line class='prof-tick' x1='41' y1='633.7' x2='46' y2='633.7'/>
+<text class='prof-axis' x='38' y='637.2' text-anchor='end'>12 ms</text>
+<line class='prof-tick' x1='41' y1='683.6' x2='46' y2='683.6'/>
+<text class='prof-axis' x='38' y='687.1' text-anchor='end'>13 ms</text>
+<line class='prof-tick' x1='41' y1='733.5' x2='46' y2='733.5'/>
+<text class='prof-axis' x='38' y='737.0' text-anchor='end'>14 ms</text>
+<line class='prof-tick' x1='41' y1='783.4' x2='46' y2='783.4'/>
+<text class='prof-axis' x='38' y='786.9' text-anchor='end'>15 ms</text>
+<line class='prof-tick' x1='41' y1='833.3' x2='46' y2='833.3'/>
+<text class='prof-axis' x='38' y='836.8' text-anchor='end'>16 ms</text>
+<line class='prof-tick' x1='41' y1='883.2' x2='46' y2='883.2'/>
+<text class='prof-axis' x='38' y='886.7' text-anchor='end'>17 ms</text>
+<line class='prof-tick' x1='41' y1='933.0' x2='46' y2='933.0'/>
+<text class='prof-axis' x='38' y='936.5' text-anchor='end'>18 ms</text>
+<line class='prof-tick' x1='41' y1='982.9' x2='46' y2='982.9'/>
+<text class='prof-axis' x='38' y='986.4' text-anchor='end'>19 ms</text>
+<line class='prof-tick' x1='41' y1='1032.8' x2='46' y2='1032.8'/>
+<text class='prof-axis' x='38' y='1036.3' text-anchor='end'>20 ms</text>
+<line class='prof-tick' x1='41' y1='1082.7' x2='46' y2='1082.7'/>
+<text class='prof-axis' x='38' y='1086.2' text-anchor='end'>21 ms</text>
+<line class='prof-tick' x1='41' y1='1132.6' x2='46' y2='1132.6'/>
+<text class='prof-axis' x='38' y='1136.1' text-anchor='end'>22 ms</text>
+<g class='prof-run'>
+<rect class='k' x='46' y='35.00' width='80' height='17.44' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_fwd_general_kernel&#10;350 us at 0.000 ms</title></rect>
+<path class='prof-leader' d='M126,43.7 L130,43.7 L137,44.0 L140,44.0'/>
+<text class='prof-label' x='143' y='47.2'>input RMSNorm  0.35 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='52.44' width='80' height='14.55' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x192_64x7_2x1_2cta_v_bz_TNT&#10;292 us at 0.350 ms</title></rect>
+<path class='prof-leader' d='M126,59.7 L130,59.7 L137,60.0 L140,60.0'/>
+<text class='prof-label' x='143' y='63.2'>q_down  0.29 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='67.06' width='80' height='4.02' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_fwd_general_kernel&#10;81 us at 0.643 ms</title></rect>
+<path class='prof-leader' d='M126,69.1 L130,69.1 L137,73.2 L140,73.2'/>
+<text class='prof-label' x='143' y='76.4'>q-latent RMSNorm  81 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='71.10' width='80' height='46.01' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT&#10;922 us at 0.723 ms</title></rect>
+<path class='prof-leader' d='M126,94.1 L130,94.1 L137,94.6 L140,94.6'/>
+<text class='prof-label-lg' x='143' y='98.6'>q_up  0.92 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='116.89' width='80' height='6.79' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_144x128_64x8_2x2f_2cta_h_bz_TNN&#10;136 us at 1.641 ms</title></rect>
+<path class='prof-leader' d='M126,120.3 L130,120.3 L137,120.6 L140,120.6'/>
+<text class='prof-label' x='143' y='123.8'>kv_down  0.14 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='123.72' width='80' height='1.23' fill='#d1d5db'><title>layout copies (contiguous / cat / clone)&#10;void at::native::elementwise_kernel&#10;25 us at 1.778 ms</title></rect>
+<path class='prof-leader' d='M126,124.3 L130,124.3 L137,133.8 L140,133.8'/>
+<text class='prof-label' x='143' y='137.0'>contiguous copy  25 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='125.00' width='80' height='0.80' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_fwd_tuned_kernel&#10;11 us at 1.804 ms</title></rect>
+<path class='prof-leader' d='M126,125.3 L130,125.3 L137,147.0 L140,147.0'/>
+<text class='prof-label' x='143' y='150.2'>kv-latent RMSNorm  11 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='125.55' width='80' height='23.67' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT&#10;474 us at 1.815 ms</title></rect>
+<path class='prof-leader' d='M126,137.4 L130,137.4 L137,160.2 L140,160.2'/>
+<text class='prof-label' x='143' y='163.4'>kv_up  0.47 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='149.28' width='80' height='11.68' fill='#d1d5db'><title>layout copies (contiguous / cat / clone)&#10;memcpy&#10;234 us at 2.291 ms</title></rect>
+<path class='prof-leader' d='M126,155.1 L130,155.1 L137,173.4 L140,173.4'/>
+<text class='prof-label' x='143' y='176.6'>contiguous copy  0.23 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='161.01' width='80' height='9.78' fill='#86efac'><title>RoPE&#10;rotary_fwd_q_kernel&#10;196 us at 2.526 ms</title></rect>
+<path class='prof-leader' d='M126,165.9 L130,165.9 L137,186.6 L140,186.6'/>
+<text class='prof-label' x='143' y='189.8'>RoPE q [Triton]  0.20 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='170.83' width='80' height='18.93' fill='#86efac'><title>RoPE&#10;rotary_fwd_kv_kernel&#10;379 us at 2.723 ms</title></rect>
+<path class='prof-leader' d='M126,180.3 L130,180.3 L137,199.8 L140,199.8'/>
+<text class='prof-label' x='143' y='203.0'>RoPE k/v [Triton]  0.38 ms</text>
+</g>
+<rect class='k' x='46' y='189.83' width='80' height='0.80' fill='#e5e7eb'><title>other&#10;transformer_engine::fused_attn::extract_seed_and_offset(long *, bool, long *, unsigned lon&#10;1 us at 3.103 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='189.94' width='80' height='140.16' fill='#7c3aed'><title>attention (cuDNN)&#10;cudnn_generated_fort_native_sdpa_sm100_flash_fprop_f16_knob_1_128x128x192_4x1x1_cga2x1x1_k&#10;2809 us at 3.105 ms</title></rect>
+<path class='prof-leader' d='M126,260.0 L130,260.0 L137,260.5 L140,260.5'/>
+<text class='prof-label-lg' x='143' y='264.5'>attention [cuDNN]  2.81 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='330.12' width='80' height='145.66' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2f_2cta_h_bz_TNT&#10;2920 us at 5.915 ms</title></rect>
+<path class='prof-leader' d='M126,402.9 L130,402.9 L137,403.4 L140,403.4'/>
+<text class='prof-label-lg' x='143' y='407.4'>out_proj  2.92 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='475.84' width='80' height='5.30' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;106 us at 8.836 ms</title></rect>
+<path class='prof-leader' d='M126,478.5 L130,478.5 L137,478.8 L140,478.8'/>
+<text class='prof-label' x='143' y='482.0'>add residual (attention)  0.11 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='481.18' width='80' height='17.42' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_fwd_general_kernel&#10;349 us at 8.943 ms</title></rect>
+<path class='prof-leader' d='M126,489.9 L130,489.9 L137,492.0 L140,492.0'/>
+<text class='prof-label' x='143' y='495.2'>pre-MLP RMSNorm  0.35 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='498.60' width='80' height='2.17' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_32x128_64x12_1x4_2cta_h_bz_TNN&#10;44 us at 9.292 ms</title></rect>
+<path class='prof-leader' d='M126,499.7 L130,499.7 L137,505.2 L140,505.2'/>
+<text class='prof-label' x='143' y='508.4'>router gate  44 us</text>
+</g>
+<rect class='k' x='46' y='500.84' width='80' height='0.80' fill='#a8a29e'><title>dtype casts (bf16 &lt;-&gt; fp32)&#10;void at::native::vectorized_elementwise_kernel&#10;3 us at 9.337 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='501.02' width='80' height='2.58' fill='#a3e635'><title>router / permute&#10;void transformer_engine::fused_router::fused_topk_forward_simple_kernel&#10;52 us at 9.341 ms</title></rect>
+<path class='prof-leader' d='M126,502.3 L130,502.3 L137,518.4 L140,518.4'/>
+<text class='prof-label' x='143' y='521.6'>fused router (top-k) [TE]  52 us</text>
+</g>
+<rect class='k' x='46' y='503.75' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 9.395 ms</title></rect>
+<rect class='k' x='46' y='503.92' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;void at::native::vectorized_elementwise_kernel&#10;2 us at 9.399 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='504.05' width='80' height='2.35' fill='#a3e635'><title>router / permute&#10;void at::native::_scatter_gather_elementwise_kernel&#10;47 us at 9.401 ms</title></rect>
+<rect class='k' x='46' y='506.46' width='80' height='0.80' fill='#a3e635'><title>router / permute&#10;void at::native::_scatter_gather_elementwise_kernel&#10;10 us at 9.450 ms</title></rect>
+<path class='prof-leader' d='M126,505.5 L130,505.5 L137,531.6 L140,531.6'/>
+<text class='prof-label' x='143' y='534.8'>routing map / probs  58 us</text>
+</g>
+<rect class='k' x='46' y='507.00' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 9.460 ms</title></rect>
+<rect class='k' x='46' y='507.12' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 9.463 ms</title></rect>
+<rect class='k' x='46' y='507.35' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;3 us at 9.467 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='507.56' width='80' height='2.65' fill='#fdba74'><title>NCCL EP permute / scan&#10;nccl_ep_jit_build_count_metadata_kernel&#10;53 us at 9.472 ms</title></rect>
+<path class='prof-leader' d='M126,508.9 L130,508.9 L137,544.8 L140,544.8'/>
+<text class='prof-label' x='143' y='548.0'>EP routing metadata [NCCL]  53 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='510.29' width='80' height='0.80' fill='#facc15'><title>NCCL collective&#10;ncclDevKernel_AllGather_RING(ncclDevKernelArgsStorage&#10;10 us at 9.526 ms</title></rect>
+<path class='prof-leader' d='M126,510.5 L130,510.5 L137,558.0 L140,558.0'/>
+<text class='prof-label' x='143' y='561.2'>EP routing all-gather [NCCL]  10 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='510.82' width='80' height='0.80' fill='#fdba74'><title>NCCL EP permute / scan&#10;void nccl_ep::ht::compute_layout_info_kernel&#10;8 us at 9.537 ms</title></rect>
+<rect class='k' x='46' y='511.27' width='80' height='0.80' fill='#fdba74'><title>NCCL EP permute / scan&#10;void nccl_ep::ht::dispatch_prob_input_to_compact_kernel&#10;4 us at 9.546 ms</title></rect>
+<path class='prof-leader' d='M126,511.1 L130,511.1 L137,571.2 L140,571.2'/>
+<text class='prof-label' x='143' y='574.4'>EP routing layout [NCCL]  13 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='511.50' width='80' height='52.70' fill='#ea580c'><title>NCCL EP dispatch / combine&#10;nccl_ep_jit_ht_dispatch_kernel&#10;1056 us at 9.551 ms</title></rect>
+<path class='prof-leader' d='M126,537.9 L130,537.9 L137,586.2 L140,586.2'/>
+<text class='prof-label-lg' x='143' y='590.2'>EP dispatch [NCCL]  1.06 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='564.27' width='80' height='1.14' fill='#fdba74'><title>NCCL EP permute / scan&#10;void nccl_ep::ht::dispatch_prob_compact_to_output_kernel&#10;23 us at 10.608 ms</title></rect>
+<path class='prof-leader' d='M126,564.8 L130,564.8 L137,600.2 L140,600.2'/>
+<text class='prof-label' x='143' y='603.4'>EP routing layout [NCCL]  23 us</text>
+</g>
+<rect class='k' x='46' y='565.57' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;1 us at 10.634 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='565.71' width='80' height='29.47' fill='#fdba74'><title>NCCL EP permute / scan&#10;nccl_ep_jit_local_permute_dup_kernel&#10;591 us at 10.637 ms</title></rect>
+<path class='prof-leader' d='M126,580.4 L130,580.4 L137,615.2 L140,615.2'/>
+<text class='prof-label-lg' x='143' y='619.2'>EP local permute [NCCL]  0.59 ms</text>
+</g>
+<rect class='k' x='46' y='595.21' width='80' height='0.80' fill='#a3e635'><title>router / permute&#10;void transformer_engine::splits_to_offsets::anon::kernel&#10;5 us at 11.229 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='46' y='595.50' width='80' height='0.80' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_helper_kernel_cudnngemmcutedslgroupedglumoe_grouped_gemm_glu_biasMoEGroupedGe&#10;2 us at 11.234 ms</title></rect>
+<rect class='k' x='46' y='595.63' width='80' height='280.01' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupedglumoe_grouped_gemm_glu_biasMoEGroupedGemmGluBi&#10;5612 us at 11.237 ms</title></rect>
+<path class='prof-leader' d='M126,735.6 L130,735.6 L137,736.1 L140,736.1'/>
+<text class='prof-label-lg' x='143' y='740.1'>experts fc1 + GLU [cuDNN]  5.62 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='875.69' width='80' height='0.80' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_helper_kernel_cudnngemmcutedslgroupedunfusedmoe_grouped_gemmMoEGroupedGemmBf1&#10;1 us at 16.850 ms</title></rect>
+<rect class='k' x='46' y='875.83' width='80' height='140.55' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupedunfusedmoe_grouped_gemmMoEGroupedGemmBf16Kernel&#10;2817 us at 16.853 ms</title></rect>
+<path class='prof-leader' d='M126,946.0 L130,946.0 L137,946.5 L140,946.5'/>
+<text class='prof-label-lg' x='143' y='950.5'>experts fc2 [cuDNN]  2.82 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1016.44' width='80' height='28.02' fill='#fdba74'><title>NCCL EP permute / scan&#10;nccl_ep_jit_local_permute_reduce_kernel&#10;562 us at 19.672 ms</title></rect>
+<path class='prof-leader' d='M126,1030.5 L130,1030.5 L137,1031.0 L140,1031.0'/>
+<text class='prof-label-lg' x='143' y='1035.0'>EP local unpermute [NCCL]  0.56 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1044.53' width='80' height='62.72' fill='#ea580c'><title>NCCL EP dispatch / combine&#10;nccl_ep_jit_ht_combine_kernel&#10;1257 us at 20.234 ms</title></rect>
+<path class='prof-leader' d='M126,1075.9 L130,1075.9 L137,1076.4 L140,1076.4'/>
+<text class='prof-label-lg' x='143' y='1080.4'>EP combine [NCCL]  1.26 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1107.21' width='80' height='36.86' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT&#10;739 us at 21.491 ms</title></rect>
+<path class='prof-leader' d='M126,1125.6 L130,1125.6 L137,1126.1 L140,1126.1'/>
+<text class='prof-label-lg' x='143' y='1130.1'>shared fc1  0.74 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1144.12' width='80' height='3.64' fill='#0d9488'><title>quantize&#10;void transformer_engine::dispatch::fp8::kernel::cast_fp8_gated_kernel&#10;73 us at 22.231 ms</title></rect>
+<path class='prof-leader' d='M126,1145.9 L130,1145.9 L137,1146.2 L140,1146.2'/>
+<text class='prof-label' x='143' y='1149.4'>shared SwiGLU [TE]  73 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1147.78' width='80' height='18.34' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x2f_2cta_h_bz_TNT&#10;368 us at 22.304 ms</title></rect>
+<path class='prof-leader' d='M126,1157.0 L130,1157.0 L137,1159.4 L140,1159.4'/>
+<text class='prof-label' x='143' y='1162.6'>shared fc2  0.37 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1166.17' width='80' height='5.33' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;107 us at 22.673 ms</title></rect>
+<path class='prof-leader' d='M126,1168.8 L130,1168.8 L137,1172.6 L140,1172.6'/>
+<text class='prof-label' x='143' y='1175.8'>add shared expert  0.11 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='46' y='1171.55' width='80' height='5.32' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;107 us at 22.780 ms</title></rect>
+<path class='prof-leader' d='M126,1174.2 L130,1174.2 L137,1185.8 L140,1185.8'/>
+<text class='prof-label' x='143' y='1189.0'>add residual (MoE)  0.11 ms</text>
+</g>
+<line class='prof-sep' x1='46' y1='52.44' x2='126' y2='52.44'/>
+<line class='prof-sep' x1='46' y1='67.06' x2='126' y2='67.06'/>
+<line class='prof-sep' x1='46' y1='71.10' x2='126' y2='71.10'/>
+<line class='prof-sep' x1='46' y1='116.89' x2='126' y2='116.89'/>
+<line class='prof-sep' x1='46' y1='123.72' x2='126' y2='123.72'/>
+<line class='prof-sep' x1='46' y1='149.28' x2='126' y2='149.28'/>
+<line class='prof-sep' x1='46' y1='161.01' x2='126' y2='161.01'/>
+<line class='prof-sep' x1='46' y1='170.83' x2='126' y2='170.83'/>
+<line class='prof-sep' x1='46' y1='189.83' x2='126' y2='189.83'/>
+<line class='prof-sep' x1='46' y1='330.12' x2='126' y2='330.12'/>
+<line class='prof-sep' x1='46' y1='475.84' x2='126' y2='475.84'/>
+<line class='prof-sep' x1='46' y1='481.18' x2='126' y2='481.18'/>
+<line class='prof-sep' x1='46' y1='498.60' x2='126' y2='498.60'/>
+<line class='prof-sep' x1='46' y1='503.75' x2='126' y2='503.75'/>
+<line class='prof-sep' x1='46' y1='507.00' x2='126' y2='507.00'/>
+<line class='prof-sep' x1='46' y1='510.29' x2='126' y2='510.29'/>
+<line class='prof-sep' x1='46' y1='564.27' x2='126' y2='564.27'/>
+<line class='prof-sep' x1='46' y1='595.21' x2='126' y2='595.21'/>
+<line class='prof-sep' x1='46' y1='875.69' x2='126' y2='875.69'/>
+<line class='prof-sep' x1='46' y1='1016.44' x2='126' y2='1016.44'/>
+<line class='prof-sep' x1='46' y1='1044.53' x2='126' y2='1044.53'/>
+<line class='prof-sep' x1='46' y1='1107.21' x2='126' y2='1107.21'/>
+<line class='prof-sep' x1='46' y1='1144.12' x2='126' y2='1144.12'/>
+<line class='prof-sep' x1='46' y1='1147.78' x2='126' y2='1147.78'/>
+<line class='prof-sep' x1='46' y1='1166.17' x2='126' y2='1166.17'/>
+<line class='prof-sep' x1='46' y1='1171.55' x2='126' y2='1171.55'/>
+<rect class='prof-bar-border' x='46' y='35.00' width='80' height='1141.87'/>
+<text class='prof-title' x='472' y='22'>Backward  (46.1 ms)</text>
+<line class='prof-tick' x1='467' y1='35.0' x2='472' y2='35.0'/>
+<text class='prof-axis' x='464' y='38.5' text-anchor='end'>0 ms</text>
+<line class='prof-tick' x1='467' y1='84.9' x2='472' y2='84.9'/>
+<text class='prof-axis' x='464' y='88.4' text-anchor='end'>1 ms</text>
+<line class='prof-tick' x1='467' y1='134.8' x2='472' y2='134.8'/>
+<text class='prof-axis' x='464' y='138.3' text-anchor='end'>2 ms</text>
+<line class='prof-tick' x1='467' y1='184.7' x2='472' y2='184.7'/>
+<text class='prof-axis' x='464' y='188.2' text-anchor='end'>3 ms</text>
+<line class='prof-tick' x1='467' y1='234.6' x2='472' y2='234.6'/>
+<text class='prof-axis' x='464' y='238.1' text-anchor='end'>4 ms</text>
+<line class='prof-tick' x1='467' y1='284.5' x2='472' y2='284.5'/>
+<text class='prof-axis' x='464' y='288.0' text-anchor='end'>5 ms</text>
+<line class='prof-tick' x1='467' y1='334.3' x2='472' y2='334.3'/>
+<text class='prof-axis' x='464' y='337.8' text-anchor='end'>6 ms</text>
+<line class='prof-tick' x1='467' y1='384.2' x2='472' y2='384.2'/>
+<text class='prof-axis' x='464' y='387.7' text-anchor='end'>7 ms</text>
+<line class='prof-tick' x1='467' y1='434.1' x2='472' y2='434.1'/>
+<text class='prof-axis' x='464' y='437.6' text-anchor='end'>8 ms</text>
+<line class='prof-tick' x1='467' y1='484.0' x2='472' y2='484.0'/>
+<text class='prof-axis' x='464' y='487.5' text-anchor='end'>9 ms</text>
+<line class='prof-tick' x1='467' y1='533.9' x2='472' y2='533.9'/>
+<text class='prof-axis' x='464' y='537.4' text-anchor='end'>10 ms</text>
+<line class='prof-tick' x1='467' y1='583.8' x2='472' y2='583.8'/>
+<text class='prof-axis' x='464' y='587.3' text-anchor='end'>11 ms</text>
+<line class='prof-tick' x1='467' y1='633.7' x2='472' y2='633.7'/>
+<text class='prof-axis' x='464' y='637.2' text-anchor='end'>12 ms</text>
+<line class='prof-tick' x1='467' y1='683.6' x2='472' y2='683.6'/>
+<text class='prof-axis' x='464' y='687.1' text-anchor='end'>13 ms</text>
+<line class='prof-tick' x1='467' y1='733.5' x2='472' y2='733.5'/>
+<text class='prof-axis' x='464' y='737.0' text-anchor='end'>14 ms</text>
+<line class='prof-tick' x1='467' y1='783.4' x2='472' y2='783.4'/>
+<text class='prof-axis' x='464' y='786.9' text-anchor='end'>15 ms</text>
+<line class='prof-tick' x1='467' y1='833.3' x2='472' y2='833.3'/>
+<text class='prof-axis' x='464' y='836.8' text-anchor='end'>16 ms</text>
+<line class='prof-tick' x1='467' y1='883.2' x2='472' y2='883.2'/>
+<text class='prof-axis' x='464' y='886.7' text-anchor='end'>17 ms</text>
+<line class='prof-tick' x1='467' y1='933.0' x2='472' y2='933.0'/>
+<text class='prof-axis' x='464' y='936.5' text-anchor='end'>18 ms</text>
+<line class='prof-tick' x1='467' y1='982.9' x2='472' y2='982.9'/>
+<text class='prof-axis' x='464' y='986.4' text-anchor='end'>19 ms</text>
+<line class='prof-tick' x1='467' y1='1032.8' x2='472' y2='1032.8'/>
+<text class='prof-axis' x='464' y='1036.3' text-anchor='end'>20 ms</text>
+<line class='prof-tick' x1='467' y1='1082.7' x2='472' y2='1082.7'/>
+<text class='prof-axis' x='464' y='1086.2' text-anchor='end'>21 ms</text>
+<line class='prof-tick' x1='467' y1='1132.6' x2='472' y2='1132.6'/>
+<text class='prof-axis' x='464' y='1136.1' text-anchor='end'>22 ms</text>
+<line class='prof-tick' x1='467' y1='1182.5' x2='472' y2='1182.5'/>
+<text class='prof-axis' x='464' y='1186.0' text-anchor='end'>23 ms</text>
+<line class='prof-tick' x1='467' y1='1232.4' x2='472' y2='1232.4'/>
+<text class='prof-axis' x='464' y='1235.9' text-anchor='end'>24 ms</text>
+<line class='prof-tick' x1='467' y1='1282.3' x2='472' y2='1282.3'/>
+<text class='prof-axis' x='464' y='1285.8' text-anchor='end'>25 ms</text>
+<line class='prof-tick' x1='467' y1='1332.2' x2='472' y2='1332.2'/>
+<text class='prof-axis' x='464' y='1335.7' text-anchor='end'>26 ms</text>
+<line class='prof-tick' x1='467' y1='1382.1' x2='472' y2='1382.1'/>
+<text class='prof-axis' x='464' y='1385.6' text-anchor='end'>27 ms</text>
+<line class='prof-tick' x1='467' y1='1432.0' x2='472' y2='1432.0'/>
+<text class='prof-axis' x='464' y='1435.5' text-anchor='end'>28 ms</text>
+<line class='prof-tick' x1='467' y1='1481.9' x2='472' y2='1481.9'/>
+<text class='prof-axis' x='464' y='1485.4' text-anchor='end'>29 ms</text>
+<line class='prof-tick' x1='467' y1='1531.7' x2='472' y2='1531.7'/>
+<text class='prof-axis' x='464' y='1535.2' text-anchor='end'>30 ms</text>
+<line class='prof-tick' x1='467' y1='1581.6' x2='472' y2='1581.6'/>
+<text class='prof-axis' x='464' y='1585.1' text-anchor='end'>31 ms</text>
+<line class='prof-tick' x1='467' y1='1631.5' x2='472' y2='1631.5'/>
+<text class='prof-axis' x='464' y='1635.0' text-anchor='end'>32 ms</text>
+<line class='prof-tick' x1='467' y1='1681.4' x2='472' y2='1681.4'/>
+<text class='prof-axis' x='464' y='1684.9' text-anchor='end'>33 ms</text>
+<line class='prof-tick' x1='467' y1='1731.3' x2='472' y2='1731.3'/>
+<text class='prof-axis' x='464' y='1734.8' text-anchor='end'>34 ms</text>
+<line class='prof-tick' x1='467' y1='1781.2' x2='472' y2='1781.2'/>
+<text class='prof-axis' x='464' y='1784.7' text-anchor='end'>35 ms</text>
+<line class='prof-tick' x1='467' y1='1831.1' x2='472' y2='1831.1'/>
+<text class='prof-axis' x='464' y='1834.6' text-anchor='end'>36 ms</text>
+<line class='prof-tick' x1='467' y1='1881.0' x2='472' y2='1881.0'/>
+<text class='prof-axis' x='464' y='1884.5' text-anchor='end'>37 ms</text>
+<line class='prof-tick' x1='467' y1='1930.9' x2='472' y2='1930.9'/>
+<text class='prof-axis' x='464' y='1934.4' text-anchor='end'>38 ms</text>
+<line class='prof-tick' x1='467' y1='1980.8' x2='472' y2='1980.8'/>
+<text class='prof-axis' x='464' y='1984.3' text-anchor='end'>39 ms</text>
+<line class='prof-tick' x1='467' y1='2030.7' x2='472' y2='2030.7'/>
+<text class='prof-axis' x='464' y='2034.2' text-anchor='end'>40 ms</text>
+<line class='prof-tick' x1='467' y1='2080.5' x2='472' y2='2080.5'/>
+<text class='prof-axis' x='464' y='2084.0' text-anchor='end'>41 ms</text>
+<line class='prof-tick' x1='467' y1='2130.4' x2='472' y2='2130.4'/>
+<text class='prof-axis' x='464' y='2133.9' text-anchor='end'>42 ms</text>
+<line class='prof-tick' x1='467' y1='2180.3' x2='472' y2='2180.3'/>
+<text class='prof-axis' x='464' y='2183.8' text-anchor='end'>43 ms</text>
+<line class='prof-tick' x1='467' y1='2230.2' x2='472' y2='2230.2'/>
+<text class='prof-axis' x='464' y='2233.7' text-anchor='end'>44 ms</text>
+<line class='prof-tick' x1='467' y1='2280.1' x2='472' y2='2280.1'/>
+<text class='prof-axis' x='464' y='2283.6' text-anchor='end'>45 ms</text>
+<line class='prof-tick' x1='467' y1='2330.0' x2='472' y2='2330.0'/>
+<text class='prof-axis' x='464' y='2333.5' text-anchor='end'>46 ms</text>
+<g class='prof-run'>
+<rect class='k' x='472' y='35.00' width='80' height='3.47' fill='#9ca3af'><title>memset&#10;void at::native::vectorized_elementwise_kernel&#10;70 us at 0.000 ms</title></rect>
+<path class='prof-leader' d='M552,36.7 L556,36.7 L563,37.0 L566,37.0'/>
+<text class='prof-label' x='569' y='40.2'>init output grad  70 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='38.49' width='80' height='18.55' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_NNT&#10;372 us at 0.070 ms</title></rect>
+<path class='prof-leader' d='M552,47.8 L556,47.8 L563,50.2 L566,50.2'/>
+<text class='prof-label' x='569' y='53.4'>shared fc2 dgrad  0.37 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='56.80' width='80' height='18.76' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x192_64x4_2x1_2cta_v_bz_NTT&#10;376 us at 0.437 ms</title></rect>
+<path class='prof-leader' d='M552,66.2 L556,66.2 L563,66.5 L566,66.5'/>
+<text class='prof-label' x='569' y='69.7'>shared fc2 wgrad  0.38 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='75.62' width='80' height='5.07' fill='#0d9488'><title>quantize&#10;void transformer_engine::dispatch::fp8::kernel::cast_fp8_gated_kernel&#10;102 us at 0.814 ms</title></rect>
+<path class='prof-leader' d='M552,78.2 L556,78.2 L563,79.7 L566,79.7'/>
+<text class='prof-label' x='569' y='82.9'>shared SwiGLU bwd [TE]  0.10 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='80.68' width='80' height='36.21' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x2f_2cta_h_bz_NNT&#10;726 us at 0.916 ms</title></rect>
+<path class='prof-leader' d='M552,98.8 L556,98.8 L563,99.3 L566,99.3'/>
+<text class='prof-label-lg' x='569' y='103.3'>shared fc1 dgrad  0.73 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='116.66' width='80' height='36.79' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x1_2cta_v_bz_NTT&#10;737 us at 1.637 ms</title></rect>
+<path class='prof-leader' d='M552,135.1 L556,135.1 L563,135.6 L566,135.6'/>
+<text class='prof-label-lg' x='569' y='139.6'>shared fc1 wgrad  0.74 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='153.50' width='80' height='58.55' fill='#ea580c'><title>NCCL EP dispatch / combine&#10;nccl_ep_jit_ht_dispatch_kernel&#10;1174 us at 2.375 ms</title></rect>
+<path class='prof-leader' d='M552,182.8 L556,182.8 L563,183.3 L566,183.3'/>
+<text class='prof-label-lg' x='569' y='187.3'>EP combine bwd [NCCL]  1.17 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='212.10' width='80' height='28.46' fill='#fdba74'><title>NCCL EP permute / scan&#10;nccl_ep_jit_local_permute_dup_kernel&#10;571 us at 3.550 ms</title></rect>
+<path class='prof-leader' d='M552,226.3 L556,226.3 L563,226.8 L566,226.8'/>
+<text class='prof-label-lg' x='569' y='230.8'>EP permute (combine bwd) [NCCL]  0.57 ms</text>
+</g>
+<rect class='k' x='472' y='240.63' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 4.121 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='240.79' width='80' height='0.80' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_helper_kernel_cudnngemmcutedslgroupeddglumoe_grouped_gemm_dglu_dbiasMoEGroupe&#10;2 us at 4.125 ms</title></rect>
+<rect class='k' x='472' y='240.94' width='80' height='141.56' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupeddglumoe_grouped_gemm_dglu_dbiasMoEGroupedGemmDg&#10;2837 us at 4.128 ms</title></rect>
+<path class='prof-leader' d='M552,311.6 L556,311.6 L563,312.1 L566,312.1'/>
+<text class='prof-label-lg' x='569' y='316.1'>experts fc2 dgrad + dGLU [cuDNN]  2.84 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='382.55' width='80' height='141.61' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupedwgradmoe_grouped_gemm_wgradMoEGroupedGemmWgradB&#10;2838 us at 6.966 ms</title></rect>
+<path class='prof-leader' d='M552,453.4 L556,453.4 L563,453.9 L566,453.9'/>
+<text class='prof-label-lg' x='569' y='457.9'>experts fc2 wgrad [cuDNN]  2.84 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='524.21' width='80' height='0.80' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_helper_kernel_cudnngemmcutedslgroupedunfusedmoe_grouped_gemmMoEGroupedGemmBf1&#10;1 us at 9.806 ms</title></rect>
+<rect class='k' x='472' y='524.33' width='80' height='279.64' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupedunfusedmoe_grouped_gemmMoEGroupedGemmBf16Kernel&#10;5605 us at 9.808 ms</title></rect>
+<path class='prof-leader' d='M552,664.1 L556,664.1 L563,664.6 L566,664.6'/>
+<text class='prof-label-lg' x='569' y='668.6'>experts fc1 dgrad [cuDNN]  5.61 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='804.02' width='80' height='282.72' fill='#1d4ed8'><title>fused grouped MLP (cuDNN)&#10;cudnn_kernel_kernel_cudnngemmcutedslgroupedwgradmoe_grouped_gemm_wgradMoEGroupedGemmWgradB&#10;5667 us at 15.414 ms</title></rect>
+<path class='prof-leader' d='M552,945.4 L556,945.4 L563,945.9 L566,945.9'/>
+<text class='prof-label-lg' x='569' y='949.9'>experts fc1 wgrad [cuDNN]  5.67 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1086.80' width='80' height='28.72' fill='#fdba74'><title>NCCL EP permute / scan&#10;nccl_ep_jit_local_permute_reduce_kernel&#10;576 us at 21.082 ms</title></rect>
+<path class='prof-leader' d='M552,1101.2 L556,1101.2 L563,1101.7 L566,1101.7'/>
+<text class='prof-label-lg' x='569' y='1105.7'>EP unpermute (dispatch bwd) [NCCL]  0.58 ms</text>
+</g>
+<rect class='k' x='472' y='1115.55' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 21.658 ms</title></rect>
+<rect class='k' x='472' y='1115.73' width='80' height='0.80' fill='#fdba74'><title>NCCL EP permute / scan&#10;void nccl_ep::ht::combine_prob_input_to_compact_kernel&#10;6 us at 21.662 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='1116.10' width='80' height='103.97' fill='#ea580c'><title>NCCL EP dispatch / combine&#10;nccl_ep_jit_ht_combine_kernel&#10;2084 us at 21.669 ms</title></rect>
+<path class='prof-leader' d='M552,1168.1 L556,1168.1 L563,1168.6 L566,1168.6'/>
+<text class='prof-label-lg' x='569' y='1172.6'>EP dispatch bwd [NCCL]  2.08 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1220.12' width='80' height='5.30' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;106 us at 23.754 ms</title></rect>
+<path class='prof-leader' d='M552,1222.8 L556,1222.8 L563,1223.1 L566,1223.1'/>
+<text class='prof-label' x='569' y='1226.3'>grad accum (MoE input)  0.11 ms</text>
+</g>
+<rect class='k' x='472' y='1225.46' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 23.861 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='1225.61' width='80' height='0.80' fill='#a3e635'><title>router / permute&#10;void at::native::_scatter_gather_elementwise_kernel&#10;15 us at 23.864 ms</title></rect>
+<path class='prof-leader' d='M552,1226.0 L556,1226.0 L563,1236.3 L566,1236.3'/>
+<text class='prof-label' x='569' y='1239.5'>router bwd  15 us</text>
+</g>
+<rect class='k' x='472' y='1226.39' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 23.880 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='1226.51' width='80' height='0.80' fill='#a3e635'><title>router / permute&#10;void transformer_engine::fused_router::fused_topk_backward_selected_indices_kernel&#10;11 us at 23.882 ms</title></rect>
+<path class='prof-leader' d='M552,1226.8 L556,1226.8 L563,1249.5 L566,1249.5'/>
+<text class='prof-label' x='569' y='1252.7'>fused router (top-k) [TE]  11 us</text>
+</g>
+<rect class='k' x='472' y='1227.09' width='80' height='0.80' fill='#a8a29e'><title>dtype casts (bf16 &lt;-&gt; fp32)&#10;void at::native::vectorized_elementwise_kernel&#10;2 us at 23.894 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='1227.24' width='80' height='2.37' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_192x32_64x7_2x1_2cta_v_bz_splitK_NTT&#10;47 us at 23.897 ms</title></rect>
+<rect class='k' x='472' y='1229.50' width='80' height='0.80' fill='#60a5fa'><title>dense GEMM&#10;void cublasLt::splitKreduce_kernel&#10;6 us at 23.942 ms</title></rect>
+<path class='prof-leader' d='M552,1228.5 L556,1228.5 L563,1262.7 L566,1262.7'/>
+<text class='prof-label' x='569' y='1265.9'>router gate dgrad  51 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1229.73' width='80' height='3.38' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x1_2cta_v_bz_NNT&#10;68 us at 23.947 ms</title></rect>
+<path class='prof-leader' d='M552,1231.4 L556,1231.4 L563,1275.9 L566,1275.9'/>
+<text class='prof-label' x='569' y='1279.1'>router gate wgrad  68 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1233.15' width='80' height='5.45' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;109 us at 24.015 ms</title></rect>
+<path class='prof-leader' d='M552,1235.9 L556,1235.9 L563,1289.1 L566,1289.1'/>
+<text class='prof-label' x='569' y='1292.3'>grad accum (MoE input)  0.11 ms</text>
+</g>
+<rect class='k' x='472' y='1238.76' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 24.128 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='1238.94' width='80' height='31.33' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_general_kernel&#10;628 us at 24.131 ms</title></rect>
+<rect class='k' x='472' y='1270.31' width='80' height='0.80' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_finalize_general_kernel&#10;9 us at 24.760 ms</title></rect>
+<path class='prof-leader' d='M552,1254.9 L556,1254.9 L563,1304.1 L566,1304.1'/>
+<text class='prof-label-lg' x='569' y='1308.1'>pre-MLP RMSNorm bwd  0.64 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1270.81' width='80' height='5.37' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;108 us at 24.770 ms</title></rect>
+<path class='prof-leader' d='M552,1273.5 L556,1273.5 L563,1318.1 L566,1318.1'/>
+<text class='prof-label' x='569' y='1321.3'>residual grad (MoE)  0.11 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1276.19' width='80' height='140.35' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x2f_2cta_h_bz_NNT&#10;2813 us at 24.878 ms</title></rect>
+<path class='prof-leader' d='M552,1346.4 L556,1346.4 L563,1346.9 L566,1346.9'/>
+<text class='prof-label-lg' x='569' y='1350.9'>out_proj dgrad  2.81 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1416.31' width='80' height='145.91' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2f_2cta_h_bz_NTT&#10;2925 us at 27.686 ms</title></rect>
+<path class='prof-leader' d='M552,1489.3 L556,1489.3 L563,1489.8 L566,1489.8'/>
+<text class='prof-label-lg' x='569' y='1493.8'>out_proj wgrad  2.92 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1562.30' width='80' height='22.76' fill='#7c3aed'><title>attention (cuDNN)&#10;void cudnn::fusion::compute_dot_do_o_specialized&#10;456 us at 30.612 ms</title></rect>
+<path class='prof-leader' d='M552,1573.7 L556,1573.7 L563,1574.0 L566,1574.0'/>
+<text class='prof-label' x='569' y='1577.2'>attention bwd (dot dO, O) [cuDNN]  0.46 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='1585.11' width='80' height='446.83' fill='#7c3aed'><title>attention (cuDNN)&#10;cudnn_generated_fort_native_sdpa_sm100_flash_bprop_f16_knob_2_64x128x192_1x4x1_cga1x1x1_ke&#10;8956 us at 31.070 ms</title></rect>
+<path class='prof-leader' d='M552,1808.5 L556,1808.5 L563,1809.0 L566,1809.0'/>
+<text class='prof-label-lg' x='569' y='1813.0'>attention bwd (dQ, dK, dV) [cuDNN]  8.96 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2031.98' width='80' height='20.84' fill='#7c3aed'><title>attention (cuDNN)&#10;void cudnn::fusion::convert_dq_to_16bits&#10;418 us at 40.027 ms</title></rect>
+<path class='prof-leader' d='M552,2042.4 L556,2042.4 L563,2042.7 L566,2042.7'/>
+<text class='prof-label' x='569' y='2045.9'>attention bwd (cast dQ) [cuDNN]  0.42 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2052.85' width='80' height='18.55' fill='#86efac'><title>RoPE&#10;rotary_bwd_kv_kernel&#10;372 us at 40.445 ms</title></rect>
+<path class='prof-leader' d='M552,2062.1 L556,2062.1 L563,2062.4 L566,2062.4'/>
+<text class='prof-label' x='569' y='2065.6'>RoPE k/v bwd [Triton]  0.37 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2071.45' width='80' height='11.63' fill='#d1d5db'><title>layout copies (contiguous / cat / clone)&#10;memcpy&#10;233 us at 40.818 ms</title></rect>
+<path class='prof-leader' d='M552,2077.3 L556,2077.3 L563,2077.6 L566,2077.6'/>
+<text class='prof-label' x='569' y='2080.8'>contiguous copy  0.23 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2083.13' width='80' height='9.73' fill='#86efac'><title>RoPE&#10;rotary_bwd_q_kernel&#10;195 us at 41.052 ms</title></rect>
+<path class='prof-leader' d='M552,2088.0 L556,2088.0 L563,2090.8 L566,2090.8'/>
+<text class='prof-label' x='569' y='2094.0'>RoPE q bwd [Triton]  0.20 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2092.88' width='80' height='24.27' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2_2cta_h_bz_NNT&#10;486 us at 41.247 ms</title></rect>
+<path class='prof-leader' d='M552,2105.0 L556,2105.0 L563,2105.3 L566,2105.3'/>
+<text class='prof-label' x='569' y='2108.5'>kv_up dgrad  0.49 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2116.81' width='80' height='24.72' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2_2cta_h_bz_NTT&#10;495 us at 41.727 ms</title></rect>
+<path class='prof-leader' d='M552,2129.2 L556,2129.2 L563,2129.5 L566,2129.5'/>
+<text class='prof-label' x='569' y='2132.7'>kv_up wgrad  0.50 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2141.59' width='80' height='0.80' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_tuned_kernel&#10;14 us at 42.224 ms</title></rect>
+<rect class='k' x='472' y='2142.33' width='80' height='0.80' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_finalize_tuned_kernel&#10;5 us at 42.238 ms</title></rect>
+<path class='prof-leader' d='M552,2142.1 L556,2142.1 L563,2142.7 L566,2142.7'/>
+<text class='prof-label' x='569' y='2145.9'>kv-latent RMSNorm bwd  20 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2142.63' width='80' height='0.80' fill='#d1d5db'><title>layout copies (contiguous / cat / clone)&#10;void at::native::anon::CatArrayBatchedCopy_vectorized&#10;10 us at 42.244 ms</title></rect>
+<path class='prof-leader' d='M552,2142.9 L556,2142.9 L563,2155.9 L566,2155.9'/>
+<text class='prof-label' x='569' y='2159.1'>concat grad  10 us</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2143.15' width='80' height='5.92' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_NNT&#10;119 us at 42.255 ms</title></rect>
+<path class='prof-leader' d='M552,2146.1 L556,2146.1 L563,2169.1 L566,2169.1'/>
+<text class='prof-label' x='569' y='2172.3'>kv_down dgrad  0.12 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2148.88' width='80' height='6.60' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x128_64x5_4x1_2cta_v_bz_NTT&#10;132 us at 42.370 ms</title></rect>
+<path class='prof-leader' d='M552,2152.2 L556,2152.2 L563,2182.3 L566,2182.3'/>
+<text class='prof-label' x='569' y='2185.5'>kv_down wgrad  0.13 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2155.28' width='80' height='54.77' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2f_2cta_h_bz_NNT&#10;1098 us at 42.498 ms</title></rect>
+<path class='prof-leader' d='M552,2182.7 L556,2182.7 L563,2197.3 L566,2197.3'/>
+<text class='prof-label-lg' x='569' y='2201.3'>q_up dgrad  1.10 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2209.68' width='80' height='49.01' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_256x256_64x4_2x2f_2cta_h_bz_NTT&#10;982 us at 43.588 ms</title></rect>
+<path class='prof-leader' d='M552,2234.2 L556,2234.2 L563,2234.7 L566,2234.7'/>
+<text class='prof-label-lg' x='569' y='2238.7'>q_up wgrad  0.98 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2258.75' width='80' height='4.19' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_general_kernel&#10;84 us at 44.572 ms</title></rect>
+<rect class='k' x='472' y='2263.00' width='80' height='1.06' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_finalize_general_kernel&#10;21 us at 44.657 ms</title></rect>
+<path class='prof-leader' d='M552,2261.4 L556,2261.4 L563,2261.7 L566,2261.7'/>
+<text class='prof-label' x='569' y='2264.9'>q-latent RMSNorm bwd  0.11 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2264.06' width='80' height='14.07' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_128x256_64x6_2x2f_2cta_h_bz_NNT&#10;282 us at 44.678 ms</title></rect>
+<path class='prof-leader' d='M552,2271.1 L556,2271.1 L563,2274.9 L566,2274.9'/>
+<text class='prof-label' x='569' y='2278.1'>q_down dgrad  0.28 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2277.90' width='80' height='14.12' fill='#60a5fa'><title>dense GEMM&#10;nvjet_sm100_tst_192x192_64x5_2x1_2cta_v_bz_NTT&#10;283 us at 44.956 ms</title></rect>
+<path class='prof-leader' d='M552,2285.0 L556,2285.0 L563,2288.1 L566,2288.1'/>
+<text class='prof-label' x='569' y='2291.3'>q_down wgrad  0.28 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2292.06' width='80' height='5.19' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;104 us at 45.239 ms</title></rect>
+<path class='prof-leader' d='M552,2294.7 L556,2294.7 L563,2301.3 L566,2301.3'/>
+<text class='prof-label' x='569' y='2304.5'>add grad accumulation (attention input)  0.10 ms</text>
+</g>
+<rect class='k' x='472' y='2297.38' width='80' height='0.80' fill='#9ca3af'><title>memset&#10;memset&#10;2 us at 45.346 ms</title></rect>
+<g class='prof-run'>
+<rect class='k' x='472' y='2297.55' width='80' height='31.59' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_general_kernel&#10;633 us at 45.349 ms</title></rect>
+<rect class='k' x='472' y='2329.17' width='80' height='0.80' fill='#16a34a'><title>RMSNorm&#10;void transformer_engine::normalization::rmsnorm_bwd_finalize_general_kernel&#10;9 us at 45.983 ms</title></rect>
+<path class='prof-leader' d='M552,2313.6 L556,2313.6 L563,2316.3 L566,2316.3'/>
+<text class='prof-label-lg' x='569' y='2320.3'>input RMSNorm bwd  0.64 ms</text>
+</g>
+<g class='prof-run'>
+<rect class='k' x='472' y='2329.68' width='80' height='5.32' fill='#fb7185'><title>residual / grad-accumulation add&#10;void at::native::vectorized_elementwise_kernel&#10;107 us at 45.993 ms</title></rect>
+<path class='prof-leader' d='M552,2332.3 L556,2332.3 L563,2332.6 L566,2332.6'/>
+<text class='prof-label' x='569' y='2335.8'>residual grad (attn)  0.11 ms</text>
+</g>
+<line class='prof-sep' x1='472' y1='38.49' x2='552' y2='38.49'/>
+<line class='prof-sep' x1='472' y1='56.80' x2='552' y2='56.80'/>
+<line class='prof-sep' x1='472' y1='75.62' x2='552' y2='75.62'/>
+<line class='prof-sep' x1='472' y1='80.68' x2='552' y2='80.68'/>
+<line class='prof-sep' x1='472' y1='116.66' x2='552' y2='116.66'/>
+<line class='prof-sep' x1='472' y1='153.50' x2='552' y2='153.50'/>
+<line class='prof-sep' x1='472' y1='212.10' x2='552' y2='212.10'/>
+<line class='prof-sep' x1='472' y1='240.63' x2='552' y2='240.63'/>
+<line class='prof-sep' x1='472' y1='382.55' x2='552' y2='382.55'/>
+<line class='prof-sep' x1='472' y1='524.21' x2='552' y2='524.21'/>
+<line class='prof-sep' x1='472' y1='804.02' x2='552' y2='804.02'/>
+<line class='prof-sep' x1='472' y1='1086.80' x2='552' y2='1086.80'/>
+<line class='prof-sep' x1='472' y1='1115.55' x2='552' y2='1115.55'/>
+<line class='prof-sep' x1='472' y1='1220.12' x2='552' y2='1220.12'/>
+<line class='prof-sep' x1='472' y1='1225.46' x2='552' y2='1225.46'/>
+<line class='prof-sep' x1='472' y1='1229.73' x2='552' y2='1229.73'/>
+<line class='prof-sep' x1='472' y1='1233.15' x2='552' y2='1233.15'/>
+<line class='prof-sep' x1='472' y1='1238.76' x2='552' y2='1238.76'/>
+<line class='prof-sep' x1='472' y1='1270.81' x2='552' y2='1270.81'/>
+<line class='prof-sep' x1='472' y1='1276.19' x2='552' y2='1276.19'/>
+<line class='prof-sep' x1='472' y1='1416.31' x2='552' y2='1416.31'/>
+<line class='prof-sep' x1='472' y1='1562.30' x2='552' y2='1562.30'/>
+<line class='prof-sep' x1='472' y1='1585.11' x2='552' y2='1585.11'/>
+<line class='prof-sep' x1='472' y1='2031.98' x2='552' y2='2031.98'/>
+<line class='prof-sep' x1='472' y1='2052.85' x2='552' y2='2052.85'/>
+<line class='prof-sep' x1='472' y1='2071.45' x2='552' y2='2071.45'/>
+<line class='prof-sep' x1='472' y1='2083.13' x2='552' y2='2083.13'/>
+<line class='prof-sep' x1='472' y1='2092.88' x2='552' y2='2092.88'/>
+<line class='prof-sep' x1='472' y1='2116.81' x2='552' y2='2116.81'/>
+<line class='prof-sep' x1='472' y1='2141.59' x2='552' y2='2141.59'/>
+<line class='prof-sep' x1='472' y1='2148.88' x2='552' y2='2148.88'/>
+<line class='prof-sep' x1='472' y1='2155.28' x2='552' y2='2155.28'/>
+<line class='prof-sep' x1='472' y1='2209.68' x2='552' y2='2209.68'/>
+<line class='prof-sep' x1='472' y1='2258.75' x2='552' y2='2258.75'/>
+<line class='prof-sep' x1='472' y1='2264.06' x2='552' y2='2264.06'/>
+<line class='prof-sep' x1='472' y1='2277.90' x2='552' y2='2277.90'/>
+<line class='prof-sep' x1='472' y1='2292.06' x2='552' y2='2292.06'/>
+<line class='prof-sep' x1='472' y1='2297.38' x2='552' y2='2297.38'/>
+<line class='prof-sep' x1='472' y1='2329.68' x2='552' y2='2329.68'/>
+<rect class='prof-bar-border' x='472' y='35.00' width='80' height='2300.00'/>
+</svg>

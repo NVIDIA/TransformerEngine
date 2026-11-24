@@ -72,6 +72,7 @@ Transformer Engine documentation
    examples/te_jax_integration.rst
    examples/op_fuser/op_fuser.rst
    examples/gemm_profiling/gemm_profiling.rst
+   examples/models/index.rst
 
 .. toctree::
    :hidden:
