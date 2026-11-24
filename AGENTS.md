@@ -401,6 +401,15 @@ for judgment.
   For example, add cases to an existing test suite instead of creating
   a new test file for each change.
 
+## Task-specific guidance
+
+Read the skill that matches the work, and only the references it points to. Paths are relative to
+the repository root.
+
+- [Develop](skills/develop/SKILL.md): read when writing or changing code or unit tests. Its
+  references cover PyTorch, JAX, and tests.
+- [Review](skills/review/SKILL.md): read when reviewing a change or preparing a PR for review.
+
 ## Contribution Requirements
 
 Follow `CONTRIBUTING.rst` and `.github/PULL_REQUEST_TEMPLATE.md`.
