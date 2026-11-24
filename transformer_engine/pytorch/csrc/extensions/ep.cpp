@@ -161,28 +161,23 @@ NVTEScalingMode scaling_mode_for_scale_dtype(at::ScalarType st) {
 }
 
 // Validate the scale-inverse pair of a block-scaled EP op and return the scale column count
-// (hidden/block). Both scales must be 2D contiguous with matching cols dividing H and numels
-// equal to their row counts times cols; the recv scale must be symm-mem-backed under zero-copy.
+// (hidden/block). Both scales must be contiguous with matching cols dividing H and numels equal
+// to their row counts times cols; the recv scale must be symm-mem-backed under zero-copy.
 size_t check_block_scale_pair(const at::Tensor& send_scale, const at::Tensor& recv_scale,
                               size_t send_rows, size_t recv_rows, size_t H, const char* recv_name) {
-  NVTE_CHECK(send_scale.dim() >= 2 && recv_scale.dim() >= 2,
-             "scale-inverses must be at least 2D [., H/block]");
   NVTE_CHECK(send_scale.is_contiguous() && recv_scale.is_contiguous(),
              "scale-inverses must be contiguous");
   NVTE_CHECK(send_scale.scalar_type() == recv_scale.scalar_type(),
              "send/recv scale dtypes must match");
-  const size_t send_cols = static_cast<size_t>(send_scale.size(-1));
-  const size_t recv_cols = static_cast<size_t>(recv_scale.size(-1));
-  const size_t sc_cols =
-      send_scale.scalar_type() == at::kFloat && H % 128 == 0 ? H / 128 : send_cols;
+  const size_t sc_cols = static_cast<size_t>(send_scale.size(-1));
   NVTE_CHECK(sc_cols > 0 && H % sc_cols == 0, "scale cols (", sc_cols,
              ") must be a non-zero divisor of hidden (", H, ")");
-  NVTE_CHECK(send_cols >= sc_cols && recv_cols >= sc_cols,
-             "send/recv scale cols must cover logical scale cols");
-  NVTE_CHECK(static_cast<size_t>(send_scale.numel()) >= send_rows * sc_cols,
-             "send scale numel must cover rows * cols");
-  NVTE_CHECK(static_cast<size_t>(recv_scale.numel()) >= recv_rows * sc_cols,
-             "recv scale numel must cover rows * cols");
+  NVTE_CHECK(static_cast<size_t>(recv_scale.size(-1)) == sc_cols,
+             "recv scale cols must match send scale cols");
+  NVTE_CHECK(static_cast<size_t>(send_scale.numel()) == send_rows * sc_cols,
+             "send scale numel must equal rows * cols");
+  NVTE_CHECK(static_cast<size_t>(recv_scale.numel()) == recv_rows * sc_cols,
+             "recv scale numel must equal rows * cols");
   check_symm_mem_required(recv_scale, recv_name);
   return sc_cols;
 }
