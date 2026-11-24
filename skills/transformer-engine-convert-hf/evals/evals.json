@@ -37,14 +37,16 @@
     {
       "id": "transformer-engine-convert-hf-005",
       "prompt": "Convert Qwen3.5-35B-A3B to Transformer Engine.",
-      "expected_output": "A te_qwen3_5_moe.py TE implementation that fuses the input norm of each mixer with the projections that read it through LayerNormLinear, runs the mixer cores on Transformer Engine cores or keeps them as Hugging Face code, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
+      "expected_output": "A te_qwen3_5_moe.py TE implementation that replaces the attention and MoE blocks separately: the input norm of each attention layer fused with its projections through LayerNormLinear, the Gated DeltaNet and gated attention cores on GatedDeltaNetAttention and DotProductAttention, the 256 experts in GroupedLinear blocks of at most 64, and the checkpoint weights mapped and checked against Hugging Face in float32.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
-        "The input norm of each mixer is fused with the projections that read it through Transformer Engine's LayerNormLinear; the linear-attention and gated-attention cores are Transformer Engine cores checked against the Hugging Face model or are kept as Hugging Face code, not forced into MultiheadAttention.",
+        "The attention and MoE blocks are replaced separately, not through TransformerLayer or MultiheadAttention, and the input norm of each attention layer is fused with all the projections that read it through LayerNormLinear.",
+        "The Gated DeltaNet cores run on GatedDeltaNetAttention with Q, K and V contiguous in BF16, Q and K repeated to the number of value heads, and g and beta in float32; the gated attention core runs on DotProductAttention.",
         "The norms that multiply by 1 + weight use zero_centered_gamma=True.",
-        "The MoE experts run through GroupedLinear with at most 64 experts each, with the routing weights applied by ScaledSwiGLU and each expert's rows padded under a quantization recipe.",
-        "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, with none missing or swapped.",
-        "The TE implementation is compared with the Hugging Face model on the checkpoint, in slices of layers if the model does not fit on the GPU."
+        "The 256 experts run through GroupedLinear in blocks of at most 64; under MXFP8 each expert's rows are padded to a multiple of 128 and the routing weights are applied in ScaledSwiGLU, and the router stays out of quantization.",
+        "The implementation or its report rules out cuBLAS 13.7.0 to 13.8.0, whose grouped GEMMs return wrong results.",
+        "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, and the loader fails on a weight left over on either side.",
+        "The TE implementation in BF16 is compared with Hugging Face in BF16 and in float32 on real text, in slices of layers, and is judged right only if it is no further from the float32 output than Hugging Face's own BF16 run."
       ]
     },
     {
