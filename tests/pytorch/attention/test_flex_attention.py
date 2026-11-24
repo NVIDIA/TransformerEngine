@@ -12,6 +12,7 @@ import torch
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
+from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -22,6 +23,23 @@ from utils import (  # pylint: disable=wrong-import-position
     get_available_attention_backends,
 )
 
+
+def _flex_availability():
+    """Why the cuDNN score_mod path cannot run here, or None if it can."""
+    if not torch.cuda.is_available():
+        return "no CUDA device"
+    try:
+        cudnn_pygraph.import_cudnn_frontend()
+    except ImportError as exc:
+        return "nvidia-cudnn-frontend not importable: %s" % exc
+    return None
+
+
+_SKIP = _flex_availability()
+# Mirrors NVTE_GDN_TEST_REQUIRED: the tests that reach cuDNN skip silently without the frontend.
+if os.getenv("NVTE_FLEX_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
+    raise RuntimeError("NVTE_FLEX_TEST_REQUIRED=1, but flex attention is unavailable: %s" % _SKIP)
+
 param_types = [torch.float16]
 if torch.cuda.is_available() and is_bf16_available():
     param_types.append(torch.bfloat16)
@@ -29,7 +47,7 @@ if torch.cuda.is_available() and is_bf16_available():
 
 def _score_mod_causal(score_mod_graph, score_tensor, tensors):
     """cuDNN frontend score_mod implementing top-left causal masking."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -50,7 +68,7 @@ def _score_mod_causal(score_mod_graph, score_tensor, tensors):
 
 def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
     """cuDNN frontend score_mod_bprop implementing top-left causal masking."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=dP_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -71,7 +89,7 @@ def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
 
 def _score_mod_post_scale_bias(score_mod_graph, score_tensor, _tensors):
     """cuDNN frontend score_mod adding post-scale bias."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -107,7 +125,7 @@ class _ScoreModSoftcap:
 
     def forward(self, score_mod_graph, score_tensor, tensors):
         """Apply softcap * tanh(score / softcap)."""
-        cudnn = flex_attention._import_cudnn_frontend()
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
 
         self.before_tanh_activation = score_mod_graph.div(
             a=score_tensor,
@@ -125,7 +143,7 @@ class _ScoreModSoftcap:
 
     def backward(self, score_mod_graph, dP_tensor, tensors):
         """Apply softcap derivative to dP."""
-        cudnn = flex_attention._import_cudnn_frontend()
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
 
         d_tanh_out = score_mod_graph.mul(
             a=dP_tensor,
@@ -267,7 +285,7 @@ def test_score_mod_cache_key_ignores_pass_by_value_values():
 def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch):
     """Fprop graph cache should reuse entries when only scalar CPU tensor values change."""
     q, k, v, o, stats = _score_mod_cache_cpu_inputs()
-    cache = flex_attention._cudnn_score_mod_graph_cache
+    cache = cudnn_pygraph._GRAPH_CACHE
     saved_cache = dict(cache)
     build_entries = []
 
@@ -361,7 +379,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
 
     q, k, v, o, stats = _score_mod_cache_cpu_inputs()
     score_mod = UnkeyedScoreMod()
-    cache = flex_attention._cudnn_score_mod_graph_cache
+    cache = cudnn_pygraph._GRAPH_CACHE
     saved_cache = dict(cache)
     build_entries = []
 
@@ -424,7 +442,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
             o,
             stats,
         )
-        assert len(cache) == 0
+        assert not [k for k in cache if k[0] == flex_attention._BACKEND_NAME]
     finally:
         cache.clear()
         cache.update(saved_cache)
@@ -446,8 +464,10 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
         score_mod_graph_tensors = {"softcap": object()}
         workspace_size = 1
 
-    def fake_execute(graph, variant_pack, workspace_size, device):
+    def fake_execute(graph, variant_pack, workspace_size, device, **kwargs):
         del graph, variant_pack, workspace_size, device
+        # execute_graph has no default for this, and it picks the cuDNN handle.
+        assert kwargs["backend_name"] == flex_attention._BACKEND_NAME
 
     q, k, v, _, _ = _score_mod_cache_cpu_inputs()
     q = q.requires_grad_()
@@ -456,7 +476,7 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
     softcap = torch.tensor(0.8, dtype=torch.float32)
 
     monkeypatch.setattr(flex_attention, "_get_cudnn_score_mod_fwd_graph", lambda *args: FakeEntry())
-    monkeypatch.setattr(flex_attention, "_execute_cudnn_graph", fake_execute)
+    monkeypatch.setattr(cudnn_pygraph, "execute_graph", fake_execute)
 
     out = flex_attention.FusedAttentionWithScoreModFunc.apply(
         True,
@@ -552,7 +572,7 @@ def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
 def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scalar_loss):
     """Compare score_mod attention against equivalent reference implementations."""
     try:
-        flex_attention._import_cudnn_frontend()
+        cudnn_pygraph.import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
     if score_mod_case == "softcap" and get_device_compute_capability() < (9, 0):
@@ -705,3 +725,313 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+
+# The FROST SDPA engine names nvidia-cudnn-frontend registers, 1.27.0 through 1.29.0. Listed
+# here rather than read from the bar, which cannot measure itself.
+_FROST_SDPA_PLAN_NAMES = (
+    "sdpa_fwd_prefill_sm80",
+    "sdpa_fwd_prefill_sm100",
+    "sdpa_fwd_prefill_sm100_fp8",
+    "sdpa_fwd_prefill_sm100_mxfp8",
+    "sdpa_fwd_prefill_sm100_d128",
+    "sdpa_fwd_prefill_sm100_d128_fp8",
+    "sdpa_fwd_prefill_sm100_d128_mxfp8",
+    "sdpa_fwd_prefill_sm100_d192_d128",
+    "sdpa_fwd_prefill_sm100_d256",
+    "sdpa_fwd_prefill_sm100_d512",
+    "sdpa_fwd_prefill_sm107",
+    "sdpa_fwd_prefill_sm107_fp8",
+    "sdpa_fwd_prefill_sm107_mxfp8",
+    "sdpa_fwd_prefill_sm120",
+    "sdpa_fwd_prefill_sm120_fp8",
+    "sdpa_bwd_sm80",
+    "sdpa_bwd_sm100",
+    "sdpa_bwd_sm100_mxfp8",
+    "sdpa_bwd_sm120",
+)
+
+
+def test_flex_bars_the_frost_engines(monkeypatch):
+    """flex must tell cuDNN not to use a FROST engine, not merely decline to ask for them.
+
+    The switch that offers those engines is process-wide, so another caller in the process, or a
+    user setting CUDNN_FRONTEND_ENABLE_FROST_ENGINES, puts them ahead of the backend engines for
+    these graphs too. They accept a score_mod graph, pass check_support, build, and then compute
+    without the callback.
+
+    Two halves: the shared helper bars them by default, and flex does not override that default.
+    Both are checked here, because flex's real graphs reach the bar only through the default.
+
+    No GPU: this checks the instruction is passed, not what cuDNN does with it.
+    """
+    barred = []
+
+    class FakeGraph:
+        """Records the engines barred, and reports no engine once the walk has run."""
+
+        selected_engine = None
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, names):
+            barred.extend(names)
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            # cuDNN resolves the barred set once, here, so a bar applied later steers nothing.
+            assert barred, "deselect_engines must run before build_plans"
+
+        def get_workspace_size(self):
+            return 4096
+
+    try:
+        cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    workspace_size, _ = cudnn_pygraph.finalize_plans(FakeGraph(), backend_name="FlexAttention")
+    assert workspace_size == 4096
+    assert barred, "the shared default did not ask cuDNN to exclude any engine"
+    # deselect_engines matches a name substring, so a token covers a plan it is contained in.
+    unmatched = [n for n in _FROST_SDPA_PLAN_NAMES if not any(t in n for t in barred)]
+    assert not unmatched, unmatched
+    # The bar has to reach what frost pins, or the two would name different engines.
+    assert all(any(t in pin for t in barred) for pin in cudnn_pygraph.FROST_PLAN_TOKENS), barred
+
+    # The other half: flex must not pass exclude_plan_tokens of its own, which would replace the
+    # default rather than add to it.
+    passed = {}
+
+    def record_fwd(**kwargs):
+        passed.update(kwargs)
+        keys = ("graph", "q", "k", "v", "out", "stats", "workspace")
+        return {**dict.fromkeys(keys), "aux": {"score_mod": None}}
+
+    def record_bwd(**kwargs):
+        passed.update(kwargs)
+        keys = ("graph", "q", "k", "v", "o", "do", "stats", "dq", "dk", "dv", "workspace")
+        return {**dict.fromkeys(keys), "aux": {"score_mod": None, "score_mod_bprop": None}}
+
+    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
+
+    # Both directions: they carry the default separately, so one can drift from the other.
+    monkeypatch.setattr(cudnn_pygraph, "build_fwd", record_fwd)
+    flex_attention._build_cudnn_score_mod_fwd_graph(
+        False, q, k, v, "bshd", "bshd", 0.125, _score_mod_post_scale_bias, None, o, None
+    )
+    assert passed, "the forward builder was not reached"
+    assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
+
+    passed.clear()
+    monkeypatch.setattr(cudnn_pygraph, "build_bwd", record_bwd)
+    flex_attention._build_cudnn_score_mod_bwd_graph(
+        q,
+        k,
+        v,
+        o,
+        o,
+        stats,
+        "bshd",
+        "bshd",
+        0.125,
+        _score_mod_post_scale_bias,
+        None,
+        None,
+        None,
+        False,
+    )
+    assert passed, "the backward builder was not reached"
+    assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
+
+
+def test_flex_rejects_a_graph_a_python_engine_served():
+    """The bar is by name, so the build is checked against what cuDNN actually selected.
+
+    A plan renamed or newly added upstream would survive the bar. cuDNN reports the engine behind
+    the built plan, and None for its own backend, so a python engine here means the bar missed
+    one -- and a FROST engine that serves this graph computes without the score_mod.
+
+    No GPU: this drives finalize_plans against a stub, as the bar test above does.
+    """
+
+    class FakeGraph:
+        """Reports the engine behind the built plan, and a barred one before the walk runs.
+
+        cuDNN selects plan 0 at create_execution_plans and the python plans lead the list, so
+        reading the engine before build_plans names a plan the bar removed.
+        """
+
+        def __init__(self, built_engine):
+            self._built_engine = built_engine
+            self._built = False
+
+        @property
+        def selected_engine(self):
+            return self._built_engine if self._built else "sdpa_fwd_prefill_sm100"
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, _names):
+            pass
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            self._built = True
+
+        def get_workspace_size(self):
+            return 4096
+
+    try:
+        cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    with pytest.raises(RuntimeError, match="score_mod"):
+        cudnn_pygraph.finalize_plans(
+            FakeGraph("sdpa_fwd_prefill_sm100"), backend_name="FlexAttention"
+        )
+
+    # The cuDNN backend reports no engine, which is the case that must still build.
+    workspace_size, plan = cudnn_pygraph.finalize_plans(
+        FakeGraph(None), backend_name="FlexAttention"
+    )
+    assert (workspace_size, plan) == (4096, None)
+
+
+@pytest.mark.parametrize("spelling", ["cudnn", "python"])
+def test_flex_reports_the_bar_when_nothing_is_left_to_build(spelling):
+    """Barring the only plans that could serve the graph must name the bar, not just cuDNN.
+
+    cuDNN defers a backend decline to the plan walk, so this surfaces at build_plans, and a
+    python engine spells a decline NotImplementedError rather than cuDNN's own error.
+    """
+    try:
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    exc = (
+        cudnn.cudnnGraphNotSupportedError("no plan in the list could be built")
+        if spelling == "cudnn"
+        else NotImplementedError("sdpa_fwd_prefill_sm100: declined")
+    )
+
+    class FakeGraph:
+        """Declines once every plan that could have served the graph has been barred."""
+
+        selected_engine = None
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, _names):
+            pass
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            raise exc
+
+        def get_workspace_size(self):
+            return 4096
+
+    with pytest.raises(RuntimeError, match="barred engines") as excinfo:
+        cudnn_pygraph.finalize_plans(FakeGraph(), backend_name="FlexAttention")
+    assert "sdpa_fwd" in str(excinfo.value), excinfo.value
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+def test_frost_switch_does_not_change_what_flex_computes():
+    """Enabling the FROST engines must not change flex's output.
+
+    This is the property the silent drop violates: with the engines on, an unpinned build selects
+    a FROST plan at every head dim measured on B200, and that plan returns plain attention with
+    the score_mod discarded. Comparing flex against itself across the switch needs no reference
+    and no knowledge of which plan ran; if the two differ, a different kernel answered.
+    """
+    try:
+        cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+    # Without this the test is vacuous: if the engines are absent, decline on arch, or sit below
+    # their version floors, both runs get a backend plan and agree no matter what flex does. The
+    # availability probe covers all three, where an arch check alone would miss the version ones.
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_available,
+    )
+
+    frost_ok, frost_reason = is_frost_attention_available()
+    if not frost_ok:
+        pytest.skip("the FROST engines must be reachable to test anything: %s" % frost_reason)
+
+    env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
+    saved = os.environ.get(env)
+    torch.manual_seed(0)
+    b, h, s, d = 2, 4, 512, 64
+    dtype = torch.bfloat16 if is_bf16_available() else torch.float16
+    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
+
+    def run():
+        cudnn_pygraph.clear_graph_cache()
+        return flex_attention.FusedAttentionWithScoreModFunc.apply(
+            False,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            d**-0.5,
+            _score_mod_post_scale_bias,
+            None,
+            None,
+            None,
+            False,
+        )
+
+    try:
+        os.environ.pop(env, None)
+        without = run()
+        os.environ[env] = "1"
+        with_engines = run()
+    finally:
+        cudnn_pygraph.clear_graph_cache()
+        if saved is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = saved
+
+    torch.testing.assert_close(
+        with_engines,
+        without,
+        msg=lambda m: (
+            "flex computed something different with the FROST engines enabled, which means a"
+            " FROST plan answered and dropped the score_mod:\n"
+            + m
+        ),
+    )
