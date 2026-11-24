@@ -243,14 +243,21 @@ def test_ep1_local_dispatch_groups_every_outer_axis():
     )
 
 
-def test_ep1_moe_on_dp_fsdp_mesh_matches_dense_reference():
+# EP=1 sizes its own receive buffer, so a capacity below the dropless bound, given to
+# bootstrap alone or to both bootstrap and moe(), gives the same results.
+@pytest.mark.parametrize(
+    "bootstrap_capacity,moe_capacity",
+    [(None, None), (128, None), (128, 128)],
+    ids=["dropless", "small-bootstrap", "small-bootstrap-and-moe"],
+)
+def test_ep1_moe_on_dp_fsdp_mesh_matches_dense_reference(bootstrap_capacity, moe_capacity):
     """moe() at dp=2 x fsdp=2 x ep=1 matches a dense reference in forward and backward."""
     mesh = dp_fsdp_ep1_mesh()
     resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")
     num_experts, top_k = 4, 2
     batch, sequence, hidden, intermediate = 4, 16, 128, 128
     max_tokens_per_rank = batch * sequence // 4
-    recv_capacity = get_moe_recv_capacity_per_rank(
+    recv_capacity = bootstrap_capacity or get_moe_recv_capacity_per_rank(
         num_experts=num_experts,
         num_experts_per_tok=top_k,
         max_tokens_per_rank=max_tokens_per_rank,
@@ -276,6 +283,7 @@ def test_ep1_moe_on_dp_fsdp_mesh_matches_dense_reference():
             num_experts=num_experts,
             mesh_resource=resource,
             dtype=jnp.bfloat16,
+            recv_capacity_per_rank=moe_capacity,
             collect_expert_counts=False,
             use_cudnn_fusion=False,
         )[0]

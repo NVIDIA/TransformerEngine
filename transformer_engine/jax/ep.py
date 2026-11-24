@@ -145,15 +145,16 @@ def ep_bootstrap(
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
-            at least ep_size * max_tokens_per_rank * top_k to avoid drops.
+            at least ep_size * max_tokens_per_rank * top_k to avoid drops. Unused
+            at EP=1, where dispatch sizes its receive buffer to the dropless bound
+            of its local token count and cannot overflow.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
         max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
-            total_recv_tokens, so callers can detect overflow from it. At
-            EP=1, which cannot trap, dispatch without it rejects a
-            recv_capacity_per_rank that routing could overflow.
+            total_recv_tokens, so callers can detect overflow from it. Unused
+            at EP=1.
     """
     if rank is None:
         rank = jax.process_index()
@@ -201,7 +202,6 @@ def ep_bootstrap(
         "max_tokens_per_rank": max_tokens_per_rank,
         "recv_capacity_per_rank": recv_capacity_per_rank,
         "hidden_dim": hidden_dim,
-        "drop_on_overflow": bool(drop_on_overflow),
     }
 
     # EP=1 is entirely local. Keep the same bootstrap contract and config so
@@ -343,7 +343,10 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     ``[num_procs, 1]`` sharded array); it counts dropped tokens too when
     ``drop_on_overflow`` is set. When ``recv_capacity_per_rank`` is not sized for
     the worst case, detect overflow by ``process_allgather``-ing it, then
-    ``max(...) > recv_capacity_per_rank`` flags an overflowing step.
+    ``max(...) > recv_capacity_per_rank`` flags an overflowing step. At EP=1,
+    ``recv_capacity_per_rank`` is unused: the receive buffer holds the dropless
+    bound of the local token count, which assumes each token's ``top_k`` indices
+    are distinct.
     """
     return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
 
