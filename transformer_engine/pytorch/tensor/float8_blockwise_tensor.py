@@ -41,6 +41,7 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
+    rowwise_scale_layout_value: int
 
     def __init__(
         self,
@@ -66,12 +67,16 @@ class Float8BlockQuantizer(Quantizer):
             tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
         ):
             raise ValueError("rowwise_scale_layout must be GEMM_READY or COMPACT")
-        self.rowwise_scale_layout = rowwise_scale_layout
+        self.rowwise_scale_layout = int(rowwise_scale_layout)
 
-    def _rebuild_derived_state(self) -> None:
-        # The pybind enum is not a torch.compile value field; reconstructed
-        # quantizers use the default GEMM-ready layout.
-        self.rowwise_scale_layout = tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+    @property
+    def rowwise_scale_layout(self):
+        """Public pybind enum, backed by a compile-safe integer value field."""
+        return tex.FP8BlockwiseRowwiseOption(self.rowwise_scale_layout_value)
+
+    @rowwise_scale_layout.setter
+    def rowwise_scale_layout(self, value):
+        self.rowwise_scale_layout_value = int(value)
 
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
@@ -99,6 +104,7 @@ class Float8BlockQuantizer(Quantizer):
                 "fp8_dtype": self.dtype,
                 "quantizer": self,
                 "is_2D_scaled": self.block_scaling_dim == 2,
+                "rowwise_scale_layout": self.rowwise_scale_layout_value,
                 "fake_dtype": fake_dtype,
             },
         }

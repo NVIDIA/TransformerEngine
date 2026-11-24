@@ -1125,6 +1125,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
@@ -1151,6 +1152,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["device"] = py::cast(device);
 
     py::tuple args(0);

@@ -45,6 +45,23 @@ def test_rowwise_layout_option_single_tensor(rows, hidden):
     torch.testing.assert_close(
         compact._columnwise_scale_inv, gemm._columnwise_scale_inv, rtol=0, atol=0
     )
+    torch.testing.assert_close(compact.dequantize(), gemm.dequantize(), rtol=0, atol=0)
+
+
+def test_rowwise_layout_is_preserved_by_value_rebuild():
+    compact = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT, False)
+    gemm = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY, False)
+    assert compact != gemm
+    assert hash(compact) != hash(gemm)
+    expression, globals_ = compact.__fx_repr__()
+    rebuilt = eval(expression, dict(globals_))  # pylint: disable=eval-used
+    assert rebuilt.rowwise_scale_layout == tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+    assert rebuilt.get_scale_shape((130, 384), False) == (130, 3)
+
+    source = torch.randn(130, 384, dtype=torch.bfloat16, device="cuda")
+    torch.testing.assert_close(
+        rebuilt(source).dequantize(), compact(source).dequantize(), rtol=0, atol=0
+    )
 
 
 def test_grouped_quantizer_remains_gemm_ready():

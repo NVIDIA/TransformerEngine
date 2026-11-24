@@ -786,39 +786,20 @@ def _ep_prepare_and_dispatch_fwd(
         if recv_topk_weights is None:
             recv_topk_weights = _alloc_io((num_recv_tokens,), torch.float32, device, zero_copy)
         dispatch_recv = recv_tokens.view(torch.float8_e4m3fn) if is_scaled else recv_tokens
-        if is_scaled:
-            torch.ops.transformer_engine_ep.prepare_and_dispatch(
-                handle_mem,
-                topk_idx,
-                dispatch_tokens,
-                topk_weights,
-                tokens_per_expert,
-                total_recv_tokens,
-                top_k,
-                alignment,
-                dispatch_recv,
-                recv_topk_weights,
-                recv_scale_inv,
-                tokens_scale_inv,
-            )
-        else:
-            # BF16 payload: recv_scale_inv/tokens_scale_inv are None, which the custom-op
-            # mutates_args schema cannot express (autograd adinplaceorview_impl hits
-            # IndexError on Optional[Tensor]=None). Call the C++ binding directly instead.
-            tex.ep_prepare_and_dispatch(
-                handle_mem,
-                topk_idx,
-                dispatch_tokens,
-                topk_weights,
-                tokens_per_expert,
-                total_recv_tokens,
-                top_k,
-                alignment,
-                recv_tokens=recv_tokens,
-                recv_topk_weights=recv_topk_weights,
-                recv_scale_inv=None,
-                tokens_scale_inv=None,
-            )
+        torch.ops.transformer_engine_ep.prepare_and_dispatch(
+            handle_mem,
+            topk_idx,
+            dispatch_tokens,
+            topk_weights,
+            tokens_per_expert,
+            total_recv_tokens,
+            top_k,
+            alignment,
+            dispatch_recv,
+            recv_topk_weights,
+            recv_scale_inv,
+            tokens_scale_inv,
+        )
     state = _DispatchState(
         handle_mem=handle_mem,
         tokens_shape=tokens.shape,
