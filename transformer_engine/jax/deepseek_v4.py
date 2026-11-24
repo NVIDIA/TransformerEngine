@@ -345,11 +345,10 @@ def _indexer_prefixes(q, sequence_descriptor, max_seqlen_q, max_seqlen_k):
             raise ValueError("THD indexer requires explicit lengths/offsets, not segment IDs")
         q_len, k_len = sd.seqlens
         q_off, k_off = sd.seq_offsets
+        if q_len.ndim != 2 or q_len.shape[0] != 1 or q_len.shape[1] < 1:
+            raise ValueError("THD descriptor requires INT32 lengths [1,M] and offsets [1,M+1]")
         if (
-            q_len.ndim != 2
-            or q_len.shape[0] != 1
-            or q_len.shape[1] < 1
-            or k_len.shape != q_len.shape
+            k_len.shape != q_len.shape
             or q_off.shape != (1, q_len.shape[1] + 1)
             or k_off.shape != q_off.shape
             or any(x.dtype != jnp.int32 for x in (q_len, k_len, q_off, k_off))

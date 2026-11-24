@@ -20,16 +20,16 @@ Variables are available in `transformer_engine.jax.sharding`.
 
 
 DeepSeek-V4 operations
----------------------
+----------------------
 
-.. autoapifunction:: transformer_engine.jax.csa_compressor
-.. autoapifunction:: transformer_engine.jax.csa_compressor_batched
-.. autoapifunction:: transformer_engine.jax.hca_compressor_batched
-.. autoapifunction:: transformer_engine.jax.dsa_indexer
-.. autoapifunction:: transformer_engine.jax.dsa_indexer_batched
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.csa_compressor
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.csa_compressor_batched
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.hca_compressor_batched
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.dsa_indexer
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.dsa_indexer_batched
 .. autoapifunction:: transformer_engine.jax.deepseek_v4.dsa_indexer_sparse_kl_loss
-.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention
-.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention_batched
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.dsa_sparse_attention
+.. autoapifunction:: transformer_engine.jax.deepseek_v4.dsa_sparse_attention_batched
 
 Checkpointing
 -------------

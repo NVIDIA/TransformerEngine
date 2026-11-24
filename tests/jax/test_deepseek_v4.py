@@ -3,6 +3,10 @@
 # See LICENSE for license information.
 """Parity checks for TE-owned DeepSeek-V4 CSA per-kernel VJPs."""
 
+from importlib import import_module
+from importlib.util import find_spec
+from inspect import signature
+
 import numpy as np
 import pytest
 
@@ -20,19 +24,38 @@ from transformer_engine.jax.deepseek_v4 import (
 )
 
 
-def _require_sm100():
+def _require_sm100(*required_ops):
     if not any(device.platform == "gpu" for device in jax.devices()):
         pytest.skip("JAX has no CUDA device")
+    # Check presence first; errors importing an installed package must still fail.
+    for module in (
+        "cudnn",
+        "cutlass",
+        "cuda",
+        "tvm_ffi",
+        "cudnn.ops",
+        "cudnn.ops.dsa",
+        "cudnn.tensor_adapter",
+    ):
+        if find_spec(module) is None:
+            pytest.skip(f"DSv4 tests require optional module {module}")
     from cudnn.tensor_adapter import get_compute_capability
 
-    if get_compute_capability()[0] < 10:
-        pytest.skip("DSv4 CuTeDSL kernels require compute capability >= 10")
+    if get_compute_capability()[0] != 10:
+        pytest.skip("DSv4 CuTeDSL kernels require an SM100-family GPU")
+    dsa = import_module("cudnn.ops.dsa")
+    available = set(vars(dsa)) | set(getattr(dsa, "__all__", ()))
+    for name in required_ops:
+        if name not in available:
+            pytest.skip(f"installed cuDNN Frontend lacks {name}")
+        getattr(dsa, name)  # Resolve lazy exports without suppressing import errors.
+    return dsa
 
 
 @pytest.mark.L0
 @pytest.mark.parametrize("head_dim", [128, 512])
 def test_csa_compressor_vjp(head_dim):
-    _require_sm100()
+    _require_sm100("compressor_forward_jax", "compressor_backward_jax")
     key = jax.random.key(head_dim)
     kv = jax.random.normal(key, (16, 2 * head_dim), jnp.bfloat16)
     score = jax.random.normal(jax.random.fold_in(key, 1), kv.shape, jnp.bfloat16)
@@ -78,7 +101,7 @@ def test_csa_compressor_vjp(head_dim):
 
 @pytest.mark.L0
 def test_dsa_indexer_vjp():
-    _require_sm100()
+    _require_sm100("indexer_forward_jax")
     key = jax.random.key(4)
     q = jax.random.normal(key, (1, 16, 64, 128), jnp.bfloat16)
     k = jax.random.normal(jax.random.fold_in(key, 1), (1, 4, 1, 128), jnp.bfloat16)
@@ -117,7 +140,7 @@ def test_dsa_indexer_vjp():
 
 @pytest.mark.L0
 def test_dsa_sparse_attention_vjp():
-    _require_sm100()
+    _require_sm100("sparse_attention_forward_jax", "sparse_attention_backward_jax")
     key = jax.random.key(5)
     q = jax.random.normal(key, (1, 64, 512), jnp.bfloat16) / jnp.sqrt(512)
     kv = jax.random.normal(jax.random.fold_in(key, 1), (640, 512), jnp.bfloat16)
@@ -150,9 +173,61 @@ def test_dsa_sparse_attention_vjp():
 
 
 @pytest.mark.L0
+def test_dsa_sparse_attention_batched_matches_separate():
+    _require_sm100("sparse_attention_forward_jax", "sparse_attention_backward_jax")
+    key = jax.random.key(59)
+    q = jax.random.normal(key, (2, 1, 64, 512), jnp.bfloat16) / jnp.sqrt(512)
+    q = q.at[1].set(jnp.abs(q[1]))
+    kv = jax.random.normal(jax.random.fold_in(key, 1), (2, 64, 512), jnp.bfloat16)
+    # If -1 is incorrectly offset for batch 1, it reads this excluded batch-0 row.
+    kv = kv.at[0, 63].set(4)
+    indices = jnp.full((2, 1, 64), -1, jnp.int32)
+    indices = indices.at[0, 0, :3].set(jnp.array([0, 7, 13], jnp.int32))
+    indices = indices.at[1, 0, :4].set(jnp.array([2, 5, 9, 15], jnp.int32))
+    lengths = jnp.full((2, 1), 64, jnp.int32)
+    sinks = jnp.zeros((64,), jnp.float32)
+    cotangent = jax.random.normal(jax.random.fold_in(key, 2), q.shape, jnp.float32)
+
+    def batched(x, y, sink):
+        return dsa_sparse_attention_batched(
+            x, y, indices, lengths, sink, indexer_topk=0, softmax_scale=1.0
+        )
+
+    def separate(x, y, sink):
+        return jnp.stack(
+            [
+                dsa_sparse_attention(
+                    x[b], y[b], indices[b], lengths[b], sink, indexer_topk=0, softmax_scale=1.0
+                )
+                for b in range(2)
+            ]
+        )
+
+    def loss(fn, x, y, sink):
+        return jnp.sum(fn(x, y, sink).astype(jnp.float32) * cotangent)
+
+    with Mesh(np.array(jax.devices()[:1]), ("data",)):
+        got = jax.jit(batched)(q, kv, sinks)
+        expected = jax.jit(separate)(q, kv, sinks)
+        actual_grads = jax.jit(jax.grad(lambda *xs: loss(batched, *xs), argnums=(0, 1, 2)))(
+            q, kv, sinks
+        )
+        expected_grads = jax.jit(jax.grad(lambda *xs: loss(separate, *xs), argnums=(0, 1, 2)))(
+            q, kv, sinks
+        )
+    np.testing.assert_allclose(
+        np.asarray(got, np.float32), np.asarray(expected, np.float32), atol=1e-2, rtol=2e-2
+    )
+    for actual, ref in zip(actual_grads, expected_grads, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(actual, np.float32), np.asarray(ref, np.float32), atol=4e-2, rtol=2e-2
+        )
+
+
+@pytest.mark.L0
 def test_batched_csa_kernels_compound_fsdp_ep_batch_sharding():
     """FSDP and EP together form the local CSA batch dimension."""
-    _require_sm100()
+    _require_sm100("compressor_forward_jax", "compressor_backward_jax", "indexer_forward_jax")
     if len(jax.devices()) < 4:
         pytest.skip("requires four local CUDA devices")
     mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
@@ -192,7 +267,10 @@ def test_batched_csa_kernels_compound_fsdp_ep_batch_sharding():
 @pytest.mark.L0
 @pytest.mark.parametrize("lengths", [(21, 33), (3, 33)])
 def test_indexer_thd_vjp_and_segment_isolation(lengths):
-    _require_sm100()
+    dsa = _require_sm100("indexer_forward_jax")
+    required = {"cu_seqlens_q", "cu_seqlens_k", "max_seqlen_q", "max_seqlen_k"}
+    if not required.issubset(signature(dsa.indexer_forward_jax).parameters):
+        pytest.skip("installed cuDNN Frontend lacks THD indexer forward")
     from transformer_engine.jax.attention import SequenceDescriptor
 
     counts = [n // 4 for n in lengths]
@@ -274,7 +352,9 @@ def test_indexer_thd_vjp_and_segment_isolation(lengths):
 def test_dsa_indexer_sparse_kl_loss_native_gradients(batch):
     from transformer_engine.jax.deepseek_v4 import dsa_indexer_sparse_kl_loss
 
-    _require_sm100()
+    dsa = _require_sm100("indexer_backward_jax")
+    if "clip_log" not in signature(dsa.indexer_backward_jax).parameters:
+        pytest.skip("installed cuDNN Frontend lacks unclipped indexer backward")
     key = jax.random.key(31)
     q = jax.random.normal(key, (batch, 16, 64, 128), jnp.bfloat16)
     k = jax.random.normal(jax.random.fold_in(key, 1), (batch, 32, 1, 128), jnp.bfloat16)
@@ -339,7 +419,10 @@ def test_dsa_indexer_sparse_kl_loss_thd_native_gradients(lengths, counts):
     from transformer_engine.jax.attention import SequenceDescriptor
     from transformer_engine.jax.deepseek_v4 import dsa_indexer_sparse_kl_loss
 
-    _require_sm100()
+    dsa = _require_sm100("indexer_backward_jax")
+    required = {"clip_log", "cu_seqlens_q", "cu_seqlens_k", "max_seqlen_q", "max_seqlen_k"}
+    if not required.issubset(signature(dsa.indexer_backward_jax).parameters):
+        pytest.skip("installed cuDNN Frontend lacks unclipped THD indexer backward")
     cq = np.cumsum((0,) + lengths).astype(np.int32)
     ck = np.cumsum((0,) + counts).astype(np.int32)
     tq, tk, width = int(cq[-1]) + 3, int(ck[-1]) + 2, 4
