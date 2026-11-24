@@ -27,6 +27,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
 )
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -1202,13 +1203,18 @@ class TestExtraTensorChannels:
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(
+    fp8_available and is_non_tn_fp8_gemm_supported(),
+    reason="FP8 tensors have no separate transpose on GPUs with non-TN FP8 GEMMs",
+)
 @pytest.mark.parametrize("activation", ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"))
 @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
 def test_gated_activation_fp8_columnwise_output(activation: str, dtype: torch.dtype) -> None:
     """Gated activation with an FP8 output that needs row-wise and column-wise data
 
-    Recipes request both usages on GPUs without non-TN FP8 GEMMs (e.g. SM 12.0).
-    The column-wise data must be the transpose of the row-wise data.
+    Recipes request both usages on GPUs without non-TN FP8 GEMMs (e.g. SM 9.0
+    and SM 12.0), where the column-wise data is a separate transpose buffer.
+    It must be the transpose of the row-wise data.
 
     """
     rows, cols = 256, 512
