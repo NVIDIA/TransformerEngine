@@ -16,7 +16,10 @@ from transformer_engine.pytorch.ops.basic import (
     Bias,
     ReduceScatter,
 )
-from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
+from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
+    _validate_tp_reduction_dtype,
+)
 from transformer_engine.pytorch.ops.op import FusedOperation
 
 
@@ -46,6 +49,10 @@ class Linear(FusedOperation):
         parallelism, i.e. distributing input or output tensors along
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
+    reduction_dtype : torch.dtype, default = None
+        Row-parallel forward communication dtype: float16, bfloat16, float32
+        or float64. Applies to all-reduce and sequence-parallel reduce-scatter.
+        Output dtype and backward behavior are unchanged.
     rng_state_tracker_function : callable
         Function that returns CudaRNGStatesTracker, which is used for
         model-parallel weight initialization
@@ -72,6 +79,7 @@ class Linear(FusedOperation):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> None:
 
         # Tensor parallel configuration
@@ -88,6 +96,12 @@ class Linear(FusedOperation):
             sequence_parallel=sequence_parallel,
             in_features=in_features,
             out_features=out_features,
+        )
+        _validate_tp_reduction_dtype(
+            reduction_dtype,
+            tensor_parallel_mode == "row" and tensor_parallel_size > 1,
+            False,
+            None,
         )
 
         # Construct basic ops
@@ -126,9 +140,9 @@ class Linear(FusedOperation):
                 bias_kwargs["size"] *= tensor_parallel_size
                 ops.append(Bias(**bias_kwargs))
             if sequence_parallel:
-                ops.append(ReduceScatter(tensor_parallel_group))
+                ops.append(ReduceScatter(tensor_parallel_group, reduction_dtype=reduction_dtype))
             else:
-                ops.append(AllReduce(tensor_parallel_group))
+                ops.append(AllReduce(tensor_parallel_group, reduction_dtype=reduction_dtype))
         else:
             # Column TP or no TP: (gather + GEMM) + bias
             linear_idx = len(ops)
