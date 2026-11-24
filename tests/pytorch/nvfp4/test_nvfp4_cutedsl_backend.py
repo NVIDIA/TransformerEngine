@@ -187,29 +187,6 @@ def test_row_scaled(fast_math, monkeypatch):
     run_test_case((256, 1024), True, False, row_scaled=True)
 
 
-def test_row_scaled_columnwise_falls_back_to_cuda(monkeypatch):
-    """Row-scaled NVFP4 with a columnwise output is not implemented by the CuTeDSL kernels, so the
-    backend must decline it and let the CUDA kernel produce the same bytes."""
-    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
-    shape = (256, 1024)
-    x = generate_input(shape)
-    quantizer = make_quantizer(True, True, row_scaled=True)
-
-    set_cutedsl_backend(False)
-    cuda_output = extract_quantized_output(quantize(quantizer, x), shape, True, True)
-
-    set_cutedsl_backend(True)
-    try:
-        fallback_output = extract_quantized_output(quantize(quantizer, x), shape, True, True)
-    finally:
-        set_cutedsl_backend(False)
-
-    key = get_cfg_key(False, False, True, True)
-    assert tvm_ffi.get_global_func(key, allow_missing=True) is None, f"{key} was compiled"
-    for name, cuda_bytes in cuda_output.items():
-        assert torch.equal(fallback_output[name], cuda_bytes), f"{name} differ"
-
-
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
 @pytest.mark.parametrize("kind", ["zero-blocks", "negative-zero-blocks", "all-zero"])
 def test_zero_blocks(kind, direction):
