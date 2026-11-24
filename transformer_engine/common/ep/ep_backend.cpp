@@ -702,7 +702,7 @@ void EPBackend::issue_dispatch_locked(
 
   SignalDesc dispatch_signal_desc;
   out_struct.dispatch_signal =
-      dispatch_signal_desc.attach(dispatch_signal, NCCL_EP_SIGNAL_UNIT_TILE_ROWS, "dispatch");
+      dispatch_signal_desc.attach(dispatch_signal, NCCL_EP_SIGNAL_UNIT_ROWS, "dispatch");
 
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
@@ -818,7 +818,7 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
 
   SignalDesc combine_signal_desc;
   in_struct.combine_signal =
-      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_CHUNK_ELEMS, "combine");
+      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_COLUMNS, "combine");
 
   ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
   out_struct.tokens = &nccl_result_out;
@@ -862,7 +862,7 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
 
   SignalDesc combine_signal_desc;
   in_struct.combine_signal =
-      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_CHUNK_ELEMS, "combine");
+      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_COLUMNS, "combine");
 
   ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
   out_struct.tokens = &nccl_tok_out;

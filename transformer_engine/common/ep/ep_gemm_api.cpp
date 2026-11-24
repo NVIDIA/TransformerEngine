@@ -113,11 +113,16 @@ void check_mxfp8_dims(size_t hidden, size_t ffn, size_t alignment) {
              kRowsPerTile);
 }
 
-// Columns per combine flag: 1024 when it divides n, else the whole row; both are chunks NCCL EP
-// accepts for bfloat16 rows.
+// Columns of one combine flag over the whole row: the row rounded up to whole NCCL EP push tiles
+// (1024 bfloat16 elements, or the row when shorter). NCCL EP takes a chunk past the row as one.
+size_t whole_row_chunk(size_t n) {
+  return transformer_engine::DIVUP_TO_MULTIPLE(n, std::min<size_t>(n, 1024));
+}
+
+// Columns per combine flag: 1024 when it divides n, else one flag over the whole row.
 size_t combine_chunk(size_t n) {
   NVTE_CHECK(n % kTileN == 0, "output columns (", n, ") must be a multiple of ", kTileN);
-  return n % 1024 == 0 ? 1024 : n;
+  return n % 1024 == 0 ? 1024 : whole_row_chunk(n);
 }
 
 // The combine (or dispatch backward) starts at the GEMM's entry and waits on its chunk flags.
@@ -786,7 +791,7 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   // expert_token_offsets the dispatch wrote.
   GemmScratch scratch =
       claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows, !weighted, 0);
-  set_chunk_words(scratch, layout, n / n_chunk, layout.signal);
+  set_chunk_words(scratch, layout, DIVUP(n, n_chunk), layout.signal);
   ep::reset_workspace(scratch.reset, stream);
 
   // The GEMM fills the flags; the combine is its programmatic dependent.
@@ -808,7 +813,7 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   }
 
   NVTECommWindow no_window{};
-  TensorWrapper signal(scratch.base + layout.signal, std::vector<size_t>{n / n_chunk},
+  TensorWrapper signal(scratch.base + layout.signal, std::vector<size_t>{DIVUP(n, n_chunk)},
                        DType::kInt32);
   const ep::EpSignal combine_signal{signal.data(), n_chunk};
   ctx.backend.combine(handle_mem, expert_out, no_window, result, &combine_signal, &ctx.layer_cfg,
@@ -998,7 +1003,7 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
   // the one flag of the whole row is reset to 0, published.
   const bool plain = wgrad && ctx.num_clusters > 0;
   const size_t n_chunk = plain ? 0 : combine_chunk(hidden);
-  const size_t chunk = plain ? hidden : n_chunk;
+  const size_t chunk = plain ? whole_row_chunk(hidden) : n_chunk;
 
   // With the weight gradient the GEMM runs alone on every SM, and the weight gradient beside the
   // dispatch backward.
@@ -1016,7 +1021,7 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,
                                       true, wgrad ? wgrad->layout.total_bytes : 0);
-  set_chunk_words(scratch, layout, plain ? 0 : hidden / chunk,
+  set_chunk_words(scratch, layout, plain ? 0 : DIVUP(hidden, chunk),
                   plain ? layout.total_bytes : layout.signal);
   if (wgrad) {
     scratch.reset.fill(scratch.wgrad + wgrad->layout.counter, 1, ep::kFillZero);
@@ -1054,7 +1059,7 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
   }
 
   NVTECommWindow no_window{};
-  TensorWrapper signal(scratch.base + layout.signal, std::vector<size_t>{hidden / chunk},
+  TensorWrapper signal(scratch.base + layout.signal, std::vector<size_t>{DIVUP(hidden, chunk)},
                        DType::kInt32);
   const ep::EpSignal combine_signal{signal.data(), chunk};
   ctx.backend.dispatch_bwd(handle_mem, grad_recv_tokens, no_window, grad_recv_topk_weights,
