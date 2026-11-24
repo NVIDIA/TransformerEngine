@@ -138,9 +138,12 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
   }
   // Currently, only the CuTeDSL counterpart of quantize_transpose_tuned_1D is supported
   if constexpr (use_2d_quantization) {
+    // TODO: implement 2D quantization in CuTeDSL. Until then it falls back to CUDA without a
+    // report, since CI turns every report into an error.
     return false;
   } else {
-    // Like 2D, configs the CuTeDSL kernels do not implement fall back without a report.
+    // TODO: implement each config below that returns false without a report. Like 2D, these fall
+    // back to CUDA silently.
     if (input.dtype() != DType::kBFloat16) {
       return false;
     }
@@ -159,7 +162,8 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
     if (output->row_scaled_nvfp4 && return_transpose) {
       return false;
     }
-    // The stochastic rounding kernels use cvt.rs, which only SM 10.x has.
+    // The stochastic rounding kernels use cvt.rs, which only SM 10.x has. CUDA rounds in software
+    // elsewhere (ptx::stochastic_round_fp4_e2m1).
     if (quant_config != nullptr && quant_config->stochastic_rounding &&
         cuda::sm_arch() / 10 != 10) {
       return false;
