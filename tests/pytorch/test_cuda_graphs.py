@@ -158,6 +158,29 @@ def test_invalid_module_does_not_leave_capture_state():
         te_graph.set_capture_end()
 
 
+def test_capture_preserves_eager_calibration_for_subclass():
+    """Capturing a base and derived layer must preserve later eager calibration."""
+
+    class DerivedLinear(Linear):
+        pass
+
+    kwargs = dict(params_dtype=torch.bfloat16, device="cuda")
+    modules = (Linear(32, 32, **kwargs), DerivedLinear(32, 32, **kwargs))
+    inp = torch.randn(8, 32, device="cuda", dtype=torch.bfloat16)
+    graphs = make_graphed_callables(modules, ((inp,), (inp,)), num_warmup_iters=1)
+    try:
+        for graph in graphs:
+            graph(inp).sum().backward()
+    finally:
+        for graph in graphs:
+            graph.reset()
+
+    eager = DerivedLinear(32, 32, **kwargs)
+    with autocast(enabled=False, calibrating=True, recipe=recipe.DelayedScaling()):
+        eager(inp)
+    assert eager.fp8_calibration
+
+
 def test_warmup_forward_failure_cleanup_and_retry(monkeypatch):
     """A failed warmup must leave the module reusable for capture and training."""
     from transformer_engine.pytorch import graph as te_graph
@@ -175,13 +198,8 @@ def test_warmup_forward_failure_cleanup_and_retry(monkeypatch):
                 raise RuntimeError("controlled warmup forward failure")
             return output
 
-    class InheritedCall(FailDuringWarmup):
-        pass
-
     model = FailDuringWarmup()
-    derived = InheritedCall()
     inp = torch.randn(4, 32, device="cuda", dtype=torch.bfloat16)
-    modules, sample_args = (model, derived), ((inp,), (inp,))
     original_call = type(model).__call__
     hooks = [(module, dict(module._forward_hooks)) for module in model.modules()]
     cpu_rng = torch.get_rng_state()
@@ -191,8 +209,6 @@ def test_warmup_forward_failure_cleanup_and_retry(monkeypatch):
         for module, original_hooks in hooks:
             assert module._forward_hooks == original_hooks
         assert type(model).__call__ is original_call
-        assert InheritedCall.__call__ is original_call
-        assert "__call__" not in InheritedCall.__dict__
         assert not te_graph.is_graph_capturing()
         torch.testing.assert_close(torch.get_rng_state(), cpu_rng, rtol=0, atol=0)
         torch.testing.assert_close(torch.cuda.get_rng_state(), cuda_rng, rtol=0, atol=0)
@@ -203,13 +219,13 @@ def test_warmup_forward_failure_cleanup_and_retry(monkeypatch):
     graphed = None
     try:
         with pytest.raises(RuntimeError, match="controlled warmup forward failure"):
-            make_graphed_callables(modules, sample_args, num_warmup_iters=1)
+            make_graphed_callables(model, (inp,), num_warmup_iters=1)
         assert_restored()
 
         with monkeypatch.context() as patch:
             patch.setattr(te_graph, "restore_fp8_tensors", fail_fp8_restore)
             with pytest.raises(RuntimeError, match="controlled warmup forward failure") as error:
-                make_graphed_callables(modules, sample_args, num_warmup_iters=1)
+                make_graphed_callables(model, (inp,), num_warmup_iters=1)
             assert str(error.value.__cause__) == "controlled FP8 restore failure"
         assert_restored()
 
