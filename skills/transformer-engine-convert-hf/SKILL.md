@@ -8,8 +8,10 @@ description: >-
 license: Apache-2.0
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 compatibility: >-
-  Writing a recipe needs no GPU. Running one needs transformer_engine[pytorch], transformers and
-  an NVIDIA GPU (FP8 needs Hopper or newer; MXFP8 needs Blackwell).
+  Writing the implementation needs no GPU. Running it needs transformer_engine[pytorch],
+  transformers and an NVIDIA GPU (FP8 needs Hopper or newer; MXFP8 needs Blackwell), plus what
+  the training script uses (the Llama tutorial also needs accelerate, datasets and peft). Newer
+  models may need more, such as flash-linear-attention and causal-conv1d for Qwen3.5.
 metadata:
   version: "0.4.0"
   author: NVIDIA Transformer Engine contributors
@@ -24,12 +26,16 @@ metadata:
 
 # Convert a Hugging Face model to Transformer Engine
 
-The result is one Python module, named after the model family (`te_llama.py`, `te_mixtral.py`),
-that replaces the Hugging Face (HF) decoder layer with Transformer Engine (TE) modules and loads
-the original checkpoint into it. Steps 1 to 3 are decisions; step 4 writes the code. In this
-skill `te` means `transformer_engine.pytorch`.
+The result is a TE implementation of the model: one Python module, named after the model family
+(`te_llama.py`, `te_mixtral.py`), that replaces the basic building blocks of the Hugging Face
+(HF) model with Transformer Engine (TE) modules and loads the original checkpoint into it. The
+building block is the whole transformer layer, as for Llama and Gemma, or else the attention
+(MHA, linear attention) and MLP or MoE blocks inside it. Steps 1 to 3 are decisions; step 4
+writes the code. In this skill `te` means `transformer_engine.pytorch`.
 
-Not for Megatron-LM, JAX, or inference serving (vLLM, TensorRT-LLM).
+Not for JAX or inference serving (vLLM, TensorRT-LLM). For Megatron-LM or another PyTorch
+framework, the TE implementation can serve as a reference for which TE modules to use and how
+the weights map.
 
 ## 1. Check the architecture and feasibility
 
@@ -49,10 +55,15 @@ Read the model's `config.json`, the weight names in its checkpoint
 | MoE experts | `GroupedLinear` and `ScaledSwiGLU` in a `te.ops.Sequential`, with `te.moe_permute_and_pad_with_probs` and `te.moe_unpermute` around them |
 | Rotary position embedding | `RotaryPositionEmbedding` in `transformer_engine.pytorch.attention` |
 
+The table is not exhaustive. Newer architectures may need other TE modules, some of them
+experimental, as Gated DeltaNet needs `te.GatedDeltaNetAttention`; check what the installed TE
+exports.
+
 For each component also note what the TE module must reproduce: the norm type and epsilon, and
 whether it multiplies by `weight` or by `1 + weight`; the activation and whether the MLP is
-gated; heads, key/value heads, head size, RoPE base, RoPE on part of the head, Q/K norms and
-output gates; biases; the number of experts, top-k, routing function and any shared expert.
+gated; heads, key/value heads, head size, sliding window, RoPE base, RoPE on part of the head,
+Q/K norms and output gates; biases; the number of experts, top-k, routing function and any
+shared expert.
 
 A component with no TE module (a causal convolution, a gated output norm, a custom router) stays
 HF code. A genomics or protein language model (for example ESM-2) is covered by the
@@ -86,13 +97,15 @@ attention layers with 512-expert MoE blocks. DeepSeek-V4 is only partly covered 
 MoE layer around grouped GEMMs and keep what TE lacks as HF code. A model whose config lists
 `layer_types` gets one layer class that builds the sublayers each entry names.
 
-Swapping single `nn.Linear` modules for `te.Linear` fuses nothing; it is the last resort.
+Try level 1 first, then level 2, and go no deeper: do not swap single projections for
+`te.Linear` or build sub-blocks TE lacks. A block that neither level covers stays HF code; say so
+in the report.
 
 ## 3. Map the weights
 
 Every checkpoint weight of a replaced layer needs a destination in the TE modules, and every TE
-parameter a source. [references/design-patterns.md](references/design-patterns.md) has the code
-for each case below.
+parameter a source. `replace_params(hf_state_dict, te_state_dict, config)` in `te_llama.py` and
+`replace_params_bf16` in `docs/examples/te_mixtral/hf_to_te_weights.py` show the pattern.
 
 - Take the names from the checkpoint files, not from `model.state_dict()`: a checkpoint may
   stack all experts of a layer in one `[num_experts, out, in]` tensor, and the layer prefix may
@@ -110,8 +123,8 @@ for each case below.
 
 ### Choose what to fuse
 
-A fusion keeps the math when the fused operations run in the same order on the same input. TE
-fuses:
+Choose fusions that keep the math identical and ideally improve performance. A fusion keeps the
+math identical when the fused operations run in the same order on the same input. TE fuses:
 
 - a norm with every projection that reads it: QKV in `te.MultiheadAttention(input_layernorm=True)`,
   or any set of projections in one `te.LayerNormLinear` (Q with its output gate, K and V; or the
@@ -133,8 +146,7 @@ Qwen3.5 on GB300 a TE MoE layer built this way was 1.4× faster than HF at 64K t
 
 ### Design patterns
 
-[references/design-patterns.md](references/design-patterns.md) has the code; the tutorials hold
-complete versions.
+The tutorials hold the code for each pattern.
 
 - **Swap the HF layer class.** A context manager replaces `modeling_<model>.<Model>DecoderLayer`
   while HF builds the model, so embeddings, final norm and LM head stay HF's with their weight
@@ -159,12 +171,16 @@ complete versions.
 - **Norms.** A norm that multiplies by `1 + weight` (Gemma, Qwen3.5) needs
   `zero_centered_gamma=True`.
 - **Head size.** When the config sets `head_dim`, pass it as `kv_channels`.
+- **Sliding window.** HF lets a token see itself and `sliding_window - 1` earlier tokens; when the
+  config sets `sliding_window` (Mistral 7B v0.1), pass `window_size=(sliding_window - 1, 0)`.
 - **Defaults.** `te.MultiheadAttention` defaults to `attention_dropout=0.1` and `bias=True`; set
   both from the config.
 - **Masks.** Do not pass HF's additive mask to TE attention. TE builds the causal mask, and its
   masks are boolean with `True` meaning masked out.
 - **Experts.** One `GroupedLinear` holds at most 64 experts. Under MXFP8, pad each expert's rows
   to a multiple of 128 and put `ScaledSwiGLU`, not `SwiGLU`, between the two `GroupedLinear`s.
+- **Gated DeltaNet inputs.** `te.GatedDeltaNetAttention` needs Q, K and V contiguous in BF16,
+  with Q and K repeated to the number of value heads, and `g` and `beta` in float32.
 - **cuBLAS 13.7.0 to 13.8.0** returns wrong grouped GEMM results; use 13.8.1 or newer.
 - **Initial values.** HF's `post_init()` overwrites TE weights; fill the model from a checkpoint
   before training it.

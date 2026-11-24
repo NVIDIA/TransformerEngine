@@ -3,8 +3,8 @@
   "evals": [
     {
       "id": "transformer-engine-convert-hf-001",
-      "prompt": "I want a fine-tuning recipe for Llama 2 7B with TE.",
-      "expected_output": "A te_llama.py recipe that uses Transformer Engine's TransformerLayer to fuse layer norm with QKV and the MLP, maps the checkpoint weights, and fine-tunes under TE autocast.",
+      "prompt": "I want to fine-tune Llama 2 7B with TE.",
+      "expected_output": "A te_llama.py TE implementation that uses Transformer Engine's TransformerLayer to fuse layer norm with QKV and the MLP, maps the checkpoint weights, and fine-tunes under TE autocast.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "The decoder layer uses Transformer Engine's TransformerLayer, fusing layer norm with QKV and with the MLP.",
@@ -15,7 +15,7 @@
     {
       "id": "transformer-engine-convert-hf-002",
       "prompt": "Convert Gemma 7B to Transformer Engine.",
-      "expected_output": "A te_gemma.py recipe that uses Transformer Engine's TransformerLayer (RMSNorm, GeGLU) to fuse layer norm with QKV and the MLP, and maps the checkpoint weights.",
+      "expected_output": "A te_gemma.py TE implementation that uses Transformer Engine's TransformerLayer (RMSNorm, GeGLU) to fuse layer norm with QKV and the MLP, and maps the checkpoint weights.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "The decoder layer uses Transformer Engine's TransformerLayer with RMSNorm and GeGLU, fusing layer norm with QKV and with the MLP.",
@@ -26,7 +26,7 @@
     {
       "id": "transformer-engine-convert-hf-003",
       "prompt": "Convert Mixtral 8x7B-v0.1 to TE.",
-      "expected_output": "A te_mixtral.py recipe that fuses layer norm into QKV with Transformer Engine attention, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
+      "expected_output": "A te_mixtral.py TE implementation that fuses layer norm into QKV with Transformer Engine attention, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "Attention uses Transformer Engine's MultiheadAttention with the input layer norm fused into QKV.",
@@ -37,14 +37,14 @@
     {
       "id": "transformer-engine-convert-hf-005",
       "prompt": "Convert Qwen3.5-35B-A3B to Transformer Engine.",
-      "expected_output": "A te_qwen3_5_moe.py recipe that fuses the input norm of each mixer with the projections that read it through LayerNormLinear, runs the mixer cores on Transformer Engine cores or keeps them as Hugging Face code, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
+      "expected_output": "A te_qwen3_5_moe.py TE implementation that fuses the input norm of each mixer with the projections that read it through LayerNormLinear, runs the mixer cores on Transformer Engine cores or keeps them as Hugging Face code, runs the MoE experts through GroupedLinear, and maps the checkpoint weights.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "The input norm of each mixer is fused with the projections that read it through Transformer Engine's LayerNormLinear; the linear-attention and gated-attention cores are Transformer Engine cores checked against the Hugging Face model or are kept as Hugging Face code, not forced into MultiheadAttention.",
         "The norms that multiply by 1 + weight use zero_centered_gamma=True.",
-        "The MoE experts run through GroupedLinear with at most 64 experts each, with the routing weights applied by ScaledSwiGLU and each expert's rows padded under a quantized recipe.",
+        "The MoE experts run through GroupedLinear with at most 64 experts each, with the routing weights applied by ScaledSwiGLU and each expert's rows padded under a quantization recipe.",
         "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, with none missing or swapped.",
-        "The recipe is compared with the Hugging Face model on the checkpoint, in slices of layers if the model does not fit on the GPU."
+        "The TE implementation is compared with the Hugging Face model on the checkpoint, in slices of layers if the model does not fit on the GPU."
       ]
     },
     {
