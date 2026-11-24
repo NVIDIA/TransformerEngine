@@ -1244,14 +1244,8 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    MXFP8 and NVFP4 use CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
-    caller output/grad_input buffers are provided, the GEMMs write into them
-    directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
-    operands with GEMM-packed scales use natural tensor ranks in forward and
-    backward. Gate/up SwiGLU storage requires this API; interleave32 retains
-    compatibility with older tensor layouts.
-    NVFP4 does the same for its cuDNN GEMMs when the scales are swizzled.
-
+    Supports MXFP8 and NVFP4 compute using fused grouped-GEMM CuTe DSL kernels
+    from the cuDNN Frontend.
     """
 
     @classmethod
