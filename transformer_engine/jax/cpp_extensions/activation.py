@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
+
 from typing import Sequence, Union, Callable, Optional, Tuple
 import math
 import operator
@@ -29,7 +30,11 @@ from .misc import (
     NamedSharding,
 )
 from .quantization import _jax_dbias, quantize, quantize_dbias, _quantize_dbias_impl, AmaxScope
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp,
+    _mesh_resource_snapshot,
+)
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
@@ -37,7 +42,6 @@ from ..quantize import (
     ScalingMode,
     QuantizeLayout,
 )
-
 
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
@@ -191,6 +195,7 @@ class ActLuPrimitive(BasePrimitive):
         11,
         12,
         13,
+        14,
     )  # out_dtype, act_enum, act_len, scaling_mode, quantize_layout, scale_dtype, act_params, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling, is_outer
     inner_primitive = None
     outer_primitive = None
@@ -212,10 +217,12 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         te_act_lu_p abstract
         """
+        del mesh_resource
         del act_enum, act_params, amax_scope, transpose_batch_sequence
         assert (
             not output_amax_when_no_scaling or scaling_mode == ScalingMode.NO_SCALING.value
@@ -278,10 +285,12 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         te_gated_act_lu_p lowering rules
         """
+        del mesh_resource
         del out_dtype, scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence
         x_aval, scale_aval, amax_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -320,6 +329,7 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         to describe implementation
@@ -343,6 +353,7 @@ class ActLuPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=False,
+                mesh_resource=_mesh_resource_snapshot(mesh_resource),
             )
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -375,6 +386,7 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         to describe batch rules for vmap
@@ -402,6 +414,7 @@ class ActLuPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=is_outer,
+                mesh_resource=_mesh_resource_snapshot(mesh_resource),
             ),
             out_bdims,
         )
@@ -419,10 +432,12 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
     ):
+        del mesh_resource
         del (
             out_dtype,
             result_infos,
@@ -490,6 +505,7 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -563,15 +579,22 @@ class ActLuPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=True,
+                mesh_resource=mesh_resource,
             )
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(
-                    local_updated_amax, mesh
+                    local_updated_amax,
+                    mesh,
+                    mesh_resource=mesh_resource,
                 )
             elif scaling_mode == ScalingMode.NO_SCALING.value and output_amax_when_no_scaling:
                 global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
-                    local_updated_amax, out_spec, transpose_batch_sequence, mesh
+                    local_updated_amax,
+                    out_spec,
+                    transpose_batch_sequence,
+                    mesh,
+                    mesh_resource=mesh_resource,
                 )
             else:
                 global_updated_amax = local_updated_amax
@@ -599,10 +622,12 @@ class ActLuPrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         value_types,
         result_types,
     ):
+        del mesh_resource
         del (
             out_dtype,
             act_enum,
@@ -653,7 +678,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
     name = "te_dact_dbias_quantize_ffi"
     multiple_results = True
     # out_dtype, scaling_mode, quantize_layout, scale_dtype, is_dbias, act_enum, act_len, act_params, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling, is_outer
-    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
     inner_primitive = None
     outer_primitive = None
 
@@ -676,10 +701,12 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         te_dact_dbias_quantize_p abstract
         """
+        del mesh_resource
         del act_enum, act_params, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
         dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -758,7 +785,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p outer abstract
         """
-        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+        out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _ = (
             BaseDActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
         )
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
@@ -783,10 +810,12 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         te_dact_dbias_quantize_p lowering rules
         """
+        del mesh_resource
         del (
             out_dtype,
             scale_dtype,
@@ -834,13 +863,14 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         te_dact_dbias_quantize_p impl
         """
         del is_outer
         assert BaseDActLuDBiasQuantizePrimitive.inner_primitive is not None
-        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+        out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _ = (
             BaseDActLuDBiasQuantizePrimitive.inner_primitive.bind(
                 dz,
                 x,
@@ -858,6 +888,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=False,
+                mesh_resource=_mesh_resource_snapshot(mesh_resource),
             )
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -890,6 +921,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource=None,
     ):
         """
         to describe batch rules for vmap
@@ -925,6 +957,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=is_outer,
+                mesh_resource=_mesh_resource_snapshot(mesh_resource),
             ),
             out_bdims,
         )
@@ -943,10 +976,12 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
     ):
+        del mesh_resource
         del out_dtype, result_infos, act_enum, act_params, output_amax_when_no_scaling
         del scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence
 
@@ -1023,6 +1058,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -1090,7 +1126,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         def sharded_impl(dz, x, scale, amax):
-            (out, colwise_out, scale_inv, colwise_scale_inv, local_updated_amax, local_dbias) = (
+            out, colwise_out, scale_inv, colwise_scale_inv, local_updated_amax, local_dbias = (
                 BaseDActLuDBiasQuantizePrimitive.impl(
                     dz,
                     x,
@@ -1108,20 +1144,29 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                     amax_scope=amax_scope,
                     transpose_batch_sequence=transpose_batch_sequence,
                     is_outer=True,
+                    mesh_resource=mesh_resource,
                 )
             )
             if is_dbias:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(
+                    local_dbias, mesh, mesh_resource=mesh_resource
+                )
             else:
                 global_dbias = local_dbias
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(
-                    local_updated_amax, mesh
+                    local_updated_amax,
+                    mesh,
+                    mesh_resource=mesh_resource,
                 )
             elif scaling_mode == ScalingMode.NO_SCALING.value and output_amax_when_no_scaling:
                 global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
-                    local_updated_amax, x_spec, transpose_batch_sequence, mesh
+                    local_updated_amax,
+                    x_spec,
+                    transpose_batch_sequence,
+                    mesh,
+                    mesh_resource=mesh_resource,
                 )
             else:
                 global_updated_amax = local_updated_amax
@@ -1144,11 +1189,13 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         transpose_batch_sequence,
         output_amax_when_no_scaling,
         is_outer,
+        mesh_resource,
         mesh,
         value_types,
         result_types,
     ):
 
+        del mesh_resource
         del (
             out_dtype,
             scale_dtype,
@@ -1274,6 +1321,7 @@ def act_lu(
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
+    mesh_resource=None,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -1312,6 +1360,7 @@ def act_lu(
             quantizer=quantizer,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
 
     # TE/common does not support colwise-only quantization yet
@@ -1327,6 +1376,7 @@ def act_lu(
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
+        mesh_resource=mesh_resource,
     )
     if war_output is not None:
         return war_output
@@ -1351,6 +1401,7 @@ def act_lu(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
             is_outer=True,
+            mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
         out = out.reshape(output_shape)
         # TODO(Phuong): ScaledTensorFactory to create NoScaledTensor
@@ -1373,6 +1424,7 @@ def act_lu(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
+            mesh_resource=mesh_resource,
         )
         assert (
             out.data.dtype == x.dtype
@@ -1382,6 +1434,7 @@ def act_lu(
             quantizer=quantizer,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         return out
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1408,6 +1461,7 @@ def act_lu(
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
 
     quantizer.update(updated_amax)
@@ -1434,6 +1488,7 @@ def quantize_dact_dbias(
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
+    mesh_resource=None,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Compute gradients of activation and bias with optional quantization.
 
@@ -1479,6 +1534,7 @@ def quantize_dact_dbias(
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
 
     if quantizer is None:
@@ -1501,6 +1557,7 @@ def quantize_dact_dbias(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
             is_outer=True,
+            mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
         output = output.astype(x.dtype)
         dbias = None
@@ -1524,6 +1581,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
+            mesh_resource=mesh_resource,
         )
         return _quantize_dbias_impl(
             out,
@@ -1533,6 +1591,7 @@ def quantize_dact_dbias(
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
 
     is_gated = act_len == 2
@@ -1550,6 +1609,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
+            mesh_resource=mesh_resource,
         )
         if war_output is not None:
             return war_output
@@ -1568,6 +1628,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
+            mesh_resource=mesh_resource,
         )
         out, dbias = _quantize_dbias_impl(
             out,
@@ -1577,6 +1638,7 @@ def quantize_dact_dbias(
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         return out, dbias
 
@@ -1592,6 +1654,7 @@ def quantize_dact_dbias(
             act_params=act_params,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         out, dbias = _quantize_dbias_impl(
             dgated,
@@ -1601,6 +1664,7 @@ def quantize_dact_dbias(
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         return out, dbias
 
@@ -1628,6 +1692,7 @@ def quantize_dact_dbias(
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
@@ -1660,6 +1725,7 @@ def dact_lu(
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
+    mesh_resource=None,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1684,5 +1750,6 @@ def dact_lu(
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
+        mesh_resource=mesh_resource,
     )
     return output

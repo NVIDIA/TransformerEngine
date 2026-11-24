@@ -9,7 +9,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int64, Int32, Uint16, Uint32
+from cutlass import Boolean, Float32, Int64, Int32, Uint16, Uint32
 
 # This must match `inline std::string to_string(const DType type)`` in transformer_engine/common/common.h exactly
 # which is how we encode types to strings in C++
@@ -84,12 +84,43 @@ def fabs_f32(val: Float32) -> Float32:
 
 
 @cute.jit
+def select_f32(pred: Boolean, if_true: Float32, if_false: Float32) -> Float32:
+    """Return if_true if the runtime predicate pred holds, else if_false."""
+    result = if_false
+    if pred:
+        result = if_true
+    return result
+
+
+@cute.jit
 def fma_f32(a: Float32, b: Float32, c: Float32) -> Float32:
     """Compute the fused multiply-add of three float32 values: a * b + c."""
     return cute.arch.inline_ptx(
         "fma.rn.f32 {$w0}, {$r0}, {$r1}, {$r2};",
         write_only_types=[Float32],
         read_only_args=[a, b, c],
+    )
+
+
+@cute.jit
+def rcp_f32_in_range(y: Float32) -> Float32:
+    """1 / y rounded to nearest, for 1 <= y < 2^126: the approximate reciprocal refined by one
+    Newton step, as rcp.rn.f32 computes it in that range, without its range check."""
+    return cute.arch.inline_ptx(
+        "{ .reg .f32 r, e; rcp.approx.ftz.f32 r, {$r0}; fma.rn.f32 e, {$r0}, r, 0fBF800000; "
+        "neg.f32 e, e; fma.rn.f32 {$w0}, r, e, r; }",
+        write_only_types=[Float32],
+        read_only_args=[y],
+    )
+
+
+@cute.jit
+def min_nan_bf16x2(a: Int32, b: Int32) -> Int32:
+    """Lane-wise minimum of two packed BF16 pairs; a lane is NaN if either input lane is."""
+    return cute.arch.inline_ptx(
+        "min.NaN.bf16x2 {$w0}, {$r0}, {$r1};",
+        write_only_types=[Int32],
+        read_only_args=[a, b],
     )
 
 
