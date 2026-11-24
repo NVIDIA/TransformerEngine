@@ -6,16 +6,14 @@
 
 - FusedMLAQUpProjRopeQuant: query up-projection, RoPE and MXFP8 quantization (cuDNN FE).
 - fused_mla_kv_rope_mxfp8: key/value split, key RoPE and MXFP8 quantization. The reference
-  applies Megatron-LM's MLA key/value RoPE (the Triton kernel in mla_rope_utils) and quantizes
-  key and value with mxfp8_quantize_only; the fused kernel must produce the same bytes.
+  uses ``rotary_fwd_kv_kernel`` to split K/V and rotate the positional key, then calls
+  ``mxfp8_quantize_only``. The fused kernel must produce the same bytes.
 
 Run:
     pytest tests/pytorch/attention/test_fused_mla.py -v
 """
 
 import os
-import pathlib
-import sys
 
 import pytest
 import torch
@@ -30,9 +28,11 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.cpp_extensions import general_gemm as _fused_general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
-_current_file = pathlib.Path(__file__).resolve()
-sys.path = [str(_current_file.parent)] + sys.path
-from mla_rope_utils import HAVE_TRITON, apply_mla_rope_kv, build_rope_tables
+from transformer_engine.pytorch.attention.rope import (
+    _triton_rope_module,
+    apply_mla_rope_kv,
+    build_mla_rope_tables,
+)
 
 # All tests in this file require GB200/SM100 hardware.
 pytestmark = pytest.mark.launch_on_gb200
@@ -289,10 +289,15 @@ def test_fused_mla_q_uproj_autograd() -> None:
         1,
         None,
         None,
+        None,
         dq3.stride(0),
         dq3.stride(1),
+        cos_flat.stride(0),
+        sin_flat.stride(0),
         0,
         1,
+        INVERSE=False,
+        REMOVE_INTERLEAVING=False,
     )
     dq2d = dq3.reshape(tokens, PROJ_DIM).contiguous()
     gy_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
@@ -332,7 +337,7 @@ if not mxfp8_available:
     _kv_rope_skip_reason = reason_for_no_mxfp8
 elif not sm100:
     _kv_rope_skip_reason = "The fused kernel requires SM 10.0+."
-elif not HAVE_TRITON:
+elif _triton_rope_module() is None:
     _kv_rope_skip_reason = "The reference MLA RoPE needs Triton."
 else:
     _kv_rope_skip_reason = ""
@@ -361,7 +366,7 @@ def _kv_rope_inputs(s, b, h, cos_dtype, seed=1234):
         torch.bfloat16
     )
     k_rope = kv_down[..., KV_LORA_RANK:].unsqueeze(-2)
-    cos, sin = build_rope_tables(s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    cos, sin = build_mla_rope_tables(s, emb_dim=HEAD_DIM_ROPE, device="cuda")
     # A magnitude scale as in YaRN, so that the products are not exact.
     cos, sin = (cos * 1.2).to(cos_dtype), (sin * 1.2).to(cos_dtype)
     return kv, k_rope, cos, sin
@@ -404,7 +409,7 @@ def test_contiguous_k_rope_and_longer_rope_tables():
     """A contiguous [s, b, emb_dim] k_rope and cos / sin with more rows than tokens."""
     s, b, h = 256, 2, 4
     kv, k_rope, _, _ = _kv_rope_inputs(s, b, h, torch.bfloat16)
-    cos, sin = build_rope_tables(2 * s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    cos, sin = build_mla_rope_tables(2 * s, emb_dim=HEAD_DIM_ROPE, device="cuda")
     cos, sin = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
     ref_key, ref_value = _kv_rope_reference(kv, k_rope, cos[:s], sin[:s])
     key, value = fused_mla_kv_rope_mxfp8(kv, k_rope.squeeze(-2).contiguous(), cos, sin, 128)
