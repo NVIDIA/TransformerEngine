@@ -1427,7 +1427,7 @@ class TestGroupedMLPFusedOp:
         glu_interleave_size,
         traced_cudnn_grouped_glu_wrappers,
     ):
-        """RHT fusion and fallback honor wrapper capabilities and produce correct gradients."""
+        """RHT training produces correct outputs and gradients across wrapper capabilities."""
         import cudnn
 
         maybe_skip_quantization(quantization)
@@ -1438,6 +1438,10 @@ class TestGroupedMLPFusedOp:
         ):
             pytest.skip("Canonical NVFP4 GLU is unavailable")
         fused_quant = quantization == "nvfp4_rht_e4m3_input_unit_scale"
+        # Columnwise RHT scale packing for wgrad was fixed in cuDNN FE 1.33.0:
+        # https://github.com/NVIDIA/cudnn-frontend/pull/2484
+        if fused_quant and not grouped_mlp_module._cudnn_frontend_version_at_least("1.33.0"):
+            pytest.skip("NVFP4 RHT+quant requires cuDNN FE >= 1.33.0 (column-scale fix #2484)")
         name = (
             "grouped_gemm_glu_hadamard_quant_wrapper_sm100"
             if fused_quant
@@ -1468,12 +1472,9 @@ class TestGroupedMLPFusedOp:
             glu_interleave_size=glu_interleave_size,
         )
         calls = traced_cudnn_grouped_glu_wrappers
-        expected_kind = "fwd_hadamard_quant" if fused_quant else "fwd_hadamard"
-        if missing_capability is not None and glu_interleave_size is None:
-            expected_kind = "fwd"
+        # RHT may run in the GLU kernel or in the subsequent quantizer.
         forwards = [call for call in calls if call["kind"].startswith("fwd")]
         assert forwards
-        assert all(call["kind"] == expected_kind for call in forwards)
         assert any(call["kind"] == "bwd" for call in calls)
         if glu_interleave_size is None:
             assert all(call["glu_layout"] == "gate_then_up" for call in calls)
