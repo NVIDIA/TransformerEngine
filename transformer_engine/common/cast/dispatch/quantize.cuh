@@ -134,8 +134,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
-        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+        NVTE_CHECK(!output_tensor->has_data() || output_tensor->amax.dptr != nullptr,
                    "Row-scaled NVFP4 does not support disabling second-level scaling.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() || output_tensor->columnwise_amax.dptr != nullptr,
+            "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -148,13 +151,14 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             "multiples of 32.");
         nvfp4::row_scaled::compute_amaxes(*input_tensor, noop_tensor, output_tensor, stream);
       }
-      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
-      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
-      // quantize_transpose_vector_blockwise_fp4.
-      bool use_optimized_kernel =
-          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
-          (output_tensor->has_data() ||
-           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
+      // Columnwise-only is supported on the optimized path only for 2D scaling and row-scaled 1D;
+      // rowwise-only and both-directions keep their existing routing. Other columnwise-only 1D
+      // and non-bf16 fall back to quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
+                                  (cols % 32 == 0) &&
+                                  (output_tensor->has_data() ||
+                                   (output_tensor->has_columnwise_data() &&
+                                    (quant_config_cpp.nvfp4_2d_quantization || row_scaled_nvfp4)));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
@@ -323,8 +327,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
-        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+        NVTE_CHECK(!output_tensor->has_data() || output_tensor->amax.dptr != nullptr,
                    "Row-scaled NVFP4 does not support disabling second-level scaling.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() || output_tensor->columnwise_amax.dptr != nullptr,
+            "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -337,13 +344,14 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             "multiples of 32.");
         nvfp4::row_scaled::compute_amaxes(*grad_tensor, noop_tensor, output_tensor, stream);
       }
-      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
-      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
-      // quantize_transpose_vector_blockwise_fp4.
-      bool use_optimized_kernel =
-          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
-          (output_tensor->has_data() ||
-           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
+      // Columnwise-only is supported on the optimized path only for 2D scaling and row-scaled 1D;
+      // rowwise-only and both-directions keep their existing routing. Other columnwise-only 1D
+      // and non-bf16 fall back to quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
+                                  (cols % 32 == 0) &&
+                                  (output_tensor->has_data() ||
+                                   (output_tensor->has_columnwise_data() &&
+                                    (quant_config_cpp.nvfp4_2d_quantization || row_scaled_nvfp4)));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {

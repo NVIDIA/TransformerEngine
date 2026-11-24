@@ -1345,6 +1345,59 @@ void performTestRowScaledTranspose(const std::vector<size_t>& shape) {
     }
 }
 
+// Columnwise-only row-scaled NVFP4 cast must reproduce the columnwise half of
+// the both-directions cast bitwise.
+template <typename InputType>
+void performTestRowScaledColumnwiseOnly(const std::vector<size_t>& shape) {
+    using namespace test;
+
+    const DType itype = TypeInfo<InputType>::dtype;
+    const DType otype = DType::kFloat4E2M1;
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    Tensor output("output", shape, otype, /*rowwise=*/false, /*columnwise=*/true,
+                  NVTE_NVFP4_1D_SCALING);
+    output.set_row_scaled_nvfp4(true);
+    Tensor ref("ref", shape, otype, /*rowwise=*/true, /*columnwise=*/true,
+               NVTE_NVFP4_1D_SCALING);
+    ref.set_row_scaled_nvfp4(true);
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_stochastic_rounding(false);
+    nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+    nvte_quantize_v2(input.data(), ref.data(), quant_config, 0);
+
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << cudaGetErrorString(cudaGetLastError());
+
+    output.to_cpu();
+    ref.to_cpu();
+
+    const size_t col_mismatches = count_nvfp4_code_mismatches(
+        output.columnwise_cpu_dptr<fp4e2m1>(), ref.columnwise_cpu_dptr<fp4e2m1>(),
+        static_cast<int>(cols), static_cast<int>(rows));
+    ASSERT_EQ(col_mismatches, 0u) << "columnwise FP4 mismatch " << col_mismatches << "/"
+                                  << (cols * rows);
+
+    const std::array<size_t, 4> sd_t = get_scale_tensor_dims(cols, rows, 1, 16);
+    size_t scale_mismatches = 0;
+    compare_scaling_factors<fp8e4m3>("columnwise_scales",
+                                     output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     ref.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     sd_t[0], sd_t[1], sd_t[3], scale_mismatches);
+    ASSERT_EQ(scale_mismatches, 0u);
+
+    const float* col_amax = output.cpu_columnwise_amax_ptr<float>();
+    const float* ref_col_amax = ref.cpu_columnwise_amax_ptr<float>();
+    for (size_t j = 0; j < cols; ++j) {
+        ASSERT_EQ(col_amax[j], ref_col_amax[j]) << "columnwise amax mismatch at col " << j;
+    }
+}
+
 // Row-scaled transpose requires 128-aligned rows and cols (bf16 only).
 std::vector<std::vector<size_t>> row_scaled_transpose_dims = {
     {128, 128},
@@ -1560,6 +1613,13 @@ TEST_P(CastNVFP4RowScaledTransposeTestSuite, MatchesRowScaledReference) {
         GTEST_SKIP();
     }
     performTestRowScaledTranspose<bf16>(GetParam());
+}
+
+TEST_P(CastNVFP4RowScaledTransposeTestSuite, ColumnwiseOnlyMatchesBothDirections) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTestRowScaledColumnwiseOnly<bf16>(GetParam());
 }
 
 INSTANTIATE_TEST_SUITE_P(

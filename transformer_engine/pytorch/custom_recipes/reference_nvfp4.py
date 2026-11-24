@@ -473,9 +473,6 @@ class NVFP4QuantizerRef(Quantizer):
         scale_dtype = DType.cast(scale_dtype)
         if scale_dtype not in (DType.kFloat8E4M3, DType.kFloat8UE5M3):
             raise ValueError("scale_dtype must be DType.kFloat8E4M3 or DType.kFloat8UE5M3.")
-        if row_scaled_nvfp4:
-            if not rowwise:
-                raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
         if nvfp4_use_4over6:
             if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
                 raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")

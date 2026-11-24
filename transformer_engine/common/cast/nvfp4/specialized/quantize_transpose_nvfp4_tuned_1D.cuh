@@ -402,7 +402,7 @@ __device__ __forceinline__ void rowwise_scaling(
   }
 }
 
-template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_ROWWISE,
           bool RETURN_TRANSPOSE, bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
@@ -629,9 +629,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       __syncthreads();
 
       // NVFP4 Quantization
-      rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
-          sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
-          amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
+      if constexpr (RETURN_ROWWISE) {
+        rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+            sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
+            amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
+      }
 
       if constexpr (RETURN_TRANSPOSE) {
         colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
@@ -651,9 +653,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
         const int global_offset_Y_tr = block_offset_Y_tr + stage_offset_X;
         const int global_offset_X_tr = block_offset_X_tr + stage_offset_Y;
 
-        ptx::cp_async_bulk_tensor_2d_shared_to_global(
-            reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X,
-            global_offset_Y, reinterpret_cast<uint64_t *>(&sOut[buff_out]));
+        if constexpr (RETURN_ROWWISE) {
+          ptx::cp_async_bulk_tensor_2d_shared_to_global(
+              reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X,
+              global_offset_Y, reinterpret_cast<uint64_t *>(&sOut[buff_out]));
+        }
 
         if constexpr (RETURN_TRANSPOSE) {
           ptx::cp_async_bulk_tensor_2d_shared_to_global(
@@ -673,7 +677,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     // Vectorized store of scaling factors (S2G)
     {
       // Rowwise
-      {
+      if constexpr (RETURN_ROWWISE) {
         using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_X>;
         // number of scales in X dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
@@ -749,6 +753,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   // If transposed output is allocated, return the transposed data
   // Otherwise, it's not necesary to return the transposed data.
   const bool return_transpose = output->has_columnwise_data();
+  const bool return_rowwise = output->has_data();
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
@@ -756,11 +761,15 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
-  NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
-             "Row-scaled NVFP4 does not support disabling second-level scaling.");
+  NVTE_CHECK(return_rowwise || (row_scaled_nvfp4 && return_transpose),
+             "NVFP4 output tensor must be allocated; columnwise-only output is only supported "
+             "with row-scaled NVFP4.");
+  if (return_rowwise) {
+    NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
+    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+    NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
+               "Row-scaled NVFP4 does not support disabling second-level scaling.");
+  }
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
@@ -783,7 +792,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   const dim3 grid(blocks_X, blocks_Y);
   const int block_size = THREADS_NUM;
 
-  const size_t scale_stride = output->scale_inv.shape[1];
+  const size_t scale_stride = return_rowwise ? output->scale_inv.shape[1] : 0;
   const size_t scale_stride_transpose =
       return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
@@ -814,8 +823,10 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
                        sizeof(IType) * 8);
 
-  create_2D_tensor_map(tensor_map_output, output->data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
-                       4);
+  if (return_rowwise) {
+    create_2D_tensor_map(tensor_map_output, output->data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols,
+                         0, 4);
+  }
   if (return_transpose) {
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
                          BUFF_DIM_X, BUFF_DIM_Y, rows, 0, 4);
@@ -853,19 +864,21 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
           use_fast_math, USE_FAST_MATH,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               row_scaled_nvfp4, ROW_SCALED_NVFP4,
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                auto kernel =
-                    quantize_transpose_nvfp4_tuned_1D_kernel<ScaleType, USE_STOCHASTIC_ROUNDING,
-                                                             USE_FAST_MATH, RETURN_TRANSPOSE,
-                                                             ROW_SCALED_NVFP4>;
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  return_rowwise, RETURN_ROWWISE,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+                    auto kernel = quantize_transpose_nvfp4_tuned_1D_kernel<
+                        ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_ROWWISE,
+                        RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
 
-                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     dshmem_size);
-                kernel<<<grid, block_size, dshmem_size, stream>>>(
-                    tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                    scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-                    scale_stride, scale_stride_transpose, rng_state);
-              }););););
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         dshmem_size);
+                    kernel<<<grid, block_size, dshmem_size, stream>>>(
+                        tensor_map_input, tensor_map_output, tensor_map_output_transpose,
+                        scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr,
+                        amax_colwise_ptr, rows, cols, scale_stride, scale_stride_transpose,
+                        rng_state);
+                  });););););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

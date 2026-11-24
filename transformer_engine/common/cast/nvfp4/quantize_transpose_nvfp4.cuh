@@ -502,10 +502,12 @@ namespace row_scaled {
 
 inline void compute_amaxes(const Tensor &input, const Tensor *noop, Tensor *output,
                            cudaStream_t stream) {
-  if (output->has_columnwise_data() && fused_amax_supported(input, output)) {
+  if (output->has_data() && output->has_columnwise_data() && fused_amax_supported(input, output)) {
     compute_fused_amax(input, noop, output, stream);
   } else {
-    compute_rowwise_amax(input, noop, output, stream);
+    if (output->has_data()) {
+      compute_rowwise_amax(input, noop, output, stream);
+    }
     if (output->has_columnwise_data()) {
       compute_columnwise_amax(input, noop, output, stream);
     }

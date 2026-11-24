@@ -251,8 +251,6 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         return_rowwise = True
         return_transpose = True
     elif quantize_mode == "columnwise_only":
-        if row_scaled:
-            pytest.skip("Row-scaled NVFP4 quantization requires rowwise usage")
         return_rowwise = False
         return_transpose = True
     else:
