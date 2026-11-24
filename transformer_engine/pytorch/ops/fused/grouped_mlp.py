@@ -1781,8 +1781,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             if use_nvfp4:
                 # The cuDNN NVFP4 kernel only accepts FP32 router probability scales.
                 fc1_prob_tensor = fc1_prob_tensor.to(dtype=torch.float32)
-        if fc1_prob_tensor is not None and not use_natural_layouts:
-            fc1_prob_tensor = fc1_prob_tensor.reshape(-1, 1, 1)
+        if fc1_prob_tensor is not None:
+            fc1_prob_tensor = fc1_prob_tensor.reshape((-1,) if use_natural_layouts else (-1, 1, 1))
         if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
             # global scale factors, so alpha supplies the product of the two
