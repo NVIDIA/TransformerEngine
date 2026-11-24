@@ -68,8 +68,7 @@ def _run_gemm(rows_per_expert, rows_alignment, mxfp8, tail_clusters, device_layo
         if num_clusters == 0:
             continue
         name = (
-            f"test_ep_gemm_{rows}_{rows_alignment}_{int(mxfp8)}_{num_clusters}"
-            f"_{int(device_layout)}"
+            f"test_ep_gemm_{rows}_{rows_alignment}_{int(mxfp8)}_{num_clusters}_{int(device_layout)}"
         )
         assert dispatch_gemm.get_ep_dispatch_gemm_function(
             name,
