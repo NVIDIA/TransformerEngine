@@ -533,6 +533,17 @@ def _train(opts):
     if opts.first_last_layers_bf16 and opts.fp8:
         quantization_modes.append(te.module.base.UserBufferQuantizationMode.NONE)
 
+    # Each cuBLASMp communicator takes several seconds to create, so only create the ones the
+    # layer uses. te.TransformerLayer uses all of them.
+    ub_names = None
+    if opts.use_cublasmp:
+        if opts.layer_type in [te.Linear, te.LayerNormLinear]:
+            ub_names = [kwargs["ub_name"]]
+        elif opts.layer_type == te.LayerNormMLP:
+            ub_names = ["fc1", "fc2"]
+        elif opts.layer_type == te.MultiheadAttention:
+            ub_names = ["qkv", "proj"]
+
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
         opts.tp,
@@ -541,6 +552,7 @@ def _train(opts):
         bootstrap_backend=opts.bootstrap_backend,
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
         with_cublasmp=opts.use_cublasmp,
+        ub_names=ub_names,
     )
 
     with te.quantized_model_init(enabled=opts.fp8_init):
