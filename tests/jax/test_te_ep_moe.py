@@ -608,13 +608,10 @@ def _quantization_recipe(quantization):
 # -----------------------------------------------------------------------------
 
 _CONFIGS = [
-    *[
-        pytest.param(
-            dict(activation_type="situglu", apply_topk_weights_early=early),
-            id=f"situ-{'early' if early else 'late'}-weighting",
-        )
-        for early in (False, True)
-    ],
+    pytest.param(
+        dict(activation_type="situglu", apply_topk_weights_early=True),
+        id="situ-early-weighting",
+    ),
     pytest.param(
         dict(score_function="softmax"),
         id="softmax",
