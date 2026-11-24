@@ -66,6 +66,33 @@
         "ESM-2 is identified as a protein language model and the BioNeMo Recipes acceleration skill is followed or pointed to.",
         "The Transformer Engine module is not built from the Llama or Mixtral tutorial."
       ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-007",
+      "prompt": "Convert DeepSeek-V3 to Transformer Engine.",
+      "expected_output": "A te_deepseek_v3.py TE implementation that replaces the multi-head latent attention (MLA) and MoE blocks separately, fuses each norm with the projections that read it through LayerNormLinear, runs attention on DotProductAttention with HF's softmax scale, runs the 256 routed experts through GroupedLinear, and maps the FP8 checkpoint's dequantized weights.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "assertions": [
+        "The attention is replaced at the level of the attention block, not forced into MultiheadAttention or TransformerLayer: the input norm is fused with q_a_proj and kv_a_proj_with_mqa, and q_a_layernorm and kv_a_layernorm with q_b_proj and kv_b_proj, through LayerNormLinear; the core runs on DotProductAttention with a query/key head size of 192 and a value head size of 128.",
+        "DotProductAttention gets HF's softmax scale, which includes YaRN's mscale correction (about 1.87 times the default 1/sqrt(192)), and RoPE keeps HF's YaRN-scaled rotary embedding on the 64-dim RoPE part of each head only.",
+        "The first three layers (first_k_dense_replace) use a dense MLP through LayerNormMLP and the rest use the MoE block, built by one layer class.",
+        "The 256 routed experts run through GroupedLinear in blocks of at most 64, the shared expert runs on the same normalized input, and the router matches HF's: sigmoid scores in float32, e_score_correction_bias used only to choose experts, top-8 within the best 4 of 8 groups, normalized weights scaled by routed_scaling_factor 2.5, outside quantization; kept as HF code or done with fused_topk_with_score_function and checked against HF.",
+        "The checkpoint's FP8 weights are dequantized with their 128x128 block scales (weight_scale_inv) before mapping, the multi-token-prediction layer 61 is skipped as HF skips it, and every other weight is mapped to the correct Transformer Engine parameter, with none missing or swapped."
+      ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-008",
+      "prompt": "Convert GLM-5 to Transformer Engine for fine-tuning.",
+      "expected_output": "A te_glm_moe_dsa.py TE implementation that keeps the DeepSeek Sparse Attention indexer and sparse attention as HF code, which TE has no module for, replaces the dense MLP and MoE blocks with TE modules, and maps the checkpoint weights.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "assertions": [
+        "The DeepSeek Sparse Attention (DSA) indexer and the top-k sparse attention stay HF code and the report says why; they are not replaced by dense DotProductAttention, which matches HF only for sequences of at most index_topk (2048) tokens.",
+        "Any TE attention module uses the attention's real head sizes, 256 for query/key (qk_nope_head_dim 192 plus qk_rope_head_dim 64) and 256 for value, not config.head_dim, which is 64, the RoPE part only.",
+        "The decoder layer keeps HF's interface: it accepts prev_topk_indices and returns the hidden states together with the top-k indices that the model loop passes to the next layer.",
+        "The first three layers use a dense MLP through LayerNormMLP and the rest use the MoE block; the 256 routed experts run through GroupedLinear in blocks of at most 64, with the shared expert, and the router matches HF's sigmoid scores, e_score_correction_bias for choosing experts only, normalized top-8 weights and routed_scaling_factor 2.5.",
+        "Every checkpoint weight, including the indexer's weights (weights_proj kept in float32) and the stacked expert tensors, is mapped to the correct Transformer Engine parameter or loaded into the HF code that stays, the multi-token-prediction layer 78 is skipped as HF skips it, and none is missing or swapped.",
+        "The TE implementation is compared with the HF model on sequences longer than 2048 tokens, so that the sparse attention path is exercised, in slices of layers covering a dense and an MoE layer."
+      ]
     }
   ]
 }
