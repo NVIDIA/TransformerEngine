@@ -87,7 +87,7 @@ _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
     raises=NotImplementedError,
     strict=True,
     reason=(
-        "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "
+        "Hopper and SM 12.x do not yet support columnwise-only per-tensor FP8 quantization; "
         "tracked by NVIDIA/TransformerEngine#3158"
     ),
 )
@@ -993,6 +993,7 @@ class TestHybridQuantize:
         assert isinstance(row_storage, (Float8TensorStorage, Float8Tensor))
         assert isinstance(col_storage, (NVFP4TensorStorage, NVFP4Tensor))
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_sub_storage_types_reversed(self, input_tensor):
         hq = _make_hybrid_quantizer_fp4_row_fp8_col()
         result = hq.quantize(input_tensor)
@@ -1046,6 +1047,7 @@ class TestHybridDequantize:
             dequantized.float(), input_tensor.float(), rtol=0.125, atol=0.0675
         )
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_dequantize_reversed_close_to_original(self, input_tensor):
         hq = _make_hybrid_quantizer_fp4_row_fp8_col()
         result = hq.quantize(input_tensor)
@@ -3342,6 +3344,7 @@ class TestHybridReversedDirection:
         assert not torch.isnan(out).any(), "Output contains NaN"
         assert not torch.isinf(out).any(), "Output contains Inf"
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_nvfp4_row_fp8_col_full_fwd_bwd(self):
         """Full fwd+bwd with NVFP4 rowwise (fprop) + FP8 columnwise (backward)."""
         torch.manual_seed(99)
@@ -3808,6 +3811,7 @@ class TestHybridCpuOffloadPushPop:
         torch.testing.assert_close(reloaded.dequantize(), expected, rtol=0.0, atol=0.0)
 
     @requires_fp8_and_nvfp4
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_push_pop_with_columnwise_only(self):
         """Rowwise sub-storage dropped pre-push — roundtrip still works.
 
@@ -4925,6 +4929,7 @@ class TestHybridGroupedLinearValidation:
             model(tensor, m_splits)
 
     @requires_fp8_and_nvfp4
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_hybrid_split_quantize_honors_rowwise_dequantized_source(self):
         """NVFP4 column data must derive from the actual grouped row result."""
         torch.manual_seed(3598)
