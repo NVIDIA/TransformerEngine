@@ -1120,12 +1120,10 @@ def _ffn_fwd_per_shard(
             activation_inputs.astype(jnp.float32), activations, act_params=act_params
         ).data
         intermediate = jnp.where(active[:, None], intermediate.astype(gate_proj_out.dtype), 0)
-    if apply_topk_weights_early and not use_cudnn_jax_fusion:
-        # Fold the per-token combine weights into the FFN intermediate;
-        # the downstream wo GEMM is linear so this is equivalent to the
-        # late-weighting path. Grouped GEMM skips overallocation tail padding automatically.
-        # Padding between groups is padded with zeros by NCCL EP.
-        intermediate = intermediate * recv_w_flat[:, None].astype(intermediate.dtype)
+        if apply_topk_weights_early:
+            # Fold per-token combine weights into the FFN intermediate; wo is linear.
+            w_b = jnp.where(active[:, None], recv_w_flat[:, None].astype(intermediate.dtype), 0)
+            intermediate = intermediate * w_b
 
     if not use_cudnn_jax_fusion:
         casted_intermediate = tex.grouped_quantize(
@@ -1293,12 +1291,11 @@ def _ffn_bwd_per_shard(
         )
         d_intermediate = jnp.where(active[:, None], d_intermediate, 0)
         if apply_topk_weights_early:
-            # intermediate' = intermediate * w.
-            # Masking is not required as grouped GEMMs consume only group-size rows.
-            w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
+            w_b = jnp.where(active[:, None], recv_w_flat[:, None].astype(d_intermediate.dtype), 0)
             intermediate_unweighted = _jax_act_lu(
                 activation_inputs.astype(jnp.float32), activations, act_params=act_params
             ).data.astype(gate_proj_out.dtype)
+            intermediate_unweighted = jnp.where(active[:, None], intermediate_unweighted, 0)
             d_recv_w_from_intermediate = jnp.sum(
                 d_intermediate * intermediate_unweighted,
                 axis=-1,
@@ -1308,7 +1305,7 @@ def _ffn_bwd_per_shard(
             d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
         d_activation, _ = _jax_quantize_dact_dbias(
-            jnp.where(active[:, None], d_intermediate, 0),
+            d_intermediate,
             activation_inputs,
             activations,
             is_dbias=False,
@@ -2259,13 +2256,13 @@ def moe(
     ----------
     activation_type : str
         Gate activation (default ``"silu"``), or ``"situglu"`` for SiTU-GLU.
-        Eligible MXFP8 SiTU configurations use cuDNN fusion. Otherwise, SiTU
-        uses FP32 JAX operations and ``jax.vjp`` between the grouped GEMMs,
-        keeping the projection dtype at the output. Device expert counts mask
-        inactive receive capacity in forward and backward, including non-finite
-        inactive values. MXFP8 quantization remains separate in the fallback.
-        Unfused GLU forward and backward use FP32 intermediates and cast their
-        results to the projection dtype, matching the native PyTorch activations.
+        Eligible MXFP8 SiTU configurations use cuDNN fusion. Unfused GLU
+        forward and backward use FP32 JAX intermediates and ``jax.vjp``
+        between the grouped GEMMs, casting results back to the projection
+        dtype to match TE's native activation kernels. Device expert counts
+        mask inactive receive capacity in forward and backward, including
+        non-finite inactive values. MXFP8 quantization remains separate in the
+        fallback.
     activation_params : Optional[dict]
         Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
         (default 25.0). Values must be finite and positive. Other activations
