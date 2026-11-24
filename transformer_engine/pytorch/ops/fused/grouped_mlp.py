@@ -2708,6 +2708,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
         fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
+        # The FC2 dgrad kernel is the last user of the saved activation input
+        # and of the row-wise FC2 grad output views passed to it. The saved
+        # activation input is a view of the FC1 kernel's output, which holds
+        # the same memory.
+        del fc2_dactivation_kwargs, fc2_dy_data, fc2_dy_scales
+        clear_tensor_data(activation_in, activation_in._base)
 
         if use_nvfp4:
             fc1_dy_bf16 = fc2_dgrad_kernel_out["d_row_tensor"]
@@ -2886,18 +2892,30 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             use_dense_single_group=use_dense_single_group,
         )
 
-        # Clear FC2 input tensor if possible
-        if grouped_fc2_x is not None and not (
+        # Clear FC2 input and grad output tensors if possible
+        if not (
             fc2_ctx.weight_requires_grad
             and fc2_op.wgrad_store is not None
             and fc2_op.wgrad_store.delay_wgrad_compute()
         ):
-            clear_tensor_data(
-                grouped_fc2_x.rowwise_data,
-                grouped_fc2_x.columnwise_data,
-                grouped_fc2_x.scale_inv,
-                grouped_fc2_x.columnwise_scale_inv,
-            )
+            if grouped_fc2_x is not None:
+                clear_tensor_data(
+                    grouped_fc2_x.rowwise_data,
+                    grouped_fc2_x.columnwise_data,
+                    grouped_fc2_x.scale_inv,
+                    grouped_fc2_x.columnwise_scale_inv,
+                )
+            if isinstance(grad_output, GroupedTensor):
+                # The buffers are shared with the caller's grad output: drop
+                # this backward's references only.
+                clear_tensor_data(grouped_fc2_dy)
+            else:
+                clear_tensor_data(
+                    grouped_fc2_dy.rowwise_data,
+                    grouped_fc2_dy.columnwise_data,
+                    grouped_fc2_dy.scale_inv,
+                    grouped_fc2_dy.columnwise_scale_inv,
+                )
 
         # FC1 dgrad GEMM
         grad_input = None
