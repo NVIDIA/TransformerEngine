@@ -4233,7 +4233,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(_GroupedMLPBf16Base):
 
     def activation_options(self) -> dict[str, Any]:
         act_func, dact_func, linear_offset = _bf16_glu_act_funcs(self.basic_ops[1])
-        return dict(act_func=act_func, dact_func=dact_func, linear_offset=linear_offset)
+        return {"act_func": act_func, "dact_func": dact_func, "linear_offset": linear_offset}
 
     def activation_forward(self, x, offsets, prob, weights, options, requires_grad, stream):
         fc1, _, _ = self.basic_ops
@@ -4339,11 +4339,11 @@ class GroupedMLP_CuTeGEMMUnaryBf16(_GroupedMLPBf16Base):
 
     def activation_options(self) -> dict[str, Any]:
         activation = self.basic_ops[1]
-        return dict(
-            act_input=activation.bf16_act_input,
-            tanh_mode=activation.bf16_tanh_mode,
-            tanh_clamp_scale=getattr(activation, "tanh_clamp_scale", None),
-        )
+        return {
+            "act_input": activation.bf16_act_input,
+            "tanh_mode": activation.bf16_tanh_mode,
+            "tanh_clamp_scale": getattr(activation, "tanh_clamp_scale", None),
+        }
 
     def activation_forward(self, x, offsets, prob, weights, options, requires_grad, stream):
         fc1, _, _ = self.basic_ops
