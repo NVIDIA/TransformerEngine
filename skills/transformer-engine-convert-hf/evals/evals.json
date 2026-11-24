@@ -4,16 +4,16 @@
     {
       "id": "transformer-engine-convert-hf-001",
       "prompt": "Convert Qwen3.5-35B-A3B to Transformer Engine.",
-      "expected_output": "A te_qwen3_5_moe.py TE implementation that replaces the attention and MoE blocks separately: the input norm of each attention layer fused with its projections through LayerNormLinear, the gated attention core on DotProductAttention, the Gated DeltaNet core on GatedDeltaNetAttention where the installed TE provides it, the 256 experts in GroupedLinear blocks of at most 64, a strict checkpoint loader, and a BF16 check against Hugging Face.",
+      "expected_output": "A Qwen3.5 MoE implementation using compatible TE attention and grouped expert operations, preserving HF behavior at any retained boundary, loading the checkpoint strictly, and checking the replacements and the integrated BF16 path against HF.",
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
-        "The attention and MoE blocks are replaced separately, not through TransformerLayer or MultiheadAttention, and the input norm of each attention layer is fused with all the projections that read it through LayerNormLinear.",
-        "The gated attention core runs on DotProductAttention, and the Gated DeltaNet core is matched to te.GatedDeltaNetAttention: it runs on it, or, if the installed TE does not export it, the implementation keeps HF code, says so, and gives the input layout that module needs (Q, K and V contiguous in BF16, Q and K repeated to the number of value heads, g and beta in float32).",
-        "The norms that multiply by 1 + weight use zero_centered_gamma=True, chosen from the model's norm definition rather than by trial.",
-        "The 256 experts run through GroupedLinear in blocks of at most 64 experts each.",
-        "Under MXFP8, each expert's rows are padded to a multiple of 128, and the router and the LM head stay out of quantization.",
-        "Every checkpoint weight of the decoder layers, including the stacked expert tensors and the shared expert, is mapped to the correct Transformer Engine parameter, and the loader fails on a weight left over on either side.",
-        "The implementation comes with a check that compares its BF16 output with Hugging Face's BF16 output on the same input."
+        "The attention and MoE blocks are considered independently. The input norm is fused with the projections that read it where this preserves all consumers. A retained mixer preserves its required inputs and state.",
+        "For the supported configuration, gated attention uses DotProductAttention and Gated DeltaNet uses te.GatedDeltaNetAttention with backend-compatible inputs. A retained HF core identifies the missing export or a specific unsupported input, state, or backend behavior using installed code, matching documentation, or a reproducing check.",
+        "The replacement TE norms that implement HF's 1 + weight definition use zero_centered_gamma=True.",
+        "The 256 experts use grouped projections sized for the selected backend. If the selected kernel has a 64-expert limit, no group exceeds it.",
+        "If MXFP8 execution is requested, the expert path meets the selected kernel's padding and activation-layout requirements, and the router and LM head stay outside the expert FP8 recipe.",
+        "Every required source weight, including the stacked expert tensors and the shared expert, is loaded into its matching HF parameter or TE parameter slice. The loader detects a missing required source or destination slice.",
+        "The implementation provides a BF16 forward check for each changed region against the same HF computation after weight loading, then an integrated output check. A training validation compares loss and a replaced-parameter gradient or update. Report which checks actually ran."
       ]
     },
     {
