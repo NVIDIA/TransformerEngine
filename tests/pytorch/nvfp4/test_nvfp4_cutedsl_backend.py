@@ -253,14 +253,20 @@ def test_cast_noop_flag(flag_is_set):
     device_compute_capability()[0] != 10, reason="CuTeDSL stochastic rounding needs SM 10.x"
 )
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
-def test_stochastic_rounding(direction):
+@pytest.mark.parametrize("kernel", ["g2r", "g2s-unaligned", "g2s-fastmath"])
+def test_stochastic_rounding(kernel, direction, monkeypatch):
     """Every 16-element block holds one exact 6.0, which makes the encode coefficient exactly 1.0,
     and the other elements are 2.75: 3/4 of the way from 2 to 3 on the E2M1 grid. Correct
     stochastic rounding sends them to 3 with probability 0.75 and is deterministic for a fixed
-    seed."""
+    seed. The g2s cases force the g2s kernel with a 16-byte-aligned input or fast math."""
     rowwise, columnwise = direction
+    fast_math = kernel == "g2s-fastmath"
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "1" if fast_math else "0")
     shape = (256, 1024)
-    x = torch.full(shape, 2.75, dtype=torch.bfloat16, device="cuda")
+    offset = 8 if kernel == "g2s-unaligned" else 0
+    x = torch.full((shape[0] * shape[1] + offset,), 2.75, dtype=torch.bfloat16, device="cuda")
+    x = x[offset:].view(shape)
+    assert x.data_ptr() % 32 == 2 * offset
     x[::NVFP4_BLOCK_SIZE, :] = 6.0
     x[:, ::NVFP4_BLOCK_SIZE] = 6.0
     probe = x == 2.75
@@ -272,7 +278,7 @@ def test_stochastic_rounding(direction):
         out_again = extract_quantized_output(quantize(quantizer, x), shape, rowwise, columnwise)
     finally:
         set_cutedsl_backend(False)
-    key = get_cfg_key(True, False, False, columnwise)
+    key = get_cfg_key(True, fast_math, False, columnwise)
     assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, key
 
     masks = {"rowwise data": probe}
