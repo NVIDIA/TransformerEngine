@@ -3,11 +3,14 @@
 # See LICENSE for license information.
 """Multi-process PyTorch EP tests, launched via torchrun (one process per GPU)."""
 
-from contextlib import nullcontext
 from dataclasses import replace
+import contextlib
+from contextlib import nullcontext
+import itertools
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 import torch
@@ -41,9 +44,24 @@ OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
 # Fused prepare+dispatch (caller-supplied recv buffers) is opt-in on the C++ side; the tests
 # that exercise it only run when the same env var is set so they match the active dispatch path.
 FUSED_COUNT = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
+# Overlapped MoE ops (ep_gemm.h): only the tests marked _overlap_test run, with NVTE_EP_MXFP8_PASS.
+OVERLAP = os.environ.get("NVTE_EP_OVERLAP", "0") == "1"
+if not OVERLAP:
+    # The other passes keep the MoE ops unfused, which the fuser rejects while the overlap is on.
+    os.environ.pop("NVTE_MOE_OVERLAP", None)
+# Per-expert alignment of the overlap tests: 256, 128 or 64 (BF16 only; MXFP8 cases skip).
+OVERLAP_ALIGNMENT = int(os.environ.get("NVTE_EP_OVERLAP_ALIGNMENT", "256"))
+# Below alignment 256 the unfused ops do not fuse into the grouped MLP, so single results of the
+# fused op may round to other values than theirs.
+UNFUSED_MLP_REFERENCE = OVERLAP_ALIGNMENT % 256 != 0
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
+
+# SM 10.7 has no BF16 grouped MLP fusion, so there the BF16 unfused ops never fuse into it.
+UNFUSED_BF16_MLP_REFERENCE = UNFUSED_MLP_REFERENCE or (
+    torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 7)
+)
 
 NUM_LOCAL_EXPERTS = 2
 # MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0. Defaults
@@ -52,6 +70,12 @@ NUM_LOCAL_EXPERTS = 2
 HIDDEN_DIM = int(os.environ.get("NVTE_EP_HIDDEN_DIM", "512"))
 TOP_K = 2
 TOKENS_PER_RANK = int(os.environ.get("NVTE_EP_TOKENS_PER_RANK", "32"))
+OVERLAP_COMM_SMS = 16  # SMs the dispatch keeps; the overlapped GEMM runs on the rest
+# SMs of the forward dispatch, forward combine, backward dispatch and backward combine
+# (NVTE_EP_COMM_SMS=12,20,24,16); 0 inherits as ep_bootstrap documents.
+COMM_SMS = tuple(int(sms) for sms in os.environ.get("NVTE_EP_COMM_SMS", "0,0,0,0").split(","))
+if len(COMM_SMS) != 4:
+    raise ValueError(f"NVTE_EP_COMM_SMS needs 4 comma-separated counts, got {COMM_SMS}")
 
 
 def _zero_copy_test_include(fn):
@@ -82,6 +106,26 @@ def _mxfp8_align_test(fn):
     """Mark a test that dispatches with alignment=256; runs only in the MXFP8 pass."""
     fn._mxfp8_align_test = True
     return fn
+
+
+def _overlap_test(fn):
+    """Mark a test of the overlapped MoE ops; it runs only in the overlap pass."""
+    fn._overlap_test = True
+    return fn
+
+
+def _mxfp8_overlap_min_alignment() -> int:
+    """Smallest expert alignment of FusedMoE under MXFP8: SM 10.7 has no MXFP8 tail tiles."""
+    return 256 if torch.cuda.get_device_capability() == (10, 7) else 128
+
+
+def _mxfp8_overlap() -> bool:
+    """Whether the overlap tests run their MXFP8 cases: shapes and alignment FusedMoE takes."""
+    return (
+        HIDDEN_DIM % 512 == 0
+        and TOKENS_PER_RANK % 32 == 0
+        and OVERLAP_ALIGNMENT >= _mxfp8_overlap_min_alignment()
+    )
 
 
 class _StageToSymm(torch.autograd.Function):
@@ -126,6 +170,22 @@ def _build_ep_group():
     world_pg = dist.distributed_c10d._get_default_group()
     ranks = list(range(world_pg.size()))
     return dist.new_group(ranks=ranks, backend="nccl")
+
+
+def _gate_up_rows(t):
+    """Per-expert FC1 rows [experts, 2 * ffn, ...] of the 32-wide interleaved GLU layout in the
+    gate-then-up layout (glu_interleave_size=None)."""
+    return t.reshape(t.shape[0], -1, 2, 32, *t.shape[2:]).transpose(1, 2).reshape(t.shape)
+
+
+def _assert_close_in_norm(actual, expected, rtol):
+    """``actual`` is within ``rtol`` of ``expected`` in norm, per expert of a grouped weight."""
+    rows = expected.shape[0] if expected.dim() == 3 else 1
+    actual = actual.float().reshape(rows, -1)
+    expected = expected.float().reshape(rows, -1)
+    err, ref = (actual - expected).norm(dim=1), expected.norm(dim=1)
+    if not bool((err <= rtol * ref).all()):
+        raise AssertionError(f"error norms {err.tolist()} exceed {rtol} x {ref.tolist()}")
 
 
 def _make_identity_inputs(rank, ep_size, device="cuda"):
@@ -218,8 +278,9 @@ def _make_cfg() -> _Cfg:
     cfg.recv_capacity_per_rank = NUM_LOCAL_EXPERTS * max(T * cfg.ep_size * TOP_K, 16) * overconc * 2
     if OVERFLOW:
         # Undersize recv capacity so identity routing overflows a rank's budget;
-        # HT requires capacity >= max_tokens_per_rank.
-        cfg.recv_capacity_per_rank = TOKENS_PER_RANK
+        # HT requires capacity >= max_tokens_per_rank. Each expert pads to 256 rows, so one slab
+        # fits and the second overflows.
+        cfg.recv_capacity_per_rank = 256 if OVERLAP else TOKENS_PER_RANK
     cfg.device = torch.device("cuda", torch.cuda.current_device())
     return cfg
 
@@ -229,38 +290,57 @@ class _EpTestCase(unittest.TestCase):
 
     cfg: _Cfg
     ep_group: dist.ProcessGroup
+    # Why this pass's EP group could not be created, if so; every test class then skips.
+    bootstrap_skip = None
 
     @classmethod
     def setUpClass(cls):
         # unittest invokes this fixture for each concrete subclass, but EP is process-global.
         if hasattr(_EpTestCase, "cfg"):
+            if _EpTestCase.bootstrap_skip:
+                raise unittest.SkipTest(_EpTestCase.bootstrap_skip)
             return
         if _device_sm() < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
         _EpTestCase.cfg = _make_cfg()
         _EpTestCase.ep_group = _build_ep_group()
-        ep_bootstrap(
-            cls.ep_group,
-            num_experts=cls.cfg.num_experts,
-            max_tokens_per_rank=TOKENS_PER_RANK,
-            hidden_dim=HIDDEN_DIM,
-            num_topk=TOP_K,
-            # Omit recv_capacity_per_rank to select eager mode.
-            recv_capacity_per_rank=None if EAGER else cls.cfg.recv_capacity_per_rank,
-            zero_copy=ZERO_COPY,
-            drop_on_overflow=OVERFLOW,
-        )
+        try:
+            ep_bootstrap(
+                cls.ep_group,
+                num_experts=cls.cfg.num_experts,
+                max_tokens_per_rank=TOKENS_PER_RANK,
+                hidden_dim=HIDDEN_DIM,
+                num_topk=TOP_K,
+                # Omit recv_capacity_per_rank to select eager mode.
+                recv_capacity_per_rank=None if EAGER else cls.cfg.recv_capacity_per_rank,
+                zero_copy=ZERO_COPY,
+                drop_on_overflow=OVERFLOW,
+                max_num_sms=OVERLAP_COMM_SMS if OVERLAP else 0,
+                dispatch_fwd_num_sms=COMM_SMS[0],
+                combine_fwd_num_sms=COMM_SMS[1],
+                dispatch_bwd_num_sms=COMM_SMS[2],
+                combine_bwd_num_sms=COMM_SMS[3],
+            )
+        except RuntimeError as err:
+            # A backward count other than the forward one needs NCCL EP backward budgets.
+            if "built against an NCCL EP with dispatch_bwd_num_sms" not in str(err):
+                raise
+            _EpTestCase.bootstrap_skip = "NCCL EP has no backward SM budgets"
+            raise unittest.SkipTest(_EpTestCase.bootstrap_skip) from err
 
     def setUp(self):
         # alignment=256 MXFP8 tests run only in the dedicated MXFP8 pass; everything else skips
         # there (and the MXFP8 tests skip outside it) since the backend pins one alignment/process.
         is_mxfp8_align = getattr(getattr(self, self._testMethodName), "_mxfp8_align_test", False)
+        is_overlap = getattr(getattr(self, self._testMethodName), "_overlap_test", False)
+        if OVERLAP != is_overlap:
+            self.skipTest("overlapped MoE tests run only in the overlap pass")
         if MXFP8_PASS and not is_mxfp8_align:
             self.skipTest("only alignment=256 MXFP8 tests run in the MXFP8 pass")
         if not MXFP8_PASS and is_mxfp8_align:
             self.skipTest("alignment=256 MXFP8 tests run in the dedicated MXFP8 pass")
-        # MXFP8 quantization requires Blackwell (SM 10.0) or newer.
-        if is_mxfp8_align and torch.cuda.get_device_capability() < (10, 0):
+        # MXFP8 quantization requires Blackwell (SM 10.0) or newer; the BF16 overlap tests do not.
+        if is_mxfp8_align and not is_overlap and torch.cuda.get_device_capability() < (10, 0):
             self.skipTest("MXFP8 EP tests require Blackwell (SM 10.0) or newer")
         # Only the zero-copy-capable tests run in the zero-copy pass.
         if ZERO_COPY and not getattr(
@@ -299,6 +379,14 @@ class _EpTestCase(unittest.TestCase):
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
 
+    def _overlap_config(self, recipe=None):
+        """EpConfig of the overlapped MoE tests; ``recipe`` is the EP transport recipe."""
+        return self._make_config(
+            alignment=OVERLAP_ALIGNMENT,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+
     def _make_buffer_from_config(self, config):
         """Build the NCCL EP buffer that a config describes, recipes included."""
         return EpBuffer(
@@ -334,6 +422,8 @@ class _EpTestCase(unittest.TestCase):
                 "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
                 "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
             )
+        if OVERLAP and OVERLAP_ALIGNMENT < _mxfp8_overlap_min_alignment():
+            self.skipTest("FusedMoE runs MXFP8 with alignment 128 or 256 (256 on SM 10.7)")
 
 
 class TestEP(_EpTestCase):
@@ -376,6 +466,52 @@ class TestEP(_EpTestCase):
         """fp32 per-slot weighting + cast back; matches the upstream combine input."""
         mask = (recv_w != 0).to(torch.float32).unsqueeze(-1)
         return (recv_tokens.float() * recv_w.unsqueeze(-1).float() * mask).to(recv_tokens.dtype)
+
+    def _moe_ops(
+        self,
+        config,
+        buffer,
+        glu_interleave_size=32,
+        accumulate_into_main_grad=False,
+        *,
+        ffn=HIDDEN_DIM,
+        activation=None,
+        fc_kwargs=({}, {}),
+        **linear_kwargs,
+    ):
+        """MoeDispatch, GroupedLinear, ``activation`` (default ScaledSwiGLU), GroupedLinear and
+        MoeCombine over ``buffer``, with the routing channels connected and fixed weights (BF16
+        unless ``linear_kwargs`` change the GroupedLinear settings; ``fc_kwargs`` adds settings
+        of the first and of the second GroupedLinear)."""
+        device = self.cfg.device
+        gen = torch.Generator(device=device).manual_seed(5)
+        linear_kwargs = {
+            "bias": False,
+            "dtype": torch.bfloat16,
+            "single_grouped_weight": True,
+            "split_alignment": OVERLAP_ALIGNMENT,
+            "accumulate_into_main_grad": accumulate_into_main_grad,
+            **linear_kwargs,
+        }
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        fc1 = te_ops.GroupedLinear(
+            NUM_LOCAL_EXPERTS, HIDDEN_DIM, 2 * ffn, device=device, **linear_kwargs, **fc_kwargs[0]
+        )
+        fc2 = te_ops.GroupedLinear(
+            NUM_LOCAL_EXPERTS, ffn, HIDDEN_DIM, device=device, **linear_kwargs, **fc_kwargs[1]
+        )
+        act = activation or te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        combine = te_ops.MoeCombine(config, buffer)
+        with torch.no_grad():
+            for fc in (fc1, fc2):
+                for w in fc.parameters():
+                    w.copy_((torch.rand(w.shape, device=device, generator=gen) - 0.5) * 0.1)
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        fc1.set_extra_input_channel(0, "tokens_per_expert")
+        act.set_extra_input_channel(0, "routing_weights")
+        fc2.set_extra_input_channel(0, "tokens_per_expert")
+        return dispatch, fc1, act, fc2, combine
 
     def _moe_step(self, buffer, topk_idx, tokens, w):
         recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, w)
@@ -490,6 +626,645 @@ class TestEP(_EpTestCase):
         _ep_combine_raw(buf, self._weighted(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
+    # Overlapped MoE
+
+    @_eager_test_include
+    @_overflow_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_op(self):
+        """The fused MoE op matches the same ops run unfused: output and every
+        gradient, also when tokens overflow the capacity and are dropped. Skipped where the
+        overlapped GEMMs cannot run."""
+        self._check_moe_overlap_op(None)
+
+    @_eager_test_include
+    @_overflow_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_op_mxfp8(self):
+        """Under MXFP8 with MXFP8 EP transport the fused op matches the unfused ops, with weight
+        scales that differ across blocks in both directions. The fused op dispatches x and dY in
+        place from the EP dispatch window. An unset config transport runs MXFP8."""
+        self._require_mxfp8_shapes()
+        recipe = MXFP8BlockScaling()
+        with mock.patch.object(
+            tex, "ep_dispatch_gemm_fwd", wraps=tex.ep_dispatch_gemm_fwd
+        ) as fwd, mock.patch.object(
+            tex, "ep_combine_gemm_bwd", wraps=tex.ep_combine_gemm_bwd
+        ) as bwd:
+            self._check_moe_overlap_op(recipe, recipe)
+        for call in fwd.call_args_list + bwd.call_args_list:
+            self.assertEqual(call.kwargs["symm_input"], tex.ep_zero_copy_supported())
+        # MXFP8 FusedMoE quantizes the EP transport itself, so an unset config transport fuses.
+        config = self._overlap_config()
+        model = te_ops.Sequential(*self._moe_ops(config, self._make_buffer_from_config(config)))
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        with te.autocast(recipe=recipe):
+            model(tokens, topk_idx, w, topk_idx)
+        self.assertTrue(self._moe_overlap_selected(model))
+
+    @_eager_test_include
+    @_overflow_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_op_variants(self):
+        """The fused op matches the unfused ops, in BF16 and, where the overlap tests run MXFP8, in
+        MXFP8, also: without input and routing-weight gradients (no dispatch backward), with
+        MXFP8 weight parameters, with accumulate_into_main_grad and both GLU layouts, with an FFN
+        size other than the hidden size, and with FP32 weight parameters cast by
+        ``Module.to(torch.bfloat16)``."""
+        # (recipe, _check_moe_overlap_op settings)
+        cases = [
+            (None, {"input_grad": False}),
+            # ffn != hidden, so a transposed weight layout cannot pass.
+            (None, {"ffn": HIDDEN_DIM // 2}),
+            (None, {"main_grad": True, "glu_interleave_size": None}),
+            (None, {"params_to_bf16": True}),
+            (None, {"params_to_bf16": True, "glu_interleave_size": None}),
+            (None, {"params_to_bf16": True, "main_grad": True}),
+            (None, {"frozen": (1,)}),
+            (None, {"frozen": (3,)}),
+            (None, {"frozen": (1, 3), "main_grad": True}),
+        ]
+        if _mxfp8_overlap():
+            recipe = MXFP8BlockScaling()
+            cases += [
+                (recipe, {"input_grad": False}),
+                (recipe, {"params_to_bf16": True}),
+                (recipe, {"quantized_weights": True}),
+                (recipe, {"frozen": (1,)}),
+                (recipe, {"frozen": (3,)}),
+                (recipe, {"frozen": (1, 3), "glu_interleave_size": None}),
+            ]
+            cases += [
+                (recipe, {"quantized_weights": q, "glu_interleave_size": glu, "main_grad": True})
+                for q, glu in itertools.product((False, True), (32, None))
+            ]
+        for recipe, settings in cases:
+            with self.subTest(recipe=recipe, **settings):
+                self._check_moe_overlap_op(recipe, recipe, **settings)
+
+    def _assert_glu_none_matches(self, got, want, got_grads, want_grads):
+        """The outputs and FC1, FC2 weight gradients of the fused op with glu_interleave_size=None
+        match those of the 32-wide layer, the FC1 rows mapped between the layouts."""
+        for g, w in zip(got[:2], want[:2]):
+            self.assertTrue(torch.equal(g, w))
+        if OVERLAP_ALIGNMENT >= 256 and HIDDEN_DIM <= 512:
+            self.assertTrue(torch.equal(got[2], want[2]))
+        else:
+            # The routing-weight gradient adds more than two column tiles, or tail tiles, in
+            # arrival order, which changes the FP32 sums by up to about 1e-6 of the largest one.
+            torch.testing.assert_close(
+                got[2], want[2], rtol=1.3e-6, atol=1e-6 * float(want[2].abs().amax())
+            )
+        fc1_shape = (NUM_LOCAL_EXPERTS, -1, HIDDEN_DIM)
+        # The rows of an expert may arrive in another order, which changes the FP32 wgrad sums by
+        # up to about 1e-6 of the expert's largest one, then by a BF16 rounding.
+        for g, w in (
+            (got_grads[0].reshape(fc1_shape), _gate_up_rows(want_grads[0].reshape(fc1_shape))),
+            (got_grads[1], want_grads[1]),
+        ):
+            for ge, we in zip(g.reshape(NUM_LOCAL_EXPERTS, -1), w.reshape(NUM_LOCAL_EXPERTS, -1)):
+                torch.testing.assert_close(ge, we, rtol=1e-2, atol=1e-6 * float(we.abs().amax()))
+
+    def _check_moe_overlap_op(
+        self, recipe, transport=None, quantized_weights=False, glu_interleave_size=32,
+        main_grad=False, input_grad=True, params_to_bf16=False, ffn=HIDDEN_DIM, frozen=(),
+    ):  # fmt: skip
+        from transformer_engine.pytorch.ops.fused import moe_overlap
+
+        device = self.cfg.device
+        config = self._overlap_config(transport)
+        # Where FusedMoE cannot run, the overlap raises, so there is nothing to compare.
+        if not moe_overlap.FusedMoE.is_supported() or (
+            recipe is not None
+            and not (moe_overlap.GroupedMLP_CuTeGEMMGLU.is_supported() and transport is not None)
+        ):
+            self.skipTest("FusedMoE is not supported here")
+        # SM 10.7 runs the MXFP8 weight gradients into main_grad only above 256 receive rows.
+        if (
+            main_grad
+            and recipe is not None
+            and torch.cuda.get_device_capability() == (10, 7)
+            and config.recv_capacity_per_rank == 256
+        ):
+            self.skipTest(
+                "SM 10.7 MXFP8 main_grad weight gradients need more than 256 receive rows"
+            )
+        with te.quantized_model_init(enabled=quantized_weights, recipe=recipe):
+            buffer = self._make_buffer_from_config(config)
+            ops = self._moe_ops(
+                config,
+                buffer,
+                glu_interleave_size,
+                main_grad,
+                ffn=ffn,
+                dtype=torch.float32 if params_to_bf16 else torch.bfloat16,
+            )
+        gen = torch.Generator(device=device).manual_seed(6)
+        if recipe is not None:
+            # Power-of-two factors per row and column give every scale block its own exponent.
+            with torch.no_grad():
+                for fc in (ops[1], ops[3]):
+                    for w in fc.parameters():
+                        rows = torch.randint(
+                            -3, 4, (*w.shape[:-1], 1), device=device, generator=gen
+                        )
+                        cols = torch.randint(-3, 4, w.shape[-1:], device=device, generator=gen)
+                        values = torch.rand(w.shape, device=device, generator=gen) - 0.5
+                        w.copy_(values * 0.1 * torch.exp2((rows + cols).float()))
+        if glu_interleave_size is None:
+            # The layer of glu_interleave_size=32 with its FC1 rows mapped to gate then up.
+            with torch.no_grad():
+                ops[1].weight.copy_(_gate_up_rows(ops[1].weight * 1))
+        if params_to_bf16:
+            for op in ops:
+                op.to(torch.bfloat16)
+        # The weights of the GroupedLinear ops at these positions (1: FC1, 3: FC2) are frozen.
+        for idx in frozen:
+            ops[idx].weight.requires_grad_(False)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        grad_out = torch.randn(tokens.shape, device=device, generator=gen).to(torch.bfloat16)
+
+        def run(fused):
+            if not fused and params_to_bf16:
+                # The BF16 grouped MLP fusion reads the weight data as stored, so this reference
+                # runs the GroupedLinear ops, which cast it, and not FusedMoE.
+                ctx = contextlib.ExitStack()
+                ctx.enter_context(
+                    mock.patch.object(
+                        moe_overlap.GroupedMLP_CuTeGEMMGLUBf16, "is_supported", return_value=False
+                    )
+                )
+                ctx.enter_context(self._moe_fusion(False))
+            elif not fused:
+                ctx = self._moe_fusion(False)
+            elif input_grad:
+                ctx = contextlib.nullcontext()
+            else:
+                ctx = mock.patch.object(
+                    moe_overlap.tex, "ep_dispatch_gemm_bwd", side_effect=AssertionError("called")
+                )
+            if fused:
+                # The fused op uses its own counts and recv total, not the reference's.
+                buffer.tokens_per_expert_i32.fill_(-1)
+                buffer.total_recv_tokens_i32.fill_(-1)
+                buffer.total_recv_tokens.fill_(-1)
+            # Paged stashing pages the tensors that carry a token count.
+            stashable = []
+            num_tokens = []
+
+            def pack(tensor):
+                if hasattr(tensor, "grouped_tensor_num_tokens"):
+                    stashable.append((tensor.dtype, tensor.shape, tensor.nbytes))
+                    n = tensor.grouped_tensor_num_tokens
+                    num_tokens.append(n.clone() if torch.is_tensor(n) else n)
+                return tensor
+
+            with ctx, te.autocast(
+                enabled=recipe is not None, recipe=recipe
+            ), torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+                model = te_ops.Sequential(*ops)
+                x = tokens.clone().requires_grad_(input_grad)
+                topk_w = w.clone().requires_grad_(input_grad)
+                for p in model.parameters():
+                    p.grad = None
+                    if main_grad:
+                        p.main_grad = torch.full(p.shape, 0.5, dtype=torch.float32, device=device)
+                        p.grad_added_to_main_grad = False
+                y = model(x, topk_idx, topk_w, topk_idx)
+                y.backward(grad_out)
+            torch.cuda.synchronize()
+            fused_ops = self._moe_overlap_selected(model)
+            trained = [p for p in model.parameters() if p.requires_grad]
+            if main_grad:
+                self.assertTrue(all(p.grad_added_to_main_grad for p in trained))
+            grads = [(p.main_grad if main_grad else p.grad).clone() for p in trained]
+            counts = [int(n) for n in num_tokens]
+            return y.detach(), x.grad, topk_w.grad, grads, bool(fused_ops), stashable, counts
+
+        ref = run(False)
+        out = run(True)
+        self.assertFalse(ref[4])
+        self.assertTrue(out[4], "fusion selection")
+        # The launcher requires this line from every rank of an overlap pass.
+        print(f"OVERLAP_EXECUTED rank={self.cfg.rank}", flush=True)
+        supported = te_ops.moe_overlap_supported(
+            config, ffn, params_dtype=torch.bfloat16,
+            glu_interleave_size=glu_interleave_size, single_grouped_weight=True, recipe=recipe,
+            primary_weights_in_fp8=quantized_weights,
+        )  # fmt: skip
+        self.assertTrue(supported, "moe_overlap_supported matches the fuser")
+        # Row tensors saved: recv tokens (and their scales), the FC1 output and the routing
+        # weights, plus the SwiGLU output in BF16. A frozen weight leaves out the input of its
+        # weight gradient: the recv tokens and scales for FC1, the SwiGLU output (BF16) for FC2.
+        fc1_inputs, fc2_inputs = (2, 0) if recipe is not None else (1, 1)
+        stashed = 4 - (fc1_inputs if 1 in frozen else 0) - (fc2_inputs if 3 in frozen else 0)
+        self.assertEqual(len(out[5]), stashed, "the fused op saves the stashable tensors")
+        # Their token count is the number of received rows kept.
+        kept = int(buffer.tokens_per_expert_i32.sum())
+        self.assertEqual(out[6], [kept] * stashed, "stashed token counts")
+        # The fused op publishes that kept total to the buffer counter paged stashing reads.
+        self.assertEqual(int(buffer.total_recv_tokens.item()), kept, "published recv total")
+        if recipe is not None:
+            # The FC2 dgrad recomputes the SwiGLU output, so no [rows, ffn] tensor is saved:
+            # the recv tokens and scales, the FC1 output and the recv routing weights.
+            rows = next(shape[0] for dtype, shape, _ in out[5] if dtype == torch.float32)
+            saved = sum(nbytes for _, _, nbytes in out[5])
+            ffn = ops[3].in_features
+            recv_bytes = 0 if 1 in frozen else HIDDEN_DIM + HIDDEN_DIM // 32
+            self.assertEqual(saved, rows * (recv_bytes + 2 * ffn * 2 + 4), "saved bytes")
+        # Where the unfused ops compute the SwiGLU output in their own kernel, single elements may
+        # round to another value, so those results are compared in norm. The unfused MXFP8 ops also
+        # round the FC2 dgrad and the SwiGLU backward output to BF16 before quantizing them, so
+        # outputs and weight gradients may differ by up to the E4M3 epsilon.
+        norm_rtol = 2e-2 if recipe is None else 1 / 32
+        unfused_reference = glu_interleave_size is None or (
+            UNFUSED_BF16_MLP_REFERENCE if recipe is None else UNFUSED_MLP_REFERENCE
+        )
+        outputs_in_norm = unfused_reference or params_to_bf16
+        outputs_rtol = 1 / 16 if recipe is not None and unfused_reference else norm_rtol
+        if not input_grad:
+            self.assertTrue(all(g is None for g in out[1:3] + ref[1:3]))
+        for got, want in zip(out[: 3 if input_grad else 1], ref[:3]):
+            if outputs_in_norm:
+                _assert_close_in_norm(got, want, rtol=outputs_rtol)
+            else:
+                torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+        for g, g_ref in zip(out[3], ref[3]):
+            if (
+                recipe is None
+                and glu_interleave_size is not None
+                and not (UNFUSED_BF16_MLP_REFERENCE or params_to_bf16)
+            ):
+                torch.testing.assert_close(g, g_ref, rtol=2e-2, atol=2e-2)
+            else:
+                _assert_close_in_norm(g, g_ref, rtol=outputs_rtol)
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_cpu_offload(self):
+        """Under CPU offload the tensors the fused op saves come back bitwise, and its output and
+        gradients match those without offload."""
+        from transformer_engine.pytorch import cpu_offload
+
+        self._require_moe_overlap()
+        tokens, topk_idx, w, grad_out = self._moe_calls(1)[0]
+        for recipe in [None] + ([MXFP8BlockScaling()] if _mxfp8_overlap() else []):
+            config = self._overlap_config(recipe)
+            ops = self._moe_ops(config, self._make_buffer_from_config(config))
+            results = []
+            for offload in (False, True):
+                saved = []
+                for p in ops[1].parameters():
+                    p.grad = None
+                for p in ops[3].parameters():
+                    p.grad = None
+                with te.autocast(enabled=recipe is not None, recipe=recipe):
+                    model = te_ops.Sequential(*ops)
+                    x = tokens.clone().requires_grad_(True)
+                    topk_w = w.clone().requires_grad_(True)
+                    if offload:
+                        ctx, sync, controller = cpu_offload.get_cpu_offload_context(
+                            enabled=True, model_layers=1, manual_synchronization=True
+                        )
+                        sync_state = ctx.offload_synchronizer
+                        push, pop = sync_state.push_tensor, sync_state.pop_tensor
+
+                        def push_tensor(tensor, push=push):
+                            saved.append([tensor.detach().reshape(-1).view(torch.uint8).cpu()])
+                            return len(saved) - 1, push(tensor)
+
+                        def pop_tensor(packed, pop=pop):
+                            tensor = pop(packed[1])
+                            saved[packed[0]].append(tensor.detach().reshape(-1).view(torch.uint8))
+                            return tensor
+
+                        with mock.patch.object(
+                            sync_state, "push_tensor", push_tensor
+                        ), mock.patch.object(sync_state, "pop_tensor", pop_tensor):
+                            with ctx:
+                                y = model(x, topk_idx, topk_w, topk_idx)
+                            y = sync(y)
+                        controller.start_offload_layer(0)
+                        controller.release_activation_forward_gpu_memory(0)
+                        controller.start_reload_layer(0)
+                    else:
+                        y = model(x, topk_idx, topk_w, topk_idx)
+                    y.backward(grad_out)
+                torch.cuda.synchronize()
+                self.assertTrue(self._moe_overlap_selected(model))
+                self.assertEqual(bool(saved), offload, "offloaded tensors")
+                for before, after in saved:
+                    self.assertTrue(torch.equal(before, after.cpu()), "a saved tensor changed")
+                grads = [p.grad.clone() for p in model.parameters()]
+                results.append([y.detach(), x.grad, topk_w.grad, *grads])
+            with self.subTest(recipe=recipe):
+                for i, (got, want) in enumerate(zip(*results)):
+                    if recipe is not None and i >= 3:
+                        _assert_close_in_norm(got, want, rtol=1 / 32)
+                    else:
+                        torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+
+    def _require_moe_overlap(self):
+        from transformer_engine.pytorch.ops.fused import moe_overlap
+
+        if not moe_overlap.FusedMoE.is_supported():
+            self.skipTest(
+                "FusedMoE needs SM 10.0, 10.3 or 10.7, NVTE_ENABLE_CUTEDSL_BACKEND=1,"
+                " NVTE_MOE_OVERLAP and the BF16 cuDNN grouped GEMM kernels"
+            )
+
+    @staticmethod
+    def _moe_fusion(fused):
+        """Context in which the fuser may select FusedMoE, or keeps the MoE ops unfused."""
+        from transformer_engine.pytorch.ops.fused import moe_overlap
+
+        if fused:
+            return contextlib.nullcontext()
+        return mock.patch.object(moe_overlap, "_moe_overlap_available", return_value=False)
+
+    @staticmethod
+    def _moe_overlap_selected(model):
+        """The FusedMoE ops of the plan ``model`` ran last."""
+        from transformer_engine.pytorch.ops.fused import moe_overlap
+
+        return [
+            op
+            for group in model._module_groups
+            for op, _ in getattr(group, "_forward_ops", [])
+            if isinstance(op, moe_overlap.FusedMoE)
+        ]
+
+    def _moe_calls(self, num_calls):
+        """(tokens, topk_idx, topk_weights, grad_output) of calls that each route differently."""
+        gen = torch.Generator(device=self.cfg.device).manual_seed(8)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        return [
+            (
+                tokens.roll(i, 0),
+                (topk_idx + i) % self.cfg.num_experts,
+                w,
+                torch.randn(tokens.shape, device=self.cfg.device, generator=gen).to(torch.bfloat16),
+            )
+            for i in range(num_calls)
+        ]
+
+    @staticmethod
+    def _moe_call(model, tokens, topk_idx, w, grad, *, tokens_grad=True, weights_grad=True):
+        """Forward, then backward when ``grad`` is given: (output, tokens grad, topk_weights
+        grad). Parameter gradients accumulate on the parameters."""
+        x = tokens.clone().requires_grad_(tokens_grad)
+        topk_w = w.clone().requires_grad_(weights_grad)
+        y = model(x, topk_idx, topk_w, topk_idx)
+        if grad is not None:
+            y.backward(grad)
+        return y.detach(), x.grad, topk_w.grad
+
+    @staticmethod
+    def _param_grads(model):
+        return [None if p.grad is None else p.grad.clone() for p in model.parameters()]
+
+    def _assert_moe_close(
+        self, got, ref, in_norm=UNFUSED_BF16_MLP_REFERENCE, outputs_in_norm=True, rtol=2e-2
+    ):
+        """Fused and unfused MoE results, nested in lists, agree within ``rtol``; with in_norm the
+        grouped weight gradients in norm, and with outputs_in_norm as well the outputs and input
+        gradients."""
+        if isinstance(ref, (list, tuple)):
+            self.assertEqual(len(got), len(ref))
+            for g, r in zip(got, ref):
+                self._assert_moe_close(g, r, in_norm, outputs_in_norm, rtol)
+        elif ref is None:
+            self.assertIsNone(got)
+        elif in_norm and (outputs_in_norm or ref.dim() == 3):
+            _assert_close_in_norm(got, ref, rtol=rtol)
+        else:
+            torch.testing.assert_close(got, ref, rtol=rtol, atol=rtol)
+
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_wgrad(self):
+        """With accumulate_into_main_grad, the fused op writes the weight gradients of two calls
+        into an FP32 or BF16 main_grad, accumulated or overwritten, as the unfused ops do."""
+        self._require_moe_overlap()
+        config = self._overlap_config()
+        calls = self._moe_calls(2)
+        ops = self._moe_ops(
+            config, self._make_buffer_from_config(config), accumulate_into_main_grad=True
+        )
+        weights = (ops[1].weight, ops[3].weight)
+        for dtype, overwrite in itertools.product((torch.float32, torch.bfloat16), (False, True)):
+            results = []
+            for fused in (False, True):
+                for p in weights:
+                    p.grad = None
+                    p.main_grad = torch.full(p.size(), 0.5, dtype=dtype, device=self.cfg.device)
+                    p.overwrite_main_grad = overwrite
+                    p.grad_added_to_main_grad = False
+                with self._moe_fusion(fused):
+                    model = te_ops.Sequential(*ops)
+                    outs = [self._moe_call(model, *call) for call in calls]
+                torch.cuda.synchronize()
+                self.assertEqual(bool(self._moe_overlap_selected(model)), fused)
+                for p in weights:
+                    self.assertTrue(p.grad_added_to_main_grad)
+                results.append((outs, [p.main_grad.clone() for p in weights]))
+            with self.subTest(dtype=dtype, overwrite=overwrite):
+                self._assert_moe_close(results[1], results[0])
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_rank_without_tokens(self):
+        """Every token picks the first expert of ranks 0 and 1, so the other ranks and the other
+        experts of ranks 0 and 1 receive no tokens. The fused op matches the unfused ops, and
+        the weight gradients of the experts without tokens are zero. The fused op with
+        glu_interleave_size=None and the FC1 rows mapped matches it."""
+        self._require_moe_overlap()
+        if self.cfg.ep_size < 3:
+            self.skipTest("needs a rank that receives no tokens")
+        config = self._overlap_config()
+        ops = self._moe_ops(config, self._make_buffer_from_config(config))
+        tokens, _, w, grad = self._moe_calls(1)[0]
+        topk_idx = torch.tensor([0, NUM_LOCAL_EXPERTS], device=self.cfg.device).repeat(
+            TOKENS_PER_RANK, 1
+        )
+        results = []
+        for fused in (False, True):
+            for p in ops[1].parameters():
+                p.grad = None
+            for p in ops[3].parameters():
+                p.grad = None
+            with self._moe_fusion(fused):
+                model = te_ops.Sequential(*ops)
+                out = self._moe_call(model, tokens, topk_idx, w, grad)
+            torch.cuda.synchronize()
+            self.assertEqual(bool(self._moe_overlap_selected(model)), fused)
+            results.append((out, self._param_grads(model)))
+        self._assert_moe_close(results[1], results[0])
+        has_tokens = self.cfg.rank < 2
+        for g in results[1][1]:
+            per_expert = g.view(NUM_LOCAL_EXPERTS, -1)
+            self.assertEqual(int(per_expert[int(has_tokens) :].count_nonzero()), 0)
+            if has_tokens:
+                self.assertGreater(int(per_expert[0].count_nonzero()), 0)
+
+        ops_none = self._moe_ops(config, self._make_buffer_from_config(config), None)
+        shape = (NUM_LOCAL_EXPERTS, ops[1].out_features, ops[1].in_features)
+        with torch.no_grad():
+            ops_none[1].weight.rowwise_data.view(shape).copy_(
+                _gate_up_rows(ops[1].weight.rowwise_data.view(shape))
+            )
+        model = te_ops.Sequential(*ops_none)
+        out = self._moe_call(model, tokens, topk_idx, w, grad)
+        torch.cuda.synchronize()
+        self.assertTrue(self._moe_overlap_selected(model))
+        self._assert_glu_none_matches(out, results[1][0], self._param_grads(model), results[1][1])
+
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_cuda_graph(self):
+        """The fused forward and backward, captured in a CUDA graph after warmup and replayed with
+        new routing, tokens, topk_weights and output gradient, match the unfused ops; in BF16 and,
+        where the overlap tests run MXFP8, under MXFP8 transport (its shared dispatch window,
+        requantization and weight gradients captured and replayed)."""
+        self._require_moe_overlap()
+        for recipe in [None] + ([MXFP8BlockScaling()] if _mxfp8_overlap() else []):
+            with self.subTest(recipe=recipe):
+                self._run_moe_overlap_cuda_graph(recipe)
+
+    def _run_moe_overlap_cuda_graph(self, recipe):
+        """Capture and replay the fused MoE under ``recipe`` (None for BF16) and match the unfused
+        ops run under the same autocast."""
+        if recipe is not None:
+            self._require_mxfp8_shapes()
+        device = self.cfg.device
+        config = self._overlap_config(recipe)
+        ops = self._moe_ops(config, self._make_buffer_from_config(config))
+        ref_ops = self._moe_ops(config, self._make_buffer_from_config(config))
+        if recipe is not None:
+            # Power-of-two row and column factors give every scale block its own exponent. Both
+            # models share the weights.
+            gen = torch.Generator(device=device).manual_seed(6)
+            with torch.no_grad():
+                for fc, ref_fc in ((ops[1], ref_ops[1]), (ops[3], ref_ops[3])):
+                    for w_fused, w_ref in zip(fc.parameters(), ref_fc.parameters()):
+                        shape = w_fused.shape
+                        rows = torch.randint(-3, 4, (*shape[:-1], 1), device=device, generator=gen)
+                        cols = torch.randint(-3, 4, shape[-1:], device=device, generator=gen)
+                        values = torch.rand(shape, device=device, generator=gen) - 0.5
+                        w_fused.copy_(values * 0.1 * torch.exp2((rows + cols).float()))
+                        w_ref.copy_(w_fused)
+        gen = torch.Generator(device=device).manual_seed(9)
+        random_idx, random_tokens, random_w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        replays = [
+            (
+                random_tokens,
+                random_idx,
+                random_w,
+                torch.randn(random_tokens.shape, device=device, generator=gen).to(torch.bfloat16),
+            ),
+            self._moe_calls(1)[0],
+        ]
+        # Static inputs, holding the captured call's values first.
+        tokens, topk_idx, w, grad = (t.clone() for t in self._moe_calls(2)[1])
+        x = tokens.requires_grad_(True)
+        topk_w = w.requires_grad_(True)
+        model = te_ops.Sequential(*ops)
+        params = list(model.parameters())
+        out = {}
+
+        def step():
+            for t in (x, topk_w, *params):
+                t.grad = None
+            with te.autocast(enabled=recipe is not None, recipe=recipe):
+                out["y"] = model(x, topk_idx, topk_w, topk_idx)
+                out["y"].backward(grad)
+
+        graph = self._capture(step)
+        self.assertTrue(self._moe_overlap_selected(model))
+        results = []
+        for call in replays:
+            with torch.no_grad():
+                for static, value in zip((x, topk_idx, topk_w, grad), call):
+                    static.copy_(value)
+            graph.replay()
+            got = (
+                (out["y"].detach().clone(), x.grad.clone(), topk_w.grad.clone()),
+                [p.grad.clone() for p in params],
+            )
+            ref_model = te_ops.Sequential(*ref_ops)
+            for p in ref_model.parameters():
+                p.grad = None
+            with self._moe_fusion(False), te.autocast(enabled=recipe is not None, recipe=recipe):
+                ref = (self._moe_call(ref_model, *call), self._param_grads(ref_model))
+            torch.cuda.synchronize()
+            results.append((got, ref))
+        # Compare once every rank has run every replay, so a mismatch on one rank leaves no rank
+        # waiting in a later replay.
+        for got, ref in results:
+            if recipe is None:
+                self._assert_moe_close(got, ref)
+            else:
+                # The unfused MXFP8 ops round the SwiGLU output and requantize to E4M3, so compare
+                # outputs and gradients in norm at the E4M3 tolerance.
+                self._assert_moe_close(got, ref, in_norm=True, outputs_in_norm=True, rtol=1 / 16)
+
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_moe_overlap_instances(self):
+        """Weights created in inference mode, which have no version counter, run in the fused op
+        with the FC1 rows reordered at each call. Two FusedMoE instances, each with its own
+        EpBuffer, interleave safely: the second instance's forward and backward between the first
+        instance's forward and backward leave the first instance's output and gradients identical
+        to running it alone. One buffer and op instance per outstanding call."""
+        self._require_moe_overlap()
+        config = self._overlap_config()
+        with torch.inference_mode():
+            ops = self._moe_ops(config, self._make_buffer_from_config(config), None)
+            model = te_ops.Sequential(*ops)
+            topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+            model(tokens, topk_idx, w, topk_idx)
+            torch.cuda.synchronize()
+            self.assertTrue(self._moe_overlap_selected(model))
+
+        # Separate instances and buffers; _moe_ops seeds identical weights.
+        model_a = te_ops.Sequential(*self._moe_ops(config, self._make_buffer_from_config(config)))
+        model_b = te_ops.Sequential(*self._moe_ops(config, self._make_buffer_from_config(config)))
+        call_a, call_b = self._moe_calls(2)
+
+        def forward(model, call):
+            for p in model.parameters():
+                p.grad = None
+            x = call[0].clone().requires_grad_(True)
+            topk_w = call[2].clone().requires_grad_(True)
+            return x, topk_w, model(x, call[1], topk_w, call[1])
+
+        def backward(model, x, topk_w, y, grad):
+            y.backward(grad)
+            torch.cuda.synchronize()
+            return [y.detach(), x.grad, topk_w.grad] + self._param_grads(model)
+
+        # Each call run alone, as the serial reference.
+        xa, wa, ya = forward(model_a, call_a)
+        alone_a = backward(model_a, xa, wa, ya, call_a[3])
+        self.assertTrue(self._moe_overlap_selected(model_a))
+        xb, wb, yb = forward(model_b, call_b)
+        alone_b = backward(model_b, xb, wb, yb, call_b[3])
+        self.assertTrue(self._moe_overlap_selected(model_b))
+
+        # Interleaved: the second instance's whole call lands between the first's forward and
+        # backward; separate buffers keep each call's routing state intact.
+        xa, wa, ya = forward(model_a, call_a)
+        xb, wb, yb = forward(model_b, call_b)
+        inter_b = backward(model_b, xb, wb, yb, call_b[3])
+        inter_a = backward(model_a, xa, wa, ya, call_a[3])
+        self._assert_moe_close(inter_a, alone_a, UNFUSED_MLP_REFERENCE, outputs_in_norm=False)
+        self._assert_moe_close(inter_b, alone_b, UNFUSED_MLP_REFERENCE, outputs_in_norm=False)
 
     # Autograd
 
@@ -1251,6 +2026,30 @@ class TestMoeEpSequential(_EpTestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
         self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    @_overlap_test
+    def test_unfused_ops_on_overlap_group(self):
+        """On an overlap-pass group, MoeDispatch and MoeCombine run unfused and form an identity,
+        forward and backward."""
+        config = self._overlap_config()
+        buffer = self._make_buffer_from_config(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        combine = te_ops.MoeCombine(config, buffer)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        x = tokens.clone().requires_grad_(True)
+        w = topk_weights.clone().requires_grad_(True)
+        recv_tokens, _tokens_per_expert, recv_weights = dispatch(x, topk_idx, w)
+        output = combine(recv_tokens * recv_weights.unsqueeze(-1).to(torch.bfloat16), topk_idx)
+        gen = torch.Generator(device=self.cfg.device).manual_seed(8)
+        grad_out = torch.randn(tokens.shape, device=self.cfg.device, generator=gen)
+        output.backward(grad_out.to(torch.bfloat16))
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(x.grad.float(), grad_out, atol=5e-2, rtol=5e-2)
+        grad_w_ref = (tokens.float() * grad_out).sum(-1, keepdim=True).expand_as(w)
+        torch.testing.assert_close(w.grad.float(), grad_w_ref, atol=5e-1, rtol=5e-2)
 
     @_eager_test_include
     def test_dispatch_combine_identity_bf16(self):

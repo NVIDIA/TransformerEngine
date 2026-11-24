@@ -20,6 +20,9 @@ void initialize();
 /*! \brief Get a function pointer from the runtime NCCL EP library. */
 void* get_symbol(const char* symbol);
 
+/*! \brief NCCL_EP_VERSION_CODE of the loaded runtime library (loads it if needed). */
+int runtime_version();
+
 ncclResult_t create_group(ncclEpGroup_t* ep_group, ncclComm_t comm,
                           const ncclEpGroupConfig_t* config);
 ncclResult_t group_destroy(ncclEpGroup_t ep_group);

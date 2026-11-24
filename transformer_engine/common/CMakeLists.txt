@@ -625,6 +625,8 @@ target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
 target_sources(transformer_engine PRIVATE
     ep/ep_backend.cpp
     ep/ep_api.cpp
+    ep/ep_gemm_api.cpp
+    ep/ep_overlap_workspace.cu
     ep/nccl_ep_provider.cpp)
 target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
 
@@ -632,7 +634,7 @@ message(STATUS "NCCL EP enabled (runtime-loaded library): ${NCCL_EP_SHARED_LIB}"
 message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
 else()
   # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
-  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp ep/ep_gemm_api.cpp)
   message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
 endif()
 

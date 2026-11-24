@@ -131,12 +131,19 @@ NCCL-based dispatch and combine for experts sharded across ranks. See
 
 ``MoeDispatch`` and ``MoeCombine`` can wrap the local expert operations in a
 ``transformer_engine.pytorch.ops.Sequential``. They share an ``EpConfig`` and
-an ``EpBuffer``; the guide shows how to connect the per-expert counts and
-routing weights through the sequence's extra-tensor channels.
+an ``EpBuffer``. A buffer holds the routing state of one call until its backward has run, so
+several calls in flight (for example pipeline microbatches) each need their own ``EpBuffer`` and
+op instance. The guide shows how to connect the per-expert counts and routing weights through the
+sequence's extra-tensor channels. ``moe_overlap_supported`` tells whether such a sequence runs as
+one fused op.
 
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeDispatch
 
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeCombine
+
+.. autoapifunction:: transformer_engine.pytorch.ops.moe_overlap_supported
+
+.. autoapifunction:: transformer_engine.pytorch.ops.moe_overlap_unsupported_reason
 
 .. autoapiclass:: transformer_engine.pytorch.ep.EpConfig
 
