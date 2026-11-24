@@ -44,6 +44,7 @@ def raw_version(monkeypatch):
 def test_normalizes_semver(raw_version, raw, expected):
     raw_version(raw)
     assert te_version() == expected
+    assert str(Version(expected)) == expected
 
 
 @pytest.mark.parametrize(
@@ -111,22 +112,24 @@ def test_pep440_precedence(raw_version):
 
 
 @pytest.mark.parametrize(
-    "raw,expected",
+    "raw,commit,expected",
     [
-        ("1.2.3-rc.1", "1.2.3rc1+abc1234"),
-        ("4.5.6-dev.123+gdef5678", "4.5.6.dev123+gdef5678.abc1234"),
+        ("1.2.3-rc.1", "abc1234", "1.2.3rc1+gabc1234"),
+        ("1.2.3", "0123456", "1.2.3+g0123456"),
+        ("4.5.6-dev.123+gdef5678", "abc1234", "4.5.6.dev123+gdef5678.gabc1234"),
     ],
 )
-def test_appends_commit(raw_version, monkeypatch, raw, expected):
+def test_appends_commit(raw_version, monkeypatch, raw, commit, expected):
     raw_version(raw)
     monkeypatch.setenv("NVTE_RELEASE_BUILD", "0")
     monkeypatch.delenv("NVTE_NO_LOCAL_VERSION", raising=False)
     monkeypatch.setattr(
         te_version_module.subprocess,
         "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="abc1234\n"),
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=f"{commit}\n"),
     )
     assert te_version() == expected
+    assert str(Version(expected)) == expected
 
 
 @pytest.mark.parametrize("raw", ["3.0.0", "3.0.0-dev.0", "1.2.3-rc.1", "4.5.6-dev.123+gabc1234"])

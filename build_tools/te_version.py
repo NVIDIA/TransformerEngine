@@ -8,7 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 
-from packaging.version import Version
+# Builds without build isolation run this module before build requirements are installed, so
+# it must only use the standard library.
 
 # The subset of SemVer with a PEP 440 equivalent. Precedence follows PEP 440, which orders
 # dev releases before alpha and beta releases, unlike SemVer.
@@ -46,15 +47,15 @@ def append_local_version(version: str, local: str) -> str:
 
 
 def te_version() -> str:
-    """Transformer Engine version string, normalized to PEP 440
+    """Transformer Engine version string, in normalized PEP 440 form
 
     VERSION.txt must contain MAJOR.MINOR.PATCH, optionally followed by
     a -dev.N, -alpha.N, -beta.N, or -rc.N prerelease and +gCOMMIT build
     metadata. For example, 1.2.3-rc.1 becomes 1.2.3rc1 and
     4.5.6-dev.123+gabc1234 becomes 4.5.6.dev123+gabc1234.
 
-    Includes Git commit as local version, unless suppressed with
-    NVTE_NO_LOCAL_VERSION environment variable.
+    Includes Git commit as local version (+gCOMMIT), unless suppressed
+    with NVTE_NO_LOCAL_VERSION environment variable.
 
     """
     raw_version = te_raw_version()
@@ -71,7 +72,6 @@ def te_version() -> str:
         version += f"{_PEP440_PRERELEASE_SEGMENTS[match['label']]}{match['number']}"
     if match["build"] is not None:
         version += f"+{match['build']}"
-    version = str(Version(version))
 
     if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")) and not bool(
         int(os.getenv("NVTE_RELEASE_BUILD", "0"))
@@ -89,5 +89,5 @@ def te_version() -> str:
             pass
         else:
             commit = output.stdout.strip()
-            version = str(Version(append_local_version(version, commit)))
+            version = append_local_version(version, f"g{commit}")
     return version
