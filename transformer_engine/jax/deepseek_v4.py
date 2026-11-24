@@ -334,6 +334,43 @@ def _dsa_indexer_bwd(ratio, sm_scale, max_q, max_k, residual, grad_out):
 _dsa_indexer.defvjp(_dsa_indexer_fwd, _dsa_indexer_bwd)
 
 
+def _indexer_prefixes(q, sequence_descriptor, max_seqlen_q, max_seqlen_k):
+    """Share the contiguous-pack metadata contract between scores and sparse KL."""
+    cu_q = cu_k = None
+    if q.ndim == 3:
+        if not isinstance(sequence_descriptor, SequenceDescriptor):
+            raise ValueError("THD requires a SequenceDescriptor with explicit lengths and offsets")
+        sd = sequence_descriptor
+        if any(x.size for x in (*sd.segment_ids, *sd.segment_pos)):
+            raise ValueError("THD indexer requires explicit lengths/offsets, not segment IDs")
+        q_len, k_len = sd.seqlens
+        q_off, k_off = sd.seq_offsets
+        if (
+            q_len.ndim != 2
+            or q_len.shape[0] != 1
+            or q_len.shape[1] < 1
+            or k_len.shape != q_len.shape
+            or q_off.shape != (1, q_len.shape[1] + 1)
+            or k_off.shape != q_off.shape
+            or any(x.dtype != jnp.int32 for x in (q_len, k_len, q_off, k_off))
+        ):
+            raise ValueError("THD descriptor requires INT32 lengths [1,M] and offsets [1,M+1]")
+        (q_len, k_len), _ = sd.get_seqlens_and_offsets(
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            QKVLayout.THD_THD_THD,
+            (-1, -1),
+            q_len.shape[1],
+        )
+        # For contiguous packs, lengths give native prefixes directly. The
+        # existing utility maps unused -1 slots to repeated terminal offsets.
+        cu_q, cu_k = generate_cu_seqlen(q_len.flatten()), generate_cu_seqlen(k_len.flatten())
+    elif q.ndim != 4 or any(
+        x is not None for x in (sequence_descriptor, max_seqlen_q, max_seqlen_k)
+    ):
+        raise ValueError("dense indexer requires BSHD inputs without packed metadata")
+    return cu_q, cu_k
+
+
 def dsa_indexer(
     q: jnp.ndarray,
     k: jnp.ndarray,
@@ -371,38 +408,7 @@ def dsa_indexer(
     the indexer training objective: discrete top-k indices do not propagate
     attention-output gradients back to the indexer scores.
     """
-    cu_q = cu_k = None
-    if q.ndim == 3:
-        if not isinstance(sequence_descriptor, SequenceDescriptor):
-            raise ValueError("THD requires a SequenceDescriptor with explicit lengths and offsets")
-        sd = sequence_descriptor
-        if any(x.size for x in (*sd.segment_ids, *sd.segment_pos)):
-            raise ValueError("THD indexer requires explicit lengths/offsets, not segment IDs")
-        q_len, k_len = sd.seqlens
-        q_off, k_off = sd.seq_offsets
-        if (
-            q_len.ndim != 2
-            or q_len.shape[0] != 1
-            or q_len.shape[1] < 1
-            or k_len.shape != q_len.shape
-            or q_off.shape != (1, q_len.shape[1] + 1)
-            or k_off.shape != q_off.shape
-            or any(x.dtype != jnp.int32 for x in (q_len, k_len, q_off, k_off))
-        ):
-            raise ValueError("THD descriptor requires INT32 lengths [1,M] and offsets [1,M+1]")
-        (q_len, k_len), _ = sd.get_seqlens_and_offsets(
-            AttnMaskType.PADDING_CAUSAL_MASK,
-            QKVLayout.THD_THD_THD,
-            (-1, -1),
-            q_len.shape[1],
-        )
-        # For contiguous packs, lengths give native prefixes directly. The
-        # existing utility maps unused -1 slots to repeated terminal offsets.
-        cu_q, cu_k = generate_cu_seqlen(q_len.flatten()), generate_cu_seqlen(k_len.flatten())
-    elif q.ndim != 4 or any(
-        x is not None for x in (sequence_descriptor, max_seqlen_q, max_seqlen_k)
-    ):
-        raise ValueError("dense indexer requires BSHD inputs without packed metadata")
+    cu_q, cu_k = _indexer_prefixes(q, sequence_descriptor, max_seqlen_q, max_seqlen_k)
     return _dsa_indexer(q, k, weights, cu_q, cu_k, ratio, sm_scale, max_seqlen_q, max_seqlen_k)
 
 
@@ -432,6 +438,171 @@ def dsa_indexer_batched(
         _batch_axes_spec(batch_axes, 3),
         batch_axes,
     )(q, k, weights)
+
+
+def _cudnn_indexer_sparse_backward(
+    q,
+    k,
+    weights,
+    target,
+    probabilities,
+    indices,
+    grad_loss,
+    sm_scale,
+    cu_q,
+    cu_k,
+    max_q,
+    max_k,
+):
+    from cudnn.ops import dsa
+
+    return dsa.indexer_backward_jax(
+        q,
+        k,
+        weights,
+        target,
+        probabilities,
+        indices,
+        grad_loss,
+        sm_scale=sm_scale,
+        clip_log=False,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=max_q,
+        max_seqlen_k=max_k,
+    )
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11))
+def _indexer_sparse_kl(
+    q, k, weights, scores, indices, target, cu_q, cu_k, sm_scale, eps, max_q, max_k
+):
+    return _indexer_sparse_kl_fwd(
+        q, k, weights, scores, indices, target, cu_q, cu_k, sm_scale, eps, max_q, max_k
+    )[0]
+
+
+def _indexer_sparse_kl_fwd(
+    q, k, weights, scores, indices, target, cu_q, cu_k, sm_scale, eps, max_q, max_k
+):
+    del sm_scale, max_q, max_k
+    if cu_q is None:
+        valid = (indices >= 0) & (indices < k.shape[1])
+    else:
+        rows = jnp.arange(q.shape[0], dtype=jnp.int32)
+        segment = jnp.minimum(jnp.searchsorted(cu_q, rows, side="right") - 1, cu_q.size - 2)
+        lengths = cu_k[segment + 1] - cu_k[segment]
+        valid = (rows[:, None] < cu_q[-1]) & (indices >= 0) & (indices < lengths[:, None])
+    selected = jnp.take_along_axis(scores, jnp.clip(indices, 0, scores.shape[-1] - 1), axis=-1)
+    valid = valid & jnp.isfinite(selected)
+    has_values = jnp.any(valid, axis=-1, keepdims=True)
+    logits = jnp.where(valid, selected, -jnp.inf)
+    # An empty query contributes zero; avoid log_softmax of an all-infinite row.
+    logits = jnp.where(has_values, logits, 0.0)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    log_probs = jnp.where(valid, log_probs, 0.0)
+    probabilities = jnp.where(valid, jnp.exp(log_probs), 0.0)
+    target = jnp.where(valid, target, 0.0)
+    loss = jnp.sum(jnp.where(target > 0, target * (jnp.log(target + eps) - log_probs), 0.0))
+    return loss, (q, k, weights, target, probabilities, jnp.where(valid, indices, -1), cu_q, cu_k)
+
+
+def _indexer_sparse_kl_bwd(sm_scale, eps, max_q, max_k, residual, grad_out):
+    del eps
+    q, k, weights, target, probabilities, indices, cu_q, cu_k = residual
+    # FE averages over local physical query capacity; this API returns a sum.
+    capacity = q.shape[0] if cu_q is not None else q.shape[0] * q.shape[1]
+    grad_loss = jnp.asarray(grad_out * capacity, jnp.float32).reshape(1)
+    dq, dw, dk = _cudnn_indexer_sparse_backward(
+        q,
+        k,
+        weights,
+        target,
+        probabilities,
+        indices,
+        grad_loss,
+        sm_scale,
+        cu_q,
+        cu_k,
+        max_q,
+        max_k,
+    )
+    return dq, dk.reshape(k.shape).astype(k.dtype), dw, None, None, None, None, None
+
+
+_indexer_sparse_kl.defvjp(_indexer_sparse_kl_fwd, _indexer_sparse_kl_bwd)
+
+
+def dsa_indexer_sparse_kl_loss(
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    weights: jnp.ndarray,
+    scores: jnp.ndarray,
+    indices: jnp.ndarray,
+    target: jnp.ndarray,
+    *,
+    sm_scale: float = 1.0,
+    eps: float = 1e-8,
+    batch_axes: tuple[str, ...] = (),
+    sequence_descriptor: SequenceDescriptor | None = None,
+    max_seqlen_q: int | None = None,
+    max_seqlen_k: int | None = None,
+) -> jnp.ndarray:
+    """Sum the sparse indexer KL, with native gradients for Q/K/weights only.
+
+    BSHD Q/K/weights are BF16 [B,S,64,128]/[B,K,1,128]/[B,S,64]. Scores are
+    FP32 [B,S,K] from these operands and ``sm_scale``. Unique local INT32
+    indices and detached FP32 target have shape [B,S,512]; use -1/zero for
+    inactive slots. Targets retain their mass. Empty rows contribute zero.
+    The scalar is a global sum over batch shards, without loss coefficient
+    or token normalization. Scores, indices and teacher receive no gradients.
+
+    Packed THD uses Q [Tq,64,128], K [Tk,1,128], weights [Tq,64], scores
+    [Tq,ceil4(maxK)] and indices/target [Tq,512]. The explicit contiguous-pack
+    SequenceDescriptor and positive static max lengths follow :func:`dsa_indexer`;
+    indices are segment-local compressed-key columns. Empty segments, invalid
+    slots and unused capacity contribute zero gradients, even with poisoned
+    unused storage. Active operands must be finite. THD does not accept batch
+    sharding axes. Requires FE ``indexer_backward_jax(..., clip_log=False)``
+    with packed metadata support for THD.
+    """
+    cu_q, cu_k = _indexer_prefixes(q, sequence_descriptor, max_seqlen_q, max_seqlen_k)
+    if q.shape[-2:] != (64, 128):
+        raise ValueError("sparse KL requires indexer H64/D128")
+    if cu_q is None:
+        b, sq = q.shape[:2]
+        if k.ndim != 4 or k.shape[0] != b or k.shape[2:] != (1, 128):
+            raise ValueError("sparse KL requires BSHD K with one KV head")
+        score_shape = (b, sq, k.shape[1])
+    else:
+        if batch_axes:
+            raise ValueError("THD sparse KL does not support batch sharding axes")
+        if k.ndim != 3 or k.shape[1:] != (1, 128) or not q.shape[0] or not k.shape[0]:
+            raise ValueError("THD sparse KL requires nonempty Q/K capacity and one KV head")
+        if any(
+            not isinstance(n, int) or isinstance(n, bool) or n <= 0
+            for n in (max_seqlen_q, max_seqlen_k)
+        ):
+            raise ValueError("THD sparse KL requires positive static max Q/K lengths")
+        score_shape = (q.shape[0], -(-max_seqlen_k // 4) * 4)
+    if weights.shape != q.shape[:-1] or scores.shape != score_shape:
+        raise ValueError("sparse KL score/weight shape mismatch")
+    if indices.shape != (*q.shape[:-2], 512) or target.shape != indices.shape:
+        raise ValueError("sparse KL requires 512 selected slots, padded with -1/zero")
+    if any(x.dtype != jnp.bfloat16 for x in (q, k, weights)):
+        raise TypeError("sparse KL q/k/weights must be bfloat16")
+    if scores.dtype != jnp.float32 or target.dtype != jnp.float32 or indices.dtype != jnp.int32:
+        raise TypeError("sparse KL scores/target must be float32 and indices int32")
+    operands = (q, k, weights, scores, indices, target)
+    if cu_q is not None:
+        return _indexer_sparse_kl(*operands, cu_q, cu_k, sm_scale, eps, max_seqlen_q, max_seqlen_k)
+    partials = _batched_shard_map(
+        lambda *xs: _indexer_sparse_kl(*xs, None, None, sm_scale, eps, None, None).reshape(1),
+        tuple(_batch_axes_spec(batch_axes, x.ndim) for x in operands),
+        _batch_axes_spec(batch_axes, 1),
+        batch_axes,
+    )(*operands)
+    return jnp.sum(partials)
 
 
 def _cudnn_sparse_attention_forward(
@@ -622,6 +793,7 @@ __all__ = [
     "csa_compressor_batched",
     "dsa_indexer",
     "dsa_indexer_batched",
+    "dsa_indexer_sparse_kl_loss",
     "dsa_sparse_attention",
     "dsa_sparse_attention_batched",
     "hca_compressor_batched",

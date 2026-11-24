@@ -267,3 +267,163 @@ def test_indexer_thd_vjp_and_segment_isolation(lengths):
     # Alter only the second segment: first-segment scores must remain unchanged.
     altered = packed(q.at[lengths[0] : sum(lengths)].multiply(2), k, w)
     np.testing.assert_array_equal(got[: lengths[0]], altered[: lengths[0]])
+
+
+@pytest.mark.L0
+@pytest.mark.parametrize("batch", [1, 2])
+def test_dsa_indexer_sparse_kl_loss_native_gradients(batch):
+    from transformer_engine.jax.deepseek_v4 import dsa_indexer_sparse_kl_loss
+
+    _require_sm100()
+    key = jax.random.key(31)
+    q = jax.random.normal(key, (batch, 16, 64, 128), jnp.bfloat16)
+    k = jax.random.normal(jax.random.fold_in(key, 1), (batch, 32, 1, 128), jnp.bfloat16)
+    w = jax.random.normal(jax.random.fold_in(key, 2), (batch, 16, 64), jnp.bfloat16)
+    ids = jnp.broadcast_to(jnp.arange(512), (batch, 16, 512))
+    valid = ids < (jnp.arange(16)[None, :, None] % 9)
+    ids = jnp.where(valid, ids, -1).astype(jnp.int32)
+    target = jnp.where(valid, 0.7 / jnp.maximum(valid.sum(-1, keepdims=True), 1), 0).astype(
+        jnp.float32
+    )
+    scale, coefficient, upstream = 0.17, 0.4, 1.7
+    count = jnp.maximum(jnp.sum(valid.any(-1)), 1)
+
+    def scores(x, y, weights):
+        dots = jnp.einsum("bshd,bkd->bshk", x.astype(jnp.float32), y[:, :, 0].astype(jnp.float32))
+        return jnp.einsum("bshk,bsh->bsk", jax.nn.relu(dots), weights.astype(jnp.float32)) * scale
+
+    def reference(x, y, weights, teacher):
+        selected = jnp.take_along_axis(scores(x, y, weights), jnp.maximum(ids, 0), axis=-1)
+        logits = jnp.where(valid, selected, -jnp.inf)
+        logits = jnp.where(valid.any(-1, keepdims=True), logits, 0)
+        log_probs = jnp.where(valid, jax.nn.log_softmax(logits), 0)
+        teacher = jax.lax.stop_gradient(teacher)
+        return (
+            upstream
+            * coefficient
+            / count
+            * jnp.sum(jnp.where(teacher > 0, teacher * (jnp.log(teacher + 1e-8) - log_probs), 0))
+        )
+
+    def native(x, y, weights, teacher):
+        detached_scores = jax.lax.stop_gradient(scores(x, y, weights))
+        return (
+            upstream
+            * coefficient
+            / count
+            * dsa_indexer_sparse_kl_loss(
+                x, y, weights, detached_scores, ids, teacher, sm_scale=scale
+            )
+        )
+
+    before = [np.asarray(x).copy() for x in (q, k, w, target)]
+    with Mesh(np.array(jax.devices()[:1]), ("data",)):
+        got_value, got = jax.jit(jax.value_and_grad(native, argnums=(0, 1, 2, 3)))(q, k, w, target)
+        ref_value, expected = jax.jit(jax.value_and_grad(reference, argnums=(0, 1, 2, 3)))(
+            q, k, w, target
+        )
+    np.testing.assert_allclose(np.asarray(got_value), np.asarray(ref_value), atol=2e-5, rtol=2e-5)
+    for actual, ref in zip(got[:3], expected[:3], strict=True):
+        a, b = np.asarray(actual, np.float32).ravel(), np.asarray(ref, np.float32).ravel()
+        cosine = a @ b / (np.linalg.norm(a) * np.linalg.norm(b))
+        rms_relative = np.linalg.norm(a - b) / np.linalg.norm(b)
+        assert cosine >= 0.999 and rms_relative <= 0.02, (cosine, rms_relative)
+    np.testing.assert_array_equal(np.asarray(got[3]), np.zeros(target.shape, np.float32))
+    for original, operand in zip(before, (q, k, w, target), strict=True):
+        np.testing.assert_array_equal(original, np.asarray(operand))
+
+
+@pytest.mark.L0
+@pytest.mark.parametrize("lengths,counts", [((7, 0, 13, 2, 0), (1, 0, 3, 0, 0)), ((0, 0), (0, 0))])
+def test_dsa_indexer_sparse_kl_loss_thd_native_gradients(lengths, counts):
+    from transformer_engine.jax.attention import SequenceDescriptor
+    from transformer_engine.jax.deepseek_v4 import dsa_indexer_sparse_kl_loss
+
+    _require_sm100()
+    cq = np.cumsum((0,) + lengths).astype(np.int32)
+    ck = np.cumsum((0,) + counts).astype(np.int32)
+    tq, tk, width = int(cq[-1]) + 3, int(ck[-1]) + 2, 4
+    key = jax.random.key(73)
+    q = jax.random.normal(key, (tq, 64, 128), jnp.bfloat16).at[cq[-1] :].set(jnp.nan)
+    k = (
+        jax.random.normal(jax.random.fold_in(key, 1), (tk, 1, 128), jnp.bfloat16)
+        .at[ck[-1] :]
+        .set(jnp.nan)
+    )
+    w = (
+        (jax.random.normal(jax.random.fold_in(key, 2), (tq, 64), jnp.bfloat16) * 0.125)
+        .at[cq[-1] :]
+        .set(jnp.nan)
+    )
+    descriptor = SequenceDescriptor.from_seqlens_and_offsets(
+        (jnp.array([lengths], jnp.int32), jnp.array([counts], jnp.int32)),
+        (jnp.array(cq[None]), jnp.array(ck[None])),
+    )
+    # Independent host construction maps selected columns to packed K for the oracle.
+    row_counts = np.zeros(tq, np.int32)
+    row_starts = np.zeros(tq, np.int32)
+    for i in range(len(lengths)):
+        row_counts[cq[i] : cq[i + 1]] = counts[i]
+        row_starts[cq[i] : cq[i + 1]] = ck[i]
+    valid_cols = jnp.arange(width)[None] < jnp.array(row_counts)[:, None]
+    ids = jnp.broadcast_to(jnp.arange(512), (tq, 512))
+    valid = ids < jnp.array(row_counts)[:, None]
+    valid = valid.at[0].set(False)
+    ids = jnp.where(valid, ids, -1).at[:, -1].set(jnp.array(row_counts)).astype(jnp.int32)
+    # Invalid selected slots and physical capacity are poisoned deliberately.
+    target = jnp.where(valid, 0.7 / jnp.maximum(valid.sum(-1, keepdims=True), 1), jnp.nan).astype(
+        jnp.float32
+    )
+    scale, factor = 0.13, 0.37
+
+    def scores(x, y, weights):
+        active = jnp.any(valid_cols, -1)
+        x = jnp.where(active[:, None, None], x, 0).astype(jnp.float32)
+        weights = jnp.where(active[:, None], weights, 0).astype(jnp.float32)
+        columns = jnp.array(row_starts)[:, None] + jnp.arange(width)[None]
+        keys = y[jnp.clip(columns, 0, tk - 1), 0].astype(jnp.float32)
+        keys = jnp.where(valid_cols[:, :, None], keys, 0)
+        dots = jnp.einsum("qhd,qkd->qhk", x, keys)
+        logits = jnp.einsum("qhk,qh->qk", jax.nn.relu(dots), weights) * scale
+        return jnp.where(valid_cols, logits, jnp.nan)
+
+    def reference(x, y, weights, teacher):
+        selected = jnp.take_along_axis(scores(x, y, weights), jnp.clip(ids, 0, width - 1), -1)
+        logits = jnp.where(valid, selected, -jnp.inf)
+        logits = jnp.where(valid.any(-1, keepdims=True), logits, 0)
+        log_probs = jnp.where(valid, jax.nn.log_softmax(logits), 0)
+        teacher = jax.lax.stop_gradient(jnp.where(valid, teacher, 0))
+        return factor * jnp.sum(
+            jnp.where(teacher > 0, teacher * (jnp.log(teacher + 1e-8) - log_probs), 0)
+        )
+
+    def native(x, y, weights, teacher):
+        return factor * dsa_indexer_sparse_kl_loss(
+            x,
+            y,
+            weights,
+            jax.lax.stop_gradient(scores(x, y, weights)),
+            ids,
+            teacher,
+            sm_scale=scale,
+            sequence_descriptor=descriptor,
+            max_seqlen_q=max(max(lengths), 1),
+            max_seqlen_k=width,
+        )
+
+    with Mesh(np.array(jax.devices()[:1]), ("data",)):
+        value, actual = jax.jit(jax.value_and_grad(native, argnums=(0, 1, 2, 3)))(q, k, w, target)
+        expected_value, expected = jax.jit(jax.value_and_grad(reference, argnums=(0, 1, 2, 3)))(
+            q, k, w, target
+        )
+    np.testing.assert_allclose(value, expected_value, atol=2e-5, rtol=2e-5)
+    for got, ref in zip(actual, expected, strict=True):
+        a, r = np.asarray(got, np.float32).ravel(), np.asarray(ref, np.float32).ravel()
+        assert np.isfinite(a).all()
+        if np.any(r):
+            assert a @ r / (np.linalg.norm(a) * np.linalg.norm(r)) >= 0.999
+            assert np.linalg.norm(a - r) / np.linalg.norm(r) <= 0.02
+        else:
+            np.testing.assert_array_equal(a, np.zeros_like(a))
+    for got, end in zip(actual[:3], (cq[-1], ck[-1], cq[-1]), strict=True):
+        np.testing.assert_array_equal(np.asarray(got[end:]), 0)
