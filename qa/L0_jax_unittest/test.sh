@@ -44,9 +44,10 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     SPLIT_ACROSS_GPUS="-n $NUM_GPUS -p gpu_per_xdist_worker"
 fi
 
-python3 -m pytest $SPLIT_ACROSS_GPUS -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax --ignore=$TE_PATH/tests/jax/test_multi_process_ep.py --ignore=$TE_PATH/tests/jax/test_mhc.py --ignore=$TE_PATH/tests/jax/moe/test_moe_fsdp_layout.py -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
-# Needs two GPUs in one process, so it can't be split across GPUs.
+python3 -m pytest $SPLIT_ACROSS_GPUS -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax --ignore=$TE_PATH/tests/jax/test_multi_process_ep.py --ignore=$TE_PATH/tests/jax/test_mhc.py --ignore=$TE_PATH/tests/jax/moe/test_moe_fsdp_layout.py --ignore=$TE_PATH/tests/jax/test_dense_mesh_resource.py -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
+# These need multiple GPUs in one process, so they can't be split across GPUs.
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_moe_fsdp_layout.xml $TE_PATH/tests/jax/moe/test_moe_fsdp_layout.py -k 'not distributed' || test_fail "tests/jax/moe/test_moe_fsdp_layout.py"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_dense_mesh_resource.xml $TE_PATH/tests/jax/test_dense_mesh_resource.py || test_fail "tests/jax/test_dense_mesh_resource.py"
 
 # Keep mHC's full numerical matrix, with autotuning isolated to two integration cases.
 NVTE_DISABLE_TRITON_AUTOTUNING=1 python3 -m pytest $SPLIT_ACROSS_GPUS -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_mhc.xml $TE_PATH/tests/jax/test_mhc.py -k 'not test_autotuning' || test_fail "test_mhc.py"
