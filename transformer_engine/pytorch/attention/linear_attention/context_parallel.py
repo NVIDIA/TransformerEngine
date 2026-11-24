@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Context parallelism for linear attention with contiguous token ownership.
+"""Linear-attention CP without load balancing, using contiguous token ownership.
 
 Coordinates fragment metadata, affine-summary exchange, state composition,
 and distributed backward. Variant adapters provide local attention and summary
@@ -64,8 +64,8 @@ class _LinearAttentionCPDeviceMetadata:
         initial_state_fragments:    [1]
         initial_state_documents:    [1]
 
-    Fragment 0 receives memory from rank 0; fragment 1 starts document B
-    on this rank and maps to global document state 1.
+    Fragment 0 receives memory from rank 0; fragment 1 starts sequence B
+    on this rank and maps to global sequence state 1.
     """
 
     cu_seqlens: torch.Tensor  # Local cumulative fragment lengths on the device.
@@ -74,14 +74,14 @@ class _LinearAttentionCPDeviceMetadata:
     # Zero variants set descriptor column 0 to -1 for an implicit zero memory.
     forward_zero_descriptors: torch.Tensor
     backward_zero_descriptors: torch.Tensor
-    document_indices: torch.Tensor  # Global document ID for each local fragment.
-    outgoing_fragment_indices: torch.Tensor  # Document continues on a later rank.
-    incoming_fragment_indices: torch.Tensor  # Document starts on an earlier rank.
-    terminal_fragment_indices: torch.Tensor  # Document ends on this rank.
-    # Paired fragment/document indices for documents starting on this rank.
+    document_indices: torch.Tensor  # Global sequence ID for each local fragment.
+    outgoing_fragment_indices: torch.Tensor  # Sequence continues on a later rank.
+    incoming_fragment_indices: torch.Tensor  # Sequence starts on an earlier rank.
+    terminal_fragment_indices: torch.Tensor  # Sequence ends on this rank.
+    # Paired fragment/sequence indices for sequences starting on this rank.
     initial_state_fragments: torch.Tensor
     initial_state_documents: torch.Tensor
-    empty_documents: torch.Tensor  # Global IDs of empty documents owned by this rank.
+    empty_documents: torch.Tensor  # Global IDs of empty sequences owned by this rank.
     # Cumulative lengths within the selected spans passed to cuDNN summary calls.
     outgoing_cu_seqlens: torch.Tensor
     incoming_cu_seqlens: torch.Tensor
@@ -171,7 +171,7 @@ def _selected_span(host_metadata, selected):
 
 
 def _slot_indices(metadata, indices):
-    """Dense slots are document IDs; packed partitions have only one edge slot."""
+    """Dense slots are sequence IDs; packed partitions have only one edge slot."""
     if metadata.host_metadata.slots == 1:
         return torch.zeros_like(indices)
     return metadata.device_metadata.document_indices.index_select(0, indices)
@@ -387,7 +387,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                     device_metadata.empty_documents,
                     final_state_grad.index_select(0, device_metadata.empty_documents),
                 )
-            # Each document's initial-state gradient belongs to its first rank. Do not
+            # Each sequence's initial-state gradient belongs to its first rank. Do not
             # replicate it here: if initial_state came from a previous CP call,
             # that call's replicated-final-state VJP sums these owner gradients.
             # Replicating now would count chained state gradients CP-size times.
@@ -408,7 +408,7 @@ def context_parallel_attention(
     output_final_state,
     **kernel_kwargs,
 ):
-    """Derive local fragment boundaries from full-document metadata and run CP."""
+    """Derive local fragment boundaries from full-sequence metadata and run CP."""
     adapter._validate_inputs(q, k, v, gates, initial_state, qkv_format)
     cp_size, cp_rank = dist.get_world_size(group), dist.get_rank(group)
     stream = torch.cuda.current_stream(q.device).cuda_stream
@@ -420,7 +420,7 @@ def context_parallel_attention(
     if dense:
         batch, length = q.shape[:2] if qkv_format == "bshd" else (q.shape[1], q.shape[0])
     elif cu_seqlens is None:
-        raise ValueError("Linear-attention CP with THD requires cu_seqlens for all documents.")
+        raise ValueError("Linear-attention CP with THD requires cu_seqlens for all sequences.")
     if cu_seqlens is not None:
         if not isinstance(cu_seqlens, torch.Tensor):
             raise TypeError("cu_seqlens must be a torch.Tensor.")
@@ -483,7 +483,7 @@ def context_parallel_attention(
     # Resolve the cuDNN operation once and reuse it on later calls.
     if adapter._op is None:
         adapter._op = adapter._resolve_op()
-    # Without shared documents or explicit states, use ordinary local autograd.
+    # Without shared sequences or explicit states, use ordinary local autograd.
     if (
         not host_metadata.communicates
         and initial_state is None

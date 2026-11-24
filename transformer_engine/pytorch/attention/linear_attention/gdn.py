@@ -59,7 +59,7 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
             )
 
     def _resolve_cu_seqlens(self, query_layer, qkv_format, cu_seqlens):
-        """Accept full-document metadata for dense inputs as well as packed inputs."""
+        """Accept full-sequence metadata for dense inputs as well as packed inputs."""
         if qkv_format == "thd" or cu_seqlens is None:
             return super()._resolve_cu_seqlens(query_layer, qkv_format, cu_seqlens)
         _validate_cu_seqlens(cu_seqlens, device=query_layer.device, name="cu_seqlens")
@@ -308,9 +308,10 @@ class GatedDeltaNetAttention(LinearAttentionBase):
           ``kv_channels`` is a tuple).
     cp_group : ProcessGroup, default = `None`
               Context parallel process group. ``None`` disables CP. Group rank
-              order must follow document token order. THD uses contiguous pieces
-              of the global packed buffer; BSHD/SBHD use contiguous pieces
-              of each sequence. Q/K/V and gates must already be local tensors.
+              order must follow sequence token order. CP uses no load balancing.
+              THD uses contiguous pieces of the global packed buffer;
+              BSHD/SBHD use contiguous pieces of each sequence.
+              Q/K/V and gates must already be local tensors.
               Summary communication uses all-gather. No output gather is performed.
     """
 
@@ -387,13 +388,13 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         qkv_format : Optional[str], default = `None`
             Overrides the module's configured `qkv_format` for this call.
         cu_seqlens : Optional[torch.Tensor], default = `None`
-            Cumulative document lengths, of shape `[batch_size + 1]` and dtype
+            Cumulative sequence lengths, of shape `[batch_size + 1]` and dtype
             `torch.int32`. Required for THD. With CP, describe the complete
-            documents across the CP group, identically on all ranks; TE derives
+            sequences across the CP group, identically on all ranks; TE derives
             the local fragment boundaries. For BSHD/SBHD CP, this metadata is
             optional for equal slices and required for uneven slices; see Notes.
             Without CP, dense metadata is optional and must describe the
-            full rows as `[0, S, 2*S, ..., B*S]`.
+            full sequences as `[0, S, 2*S, ..., B*S]`.
         checkpoint_core_attention : bool, default = `False`
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
@@ -408,22 +409,22 @@ class GatedDeltaNetAttention(LinearAttentionBase):
 
         Notes
         -----
-        CP requires contiguous rank slices. For THD, rank ``r`` supplies
-        ``[r*T//P:(r+1)*T//P]`` of the packed buffer, where
+        CP uses no load balancing and requires contiguous rank slices.
+        For THD, rank ``r`` supplies ``[r*T//P:(r+1)*T//P]`` of the packed buffer, where
         ``T = cu_seqlens[-1]`` and ``P`` is CP size. Pack tokens without gaps;
-        document lengths need not be divisible by ``P``.
+        sequence lengths need not be divisible by ``P``.
 
         For BSHD/SBHD, rank ``r`` supplies ``[r*S//P:(r+1)*S//P]`` of each
-        batch row, where ``S`` is the global sequence length. Supply
+        sequence, where ``S`` is the global sequence length. Supply
         ``cu_seqlens=[0, S, 2*S, ..., B*S]`` (``B`` is batch size) for uneven
         slices; otherwise TE infers ``S = local_sequence_length * P``.
         Arbitrary rank splits are unsupported.
 
-        With CP, ``initial_state`` covers all global documents and must match on
-        all ranks. Each document's initial-state gradient is returned on its
+        With CP, ``initial_state`` covers all global sequences and must match on
+        all ranks. Each sequence's initial-state gradient is returned on its
         first owning rank, with zeros elsewhere; sum over CP for a replicated
         leaf state's full gradient. Final states are replicated for all global
-        documents and can be chained into the next call. Their backward sums
+        sequences and can be chained into the next call. Their backward sums
         gradients across replicas; divide a replicated final-state loss by ``P``
         to count it once.
 

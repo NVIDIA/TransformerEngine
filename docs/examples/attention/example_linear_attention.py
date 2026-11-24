@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Gated DeltaNet forward and backward, with optional contiguous context parallelism.
+"""Gated DeltaNet forward and backward, with optional CP without load balancing.
 
 Run from the repository root:
     python docs/examples/attention/example_linear_attention.py
@@ -24,7 +24,7 @@ def make_inputs(qkv_format):
     torch.manual_seed(1234)
     batch, sequence, heads, head_dim = 16, 128, 8, 64
     if qkv_format == "thd":
-        # Sample document lengths from 32 to 128 tokens, then pack without padding.
+        # Sample sequence lengths from 32 to 128 tokens, then pack without padding.
         lengths = torch.randint(32, 129, (batch,), device="cpu").tolist()
         offsets = [0]
         for length in lengths:
@@ -46,7 +46,7 @@ def make_inputs(qkv_format):
 
 
 def run_single_gpu(inputs, initial_state, cu_seqlens, qkv_format):
-    """Run on complete documents and differentiate through outputs and final states."""
+    """Run on complete sequences and differentiate through outputs and final states."""
     q, k, v, g, beta = inputs
     attention = te.GatedDeltaNetAttention(
         num_attention_heads=q.shape[-2],
@@ -80,7 +80,7 @@ def local_tokens(tensor, qkv_format, cp_group):
 
 
 def run_context_parallel(inputs, initial_state, cu_seqlens, qkv_format, cp_group):
-    """Supply local tokens and global document metadata to GDN CP."""
+    """Supply local tokens and global sequence metadata to GDN CP."""
     local_inputs = tuple(
         local_tokens(t, qkv_format, cp_group).detach().contiguous().requires_grad_() for t in inputs
     )
@@ -156,7 +156,7 @@ def main():
             check_close(states, final_state, 2e-2)
             for local, full in zip(local_inputs, inputs):
                 check_close(local.grad, local_tokens(full.grad, args.qkv_format, cp_group), 4e-2)
-            # Initial-state gradients belong to each document's first owning rank.
+            # Initial-state gradients belong to each sequence's first owning rank.
             dist.all_reduce(state.grad, group=cp_group)
             check_close(state.grad, initial_state.grad, 4e-2)
         if not args.cp or dist.get_rank() == 0:

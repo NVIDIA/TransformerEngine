@@ -11,14 +11,14 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class LinearAttentionFragment:
-    """Metadata for a fragment: the intersection of one independent document
+    """Metadata for a fragment: the intersection of one independent sequence
     with one rank's token interval.
 
-    For example, global cu_seqlens [0, 8, 12, 24] describes documents
+    For example, global cu_seqlens [0, 8, 12, 24] describes sequences
     A [0, 8), B [8, 12), and C [12, 24). With CP=4, each rank owns six
     consecutive tokens. Each row below describes one fragment:
 
-        Rank  Rank interval  Document  start  end  first_rank  last_rank
+        Rank  Rank interval  Sequence  start  end  first_rank  last_rank
         0     [0, 6)         A (0)         0    6           0          1
         1     [6, 12)        A (0)         6    8           0          1
         1     [6, 12)        B (1)         8   12           1          1
@@ -27,7 +27,7 @@ class LinearAttentionFragment:
 
     ``start`` is inclusive and ``end`` is exclusive; both are global offsets.
     ``first_rank`` and ``last_rank`` identify the first and last ranks owning
-    tokens of the whole document, not just this fragment.
+    tokens of the whole sequence, not just this fragment.
     """
 
     document: int
@@ -39,11 +39,11 @@ class LinearAttentionFragment:
 
 @dataclass(frozen=True)
 class LinearAttentionCPHostMetadata:
-    """Global document boundaries and local fragment metadata for one CP rank.
+    """Global sequence boundaries and local fragment metadata for one CP rank.
 
-    Packed (THD) inputs intersect documents with contiguous rank intervals.
-    Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every document.
-    Empty documents have no fragments; their state is unchanged.
+    Packed (THD) inputs intersect sequences with contiguous rank intervals.
+    Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every sequence.
+    Empty sequences have no fragments; their state is unchanged.
 
     Using the fragment example from LinearAttentionFragment, packed rank 1 owns:
 
@@ -51,8 +51,8 @@ class LinearAttentionCPHostMetadata:
         local_cu_seqlens:           (0, 2, 6)
         forward_descriptors:        ((0, 0, 1, 1), (1, 1, 0, 1))
         incoming_fragment_indices:  (0,)     # A continues from rank 0.
-        outgoing_fragment_indices:  ()      # Neither document continues to a later rank.
-        terminal_fragment_indices:  (0, 1)   # Both documents end on this rank.
+        outgoing_fragment_indices:  ()      # Neither sequence continues to a later rank.
+        terminal_fragment_indices:  (0, 1)   # Both sequences end on this rank.
     """
 
     cu_seqlens: Tuple[int, ...]  # Global cumulative sequence lengths.
@@ -64,21 +64,21 @@ class LinearAttentionCPHostMetadata:
     forward_descriptors: Tuple[Tuple[int, int, int, int], ...]
     # Select following reverse summaries to compose each fragment's ending-state gradient.
     backward_descriptors: Tuple[Tuple[int, int, int, int], ...]
-    outgoing_fragment_indices: Tuple[int, ...]  # Document continues to a later rank.
-    incoming_fragment_indices: Tuple[int, ...]  # Document starts on an earlier rank.
-    terminal_fragment_indices: Tuple[int, ...]  # Document ends on this rank.
-    initial_state_owners: Tuple[int, ...]  # Initial-state owner rank for each global document.
-    empty_owned: Tuple[int, ...]  # Empty global document IDs assigned to this rank.
-    slots: int  # One per rank for packed inputs; one per document for dense inputs.
-    communicates: bool  # Any global document spans multiple ranks.
+    outgoing_fragment_indices: Tuple[int, ...]  # Sequence continues to a later rank.
+    incoming_fragment_indices: Tuple[int, ...]  # Sequence starts on an earlier rank.
+    terminal_fragment_indices: Tuple[int, ...]  # Sequence ends on this rank.
+    initial_state_owners: Tuple[int, ...]  # Initial-state owner rank for each global sequence.
+    empty_owned: Tuple[int, ...]  # Empty global sequence IDs assigned to this rank.
+    slots: int  # One per rank for packed inputs; one per sequence for dense inputs.
+    communicates: bool  # Any global sequence spans multiple ranks.
 
 
 def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, dense=False):
     """Build one rank's fragment and summary metadata on the host.
 
-    ``cu_seqlens`` contains full-document boundaries as host integers. For
+    ``cu_seqlens`` contains full-sequence boundaries as host integers. For
     P = ``cp_size``, packed rank r owns [r*T//P:(r+1)*T//P] of T total tokens.
-    Dense rank r owns [r*S//P:(r+1)*S//P] of each length-S document.
+    Dense rank r owns [r*S//P:(r+1)*S//P] of each length-S sequence.
     """
     cu_seqlens = tuple(cu_seqlens)
     if cp_size < 1 or not 0 <= cp_rank < cp_size:
@@ -96,7 +96,7 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
         if dense:
             length = end - start
             if length != cu_seqlens[1]:
-                raise ValueError("Dense CP needs equal global document lengths.")
+                raise ValueError("Dense CP needs equal global sequence lengths.")
             cuts = tuple(r * length // cp_size for r in range(cp_size + 1))
             first_rank = min(cp_size - 1, bisect_right(cuts, 0) - 1) if length else 0
             last_rank = min(cp_size - 1, bisect_right(cuts, length - 1) - 1) if length else 0
@@ -119,8 +119,8 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
                 LinearAttentionFragment(doc, fragment_start, fragment_end, first_rank, last_rank)
             )
     cu = [0]
-    # Descriptor rows are (document, first_summary, count, stride). Each selects
-    # summaries of one document, in forward or reverse order.
+    # Descriptor rows are (sequence, first_summary, count, stride). Each selects
+    # summaries of one sequence, in forward or reverse order.
     forward_desc, backward_desc = [], []
     outgoing_fragment_indices = []
     incoming_fragment_indices = []

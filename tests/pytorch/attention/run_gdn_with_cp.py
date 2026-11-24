@@ -28,7 +28,7 @@ from test_gdn_attention import (
 def _reference(inputs, cu, scale, norm):
     """Compute the independent FP64 reference for the full batch on each rank.
 
-    The caller selects rank-local output slices. Empty documents retain their initial states.
+    The caller selects rank-local output slices. Empty sequences retain their initial states.
     """
     q, k, v, g, beta, initial = inputs
     outputs, states = [], []
@@ -173,7 +173,7 @@ def _case(
             else:
                 _assert_rms_close(tensor.grad, expected, _BWD_TOL[dtype], f"CP d{name}")
     if initial:
-        # Combine the initial-state gradients returned on each document's first owning rank.
+        # Combine the initial-state gradients returned on each sequence's first owning rank.
         initial_grad = state.grad.detach().clone()
         dist.all_reduce(initial_grad, group=group)
         _assert_rms_close(initial_grad, ref_grads[5], _BWD_TOL[dtype], "CP initial-state gradient")

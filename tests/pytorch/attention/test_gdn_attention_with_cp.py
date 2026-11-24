@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""End-to-end numerical tests for contiguous GDN context parallelism."""
+"""End-to-end numerical tests for GDN CP without load balancing."""
 
 import json
 import os
@@ -31,7 +31,7 @@ def _generate_random_lengths(count, lower_bound, upper_bound, *, total=None):
     assert count * lower_bound <= total <= count * upper_bound
     lengths = []
     for remaining in range(count - 1, -1, -1):
-        # Reserve enough tokens to keep the remaining documents within bounds.
+        # Reserve enough tokens to keep the remaining sequences within bounds.
         lower = max(lower_bound, total - remaining * upper_bound)
         upper = min(upper_bound, total - remaining * lower_bound)
         length = generator.randint(lower, upper)
@@ -44,7 +44,7 @@ def _generate_random_lengths(count, lower_bound, upper_bound, *, total=None):
 _GEOMETRY_LENGTHS = _generate_random_lengths(3, 65, 192)
 
 GDN_CP_CASES = {
-    # One long shared document exercises many internal chunks on every rank.
+    # One long shared sequence exercises many internal chunks on every rank.
     "cp_0": dict(lengths=_generate_random_lengths(1, 7168, 8192), norm=True),
     # Dense FP16 training uses a multiple of 8 for equal CP=2/4/8 slices, with checkpointing.
     "cp_1": dict(
@@ -68,7 +68,7 @@ GDN_CP_CASES = {
         dense_global=True,
         final=False,
     ),
-    # Keep 4096 tokens so the 2049-token document spans three CP=4 ranks; vary the short tail.
+    # Keep 4096 tokens so the 2049-token sequence spans three CP=4 ranks; vary the short tail.
     "cp_3": dict(
         lengths=[2049, 1023] + _generate_random_lengths(14, 32, 128, total=1024),
         dtype="fp16",
@@ -77,9 +77,9 @@ GDN_CP_CASES = {
         norm=True,
         fallback=True,
     ),
-    # Whole documents align with ranks for CP=2/4/8 and need no summary exchange.
+    # Whole sequences align with ranks for CP=2/4/8 and need no summary exchange.
     "cp_4": dict(lengths=[64] * 32, heads=8, initial=False, final=False),
-    # Empty documents, partial features and a late-token loss also exercise CPU metadata.
+    # Empty sequences, partial features and a late-token loss also exercise CPU metadata.
     "cp_5": dict(
         lengths=[0, _GEOMETRY_LENGTHS[0], 0, *_GEOMETRY_LENGTHS[1:]],
         key_dim=32,
@@ -91,7 +91,7 @@ GDN_CP_CASES = {
     ),
     # A single token leaves empty ranks; only final-state losses drive backward.
     "cp_6": dict(lengths=[0, 1, 0], state_only=True),
-    # Keep 1024 tokens and a shared first document; chain states after inference-cache warmup.
+    # Keep 1024 tokens and a shared first sequence; chain states after inference-cache warmup.
     "cp_7": dict(
         kind="state_chaining",
         lengths=[513] + _generate_random_lengths(3, 64, 256, total=511),
