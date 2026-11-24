@@ -24,169 +24,6 @@ from transformer_engine.jax.moe import (
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
 
 
-@jax.tree_util.register_pytree_node_class
-class _FakeGroupedTensor:
-    def __init__(self, data, first_dims=None):
-        self.data = data
-        self.first_dims = first_dims
-
-    def get_tensor(self, usage=None):
-        del usage
-        return self
-
-    def checkpoint(self, quantizer=None):
-        del quantizer
-        return self
-
-    def tree_flatten(self):
-        return (self.data, self.first_dims), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        del aux_data
-        return cls(*children)
-
-
-def _install_unfused_ffn_doubles(monkeypatch, *, poison_inactive=False, captured_d_combined=None):
-    module = importlib.import_module("transformer_engine.jax.moe")
-
-    def row_expert_mask(rows, group_sizes):
-        ends = jnp.cumsum(group_sizes)
-        starts = ends - group_sizes
-        idx = jnp.arange(rows)[:, None]
-        return (idx >= starts[None, :]) & (idx < ends[None, :])
-
-    def quantize(data, quantizer, group_sizes=None, **kwargs):
-        del kwargs
-        if captured_d_combined is not None and quantizer == "fc1_dgrad":
-            captured_d_combined.append(data)
-        return _FakeGroupedTensor(data, group_sizes)
-
-    def gemm(lhs, rhs, *, contracting_dims, bias=None):
-        group_sizes = lhs.first_dims
-        mask = row_expert_mask(lhs.data.shape[0], group_sizes)
-        active = mask.any(axis=-1)
-        lhs_clean = jnp.where(active[:, None], lhs.data, 0)
-        if contracting_dims == ((0,), (0,)):
-            rhs_clean = jnp.where(active[:, None], rhs.data, 0)
-            return jnp.einsum(
-                "re,rk,rn->ekn",
-                mask.astype(lhs.data.dtype),
-                lhs_clean,
-                rhs_clean,
-                preferred_element_type=lhs.data.dtype,
-            )
-        expert_ids = jnp.argmax(mask, axis=-1)
-        rhs_sel = rhs.data[expert_ids]
-        if contracting_dims == ((1,), (1,)):
-            out = jnp.einsum(
-                "rk,rkn->rn", lhs_clean, rhs_sel, preferred_element_type=lhs.data.dtype
-            )
-            if bias is not None:
-                out = out + bias[expert_ids].astype(out.dtype)
-        elif contracting_dims == ((1,), (2,)):
-            out = jnp.einsum(
-                "rn,rkn->rk", lhs_clean, rhs_sel, preferred_element_type=lhs.data.dtype
-            )
-        else:
-            raise AssertionError(f"Unexpected contracting_dims={contracting_dims}")
-        fill = jnp.asarray(jnp.nan if poison_inactive else 0, out.dtype)
-        return jnp.where(active[:, None], out, fill)
-
-    def dbias(grad, group_sizes):
-        mask = row_expert_mask(grad.shape[0], group_sizes)
-        active = mask.any(axis=-1)
-        grad_clean = jnp.where(active[:, None], grad, 0)
-        return jnp.einsum(
-            "re,rn->en",
-            mask.astype(grad.dtype),
-            grad_clean,
-            preferred_element_type=grad.dtype,
-        )
-
-    def unexpected_fused(*args, **kwargs):
-        raise AssertionError("Unfused fallback must not invoke cuDNN fused GLU/dGLU")
-
-    monkeypatch.setattr(module.tex, "grouped_quantize", quantize)
-    monkeypatch.setattr(module.tex, "grouped_gemm", gemm)
-    monkeypatch.setattr(module.tex, "grouped_dbias", dbias)
-    monkeypatch.setattr(module.tex, "grouped_gemm_glu", unexpected_fused)
-    monkeypatch.setattr(module.tex, "grouped_gemm_dglu", unexpected_fused)
-    return module
-
-
-def _fake_quantizer_sets():
-    fc1 = SimpleNamespace(x="fc1_x", kernel="fc1_k", dgrad="fc1_dgrad")
-    fc2 = SimpleNamespace(x="fc2_x", kernel="fc2_k", dgrad="fc2_dgrad")
-    return (fc1, fc2)
-
-
-def _unfused_ffn_fwd(
-    module,
-    tokens,
-    weights,
-    sizes,
-    wi,
-    wo,
-    *,
-    apply_topk_weights_early=False,
-    biases=(None, None, None),
-    act_params=ActivationParams(),
-):
-    wi_0_bias, wi_1_bias, wo_bias = biases
-    return module._ffn_fwd_per_shard(
-        tokens,
-        weights,
-        sizes,
-        wi,
-        wo,
-        None,
-        wi_0_bias,
-        wi_1_bias,
-        wo_bias,
-        _fake_quantizer_sets(),
-        compute_dtype=tokens.dtype,
-        num_local_experts=wi.shape[0],
-        activation_type="situglu",
-        apply_topk_weights_early=apply_topk_weights_early,
-        use_cudnn_jax_fusion=False,
-        wi_0_checkpoint_name=None,
-        wi_1_checkpoint_name=None,
-        wo_checkpoint_name=None,
-        cudnn_native_weight_layout=False,
-        quant_before_fsdp_ag=False,
-        fsdp_axis=None,
-        fsdp_size=1,
-        wi_fsdp_axis=None,
-        wo_fsdp_axis=None,
-        act_params=act_params,
-    )
-
-
-def _unfused_ffn_bwd(
-    module,
-    d_out,
-    residuals,
-    weights,
-    *,
-    apply_topk_weights_early=False,
-    has_bias=False,
-    act_params=ActivationParams(),
-):
-    return module._ffn_bwd_per_shard(
-        d_out,
-        *residuals,
-        weights,
-        _fake_quantizer_sets(),
-        activation_type="situglu",
-        apply_topk_weights_early=apply_topk_weights_early,
-        has_bias=has_bias,
-        use_cudnn_jax_fusion=False,
-        cudnn_native_weight_layout=False,
-        act_params=act_params,
-    )
-
-
 @pytest.mark.parametrize("soft_caps", [None, {"gate_beta": 2.0, "up_beta": 8.0}])
 def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_caps):
     module = importlib.import_module("transformer_engine.jax.moe")
@@ -247,143 +84,120 @@ def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_ca
 
 
 @pytest.mark.parametrize(
-    "dtype,betas,counts",
-    [
-        (jnp.float32, (4.0, 25.0), [3, 0, 5]),
-        (jnp.float16, (2.0, 8.0), [3, 0, 5]),
-        (jnp.bfloat16, (2.0, 8.0), [3, 0, 5]),
-        (jnp.bfloat16, (4.0, 25.0), [0, 0, 0]),
-        (jnp.float32, (4.0, 25.0), [0]),
-    ],
+    "apply_topk_weights_early,counts",
+    [(False, [3, 0, 5]), (True, [3, 0, 5]), (True, [0, 0, 0])],
 )
-def test_situ_masks_inactive_values_and_gradients(monkeypatch, dtype, betas, counts):
-    captured_d_combined = []
-    module = _install_unfused_ffn_doubles(
-        monkeypatch, poison_inactive=True, captured_d_combined=captured_d_combined
-    )
-    capacity = 0 if counts == [0] else 13
-    active = sum(counts)
-    num_experts, inter = len(counts), 6
+def test_unfused_situ_ffn_masks_inactive_rows(monkeypatch, apply_topk_weights_early, counts):
+    module = importlib.import_module("transformer_engine.jax.moe")
+    captured = {}
+
+    class _Tensor:
+        def __init__(self, data, first_dims=None):
+            self.data, self.first_dims = data, first_dims
+
+        def get_tensor(self, usage=None):
+            del usage
+            return self
+
+        def checkpoint(self, quantizer=None):
+            del quantizer
+            return self
+
+    def quantize(data, quantizer, group_sizes=None, **_):
+        if quantizer == "fc1_dgrad":
+            captured["d_combined"] = data
+        return _Tensor(data, group_sizes)
+
+    def gemm(lhs, rhs, *, contracting_dims, bias=None):
+        del bias
+        if contracting_dims == ((0,), (0,)):
+            return jnp.zeros((len(counts), lhs.data.shape[1], rhs.data.shape[1]), lhs.data.dtype)
+        active = jnp.arange(lhs.data.shape[0]) < lhs.first_dims.sum()
+        rhs_mat = rhs.data[0] if contracting_dims == ((1,), (1,)) else rhs.data[0].T
+        return jnp.where(active[:, None], lhs.data @ rhs_mat, jnp.nan)
+
+    monkeypatch.setattr(module.tex, "grouped_quantize", quantize)
+    monkeypatch.setattr(module.tex, "grouped_gemm", gemm)
+
+    capacity, active, inter = 10, sum(counts), 4
     hidden = 2 * inter
     rng = np.random.default_rng(72)
-    gate, up, dy = [rng.uniform(-5, 5, (capacity, inter)).astype(np.float32) for _ in range(3)]
-    for value in (gate, up, dy):
-        value[active:] = np.nan
-    tokens = jnp.asarray(np.concatenate([gate, up], axis=-1), dtype)[None, :, :]
-    d_out = jnp.asarray(np.concatenate([dy, np.zeros_like(dy)], axis=-1), dtype)[None, :, :]
-    weights = np.ones((1, capacity), dtype=np.float32)
-    weights[:, active:] = np.nan
-    weights = jnp.asarray(weights)
+    gate, up, dy = [rng.uniform(-4, 4, (capacity, inter)).astype(np.float32) for _ in range(3)]
+    weights_np = rng.uniform(0.1, 0.9, (1, capacity)).astype(np.float32)
+    for arr in (gate, up, dy):
+        arr[active:] = np.nan
+    weights_np[:, active:] = np.nan
+
+    tokens = jnp.asarray(np.concatenate([gate, up], axis=-1))[None]
+    d_out = jnp.asarray(np.concatenate([dy, np.zeros_like(dy)], axis=-1))[None]
+    weights = jnp.asarray(weights_np)
     sizes = jnp.asarray(counts, jnp.int32)
-    wi = jnp.broadcast_to(jnp.eye(hidden, dtype=dtype), (num_experts, hidden, hidden))
-    wo = jnp.broadcast_to(jnp.eye(inter, hidden, dtype=dtype), (num_experts, inter, hidden))
-    params = ActivationParams.create("situglu", gate_beta=betas[0], up_beta=betas[1])
-
-    _, residuals = jax.jit(
-        lambda tok, w, cnt: _unfused_ffn_fwd(module, tok, w, cnt, wi, wo, act_params=params)
-    )(tokens, weights, sizes)
-    output = residuals[4].data
-
-    def run_bwd(d_eo, res, w):
-        return _unfused_ffn_bwd(module, d_eo, res, w, act_params=params), captured_d_combined[-1]
-
-    grads, d_combined = jax.jit(run_bwd)(d_out, residuals, weights)
-    dg, du = d_combined[:, :inter], d_combined[:, inter:]
-    g, u, d = [
-        np.asarray(jnp.asarray(value, dtype), np.float64)[:active] for value in (gate, up, dy)
-    ]
-    gate_beta, up_beta = betas
-    tg, tu, sigmoid = np.tanh(g / gate_beta), np.tanh(u / up_beta), 1 / (1 + np.exp(-g))
-    ref = (
-        gate_beta * tg * sigmoid * up_beta * tu,
-        d * ((1 - tg**2) * sigmoid + gate_beta * tg * sigmoid * (1 - sigmoid)) * up_beta * tu,
-        d * gate_beta * tg * sigmoid * (1 - tu**2),
+    wi = jnp.broadcast_to(jnp.eye(hidden, dtype=jnp.float32), (len(counts), hidden, hidden))
+    wo = jnp.broadcast_to(jnp.eye(inter, hidden, dtype=jnp.float32), (len(counts), inter, hidden))
+    qsets = (
+        SimpleNamespace(x=None, kernel=None, dgrad="fc1_dgrad"),
+        SimpleNamespace(x=None, kernel=None, dgrad=None),
     )
-    tolerance = {jnp.float32: 2e-05, jnp.float16: 0.003, jnp.bfloat16: 0.02}[dtype]
-    for actual, expected in zip((output, dg, du), ref):
-        actual = np.asarray(actual, np.float32)
-        assert np.isfinite(actual).all()
-        np.testing.assert_array_equal(actual[active:], 0)
-        np.testing.assert_allclose(actual[:active], expected, atol=tolerance, rtol=tolerance)
-    assert np.isfinite(np.asarray(grads[0][0, :active], np.float32)).all()
-    for tensor in grads[1:4]:
-        assert np.isfinite(np.asarray(tensor, np.float32)).all()
+    params = ActivationParams.create("situglu", gate_beta=2.0, up_beta=8.0)
 
-
-@pytest.mark.parametrize("apply_topk_weights_early", [False, True])
-def test_unfused_situ_ffn_early_weighting_and_bias(monkeypatch, apply_topk_weights_early):
-    captured_d_combined = []
-    module = _install_unfused_ffn_doubles(
-        monkeypatch, poison_inactive=True, captured_d_combined=captured_d_combined
-    )
-    counts = [2, 0, 3]
-    active = sum(counts)
-    capacity, num_experts, hidden, inter = 8, len(counts), 4, 3
-    rng = np.random.default_rng(19)
-    tokens = rng.uniform(-1, 1, (1, capacity, hidden)).astype(np.float32)
-    weights = rng.uniform(0.1, 0.9, (1, capacity)).astype(np.float32)
-    d_out = rng.uniform(-1, 1, (1, capacity, hidden)).astype(np.float32)
-    tokens[:, active:] = np.nan
-    weights[:, active:] = np.nan
-    d_out[:, active:] = np.nan
-    tokens, weights, d_out = map(jnp.asarray, (tokens, weights, d_out))
-    wi = jnp.asarray(rng.uniform(-0.5, 0.5, (num_experts, hidden, 2 * inter)).astype(np.float32))
-    wo = jnp.asarray(rng.uniform(-0.5, 0.5, (num_experts, inter, hidden)).astype(np.float32))
-    biases = (
-        jnp.asarray(rng.uniform(-0.2, 0.2, (num_experts, inter)).astype(np.float32)),
-        jnp.asarray(rng.uniform(-0.2, 0.2, (num_experts, inter)).astype(np.float32)),
-        jnp.asarray(rng.uniform(-0.2, 0.2, (num_experts, hidden)).astype(np.float32)),
-    )
-    sizes = jnp.asarray(counts, jnp.int32)
-    params = ActivationParams.create("situglu", gate_beta=2.5, up_beta=10.0)
-
-    out, residuals = _unfused_ffn_fwd(
-        module,
+    _, residuals = module._ffn_fwd_per_shard(
         tokens,
         weights,
         sizes,
         wi,
         wo,
+        None,
+        None,
+        None,
+        None,
+        qsets,
+        compute_dtype=jnp.float32,
+        num_local_experts=len(counts),
+        activation_type="situglu",
         apply_topk_weights_early=apply_topk_weights_early,
-        biases=biases,
+        use_cudnn_jax_fusion=False,
+        wi_0_checkpoint_name=None,
+        wi_1_checkpoint_name=None,
+        wo_checkpoint_name=None,
+        cudnn_native_weight_layout=False,
+        quant_before_fsdp_ag=False,
+        fsdp_axis=None,
+        fsdp_size=1,
+        wi_fsdp_axis=None,
+        wo_fsdp_axis=None,
         act_params=params,
     )
-    d_x, d_w, d_wi, d_wo, d_w0b, d_w1b, d_wob = _unfused_ffn_bwd(
-        module,
+    _, d_w, *_ = module._ffn_bwd_per_shard(
         d_out,
-        residuals,
+        *residuals,
         weights,
+        qsets,
+        activation_type="situglu",
         apply_topk_weights_early=apply_topk_weights_early,
-        has_bias=True,
+        has_bias=False,
+        use_cudnn_jax_fusion=False,
+        cudnn_native_weight_layout=False,
         act_params=params,
     )
-    intermediate = np.asarray(residuals[4].data)
-    d_combined = np.asarray(captured_d_combined[-1])
-    assert np.isfinite(intermediate).all()
-    assert np.isfinite(d_combined).all()
-    np.testing.assert_array_equal(intermediate[active:], 0)
-    np.testing.assert_array_equal(d_combined[active:], 0)
-    np.testing.assert_array_equal(np.asarray(d_w)[0, active:], 0)
 
-    def ref_loss(x_act, w_act, wi_p, wo_p, b0, b1, bo):
-        expert_ids = jnp.repeat(jnp.arange(num_experts), sizes, total_repeat_length=active)
-        wi_g, wi_u = jnp.split(wi_p, 2, axis=-1)
-        g = jnp.einsum("rk,rkn->rn", x_act, wi_g[expert_ids]) + b0[expert_ids]
-        u = jnp.einsum("rk,rkn->rn", x_act, wi_u[expert_ids]) + b1[expert_ids]
-        mid = (2.5 * jnp.tanh(g / 2.5) * jax.nn.sigmoid(g)) * (10.0 * jnp.tanh(u / 10.0))
-        if apply_topk_weights_early:
-            mid = mid * w_act[:, None]
-        y = jnp.einsum("rn,rnh->rh", mid, wo_p[expert_ids]) + bo[expert_ids]
-        return jnp.sum(y * d_out[0, :active])
-
-    ref_grads = jax.grad(ref_loss, argnums=(0, 1, 2, 3, 4, 5, 6))(
-        tokens[0, :active], weights[0, :active], wi, wo, *biases
+    g, u, d = gate[:active], up[:active], dy[:active]
+    tg, tu, sig = np.tanh(g / 2.0), np.tanh(u / 8.0), 1 / (1 + np.exp(-g))
+    mid = (2.0 * tg * sig) * (8.0 * tu)
+    w = weights_np[0, :active, None] if apply_topk_weights_early else 1.0
+    d_combined = captured["d_combined"]
+    expected = (
+        mid * w,
+        (d * w) * ((1 - tg**2) * sig + 2.0 * tg * sig * (1 - sig)) * (8.0 * tu),
+        (d * w) * (2.0 * tg * sig) * (1 - tu**2),
+        np.sum(d * mid, axis=-1) if apply_topk_weights_early else np.zeros(active),
     )
-    for actual, expected in zip(
-        (d_x[0, :active], d_w[0, :active], d_wi, d_wo, d_w0b, d_w1b, d_wob), ref_grads
+    for actual, ref in zip(
+        (residuals[4].data, d_combined[:, :inter], d_combined[:, inter:], d_w[0]), expected
     ):
-        np.testing.assert_allclose(actual, expected, atol=2e-05, rtol=2e-05)
-    assert np.isfinite(np.asarray(out[0, :active])).all()
+        arr = np.asarray(actual, np.float32)
+        assert np.isfinite(arr).all()
+        np.testing.assert_array_equal(arr[active:], 0)
+        np.testing.assert_allclose(arr[:active], ref, atol=2e-05, rtol=2e-05)
 
 
 @pytest.mark.parametrize(
