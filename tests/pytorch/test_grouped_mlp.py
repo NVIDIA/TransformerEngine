@@ -1569,12 +1569,17 @@ class TestGroupedMLPFusedOp:
         )
         assert result == ops
 
-    @pytest.mark.parametrize("single_grouped_weight", (False, True))
-    def test_canonical_glu_graph_training(self, single_grouped_weight):
+    @pytest.mark.parametrize(
+        "quantization,single_grouped_weight",
+        (("mxfp8", False), ("mxfp8", True), ("nvfp4_rht", False)),
+    )
+    def test_canonical_glu_graph_training(self, quantization, single_grouped_weight):
         """Captured canonical training replays with fresh inputs and correct main gradients."""
-        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("mxfp8"):
-            pytest.skip("Canonical MXFP8 GLU is unavailable")
-        self.test_grouped_mlp_cuda_graph_safe_mxfp8(
+        precision = "nvfp4" if quantization == "nvfp4_rht" else quantization
+        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision):
+            pytest.skip(f"Canonical {precision} GLU is unavailable")
+        self.test_grouped_mlp_cuda_graph_safe(
+            quantization=quantization,
             single_grouped_weight=single_grouped_weight,
             accumulate_into_main_grad=True,
             activation="scaled_swiglu",
