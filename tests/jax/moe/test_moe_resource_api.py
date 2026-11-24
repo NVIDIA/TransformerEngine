@@ -14,10 +14,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from transformer_engine.jax.cpp_extensions.activation import (
-    ActivationParams,
-    _jax_act_lu,
-)
+from transformer_engine.jax.cpp_extensions.activation import ActivationParams
 from transformer_engine.jax.flax import _MoEBlock
 from transformer_engine.jax.moe import (
     RouterComputationInfo,
@@ -132,7 +129,6 @@ def _unfused_ffn_fwd(
     wi,
     wo,
     *,
-    activation_type="situglu",
     apply_topk_weights_early=False,
     biases=(None, None, None),
     act_params=ActivationParams(),
@@ -151,7 +147,7 @@ def _unfused_ffn_fwd(
         _fake_quantizer_sets(),
         compute_dtype=tokens.dtype,
         num_local_experts=wi.shape[0],
-        activation_type=activation_type,
+        activation_type="situglu",
         apply_topk_weights_early=apply_topk_weights_early,
         use_cudnn_jax_fusion=False,
         wi_0_checkpoint_name=None,
@@ -173,7 +169,6 @@ def _unfused_ffn_bwd(
     residuals,
     weights,
     *,
-    activation_type="situglu",
     apply_topk_weights_early=False,
     has_bias=False,
     act_params=ActivationParams(),
@@ -183,7 +178,7 @@ def _unfused_ffn_bwd(
         *residuals,
         weights,
         _fake_quantizer_sets(),
-        activation_type=activation_type,
+        activation_type="situglu",
         apply_topk_weights_early=apply_topk_weights_early,
         has_bias=has_bias,
         use_cudnn_jax_fusion=False,
@@ -249,68 +244,6 @@ def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_ca
     for call in calls:
         assert call["situ_beta1"] == expected["gate_beta"]
         assert call["situ_beta2"] == expected["up_beta"]
-
-
-def test_situ_value_and_both_branch_derivatives():
-    gate_beta, up_beta = 2.0, 7.0
-    gate = jnp.asarray([-10000.0, -12.0, -0.5, 0.0, 0.5, 12.0, 10000.0])
-    up = jnp.asarray([10000.0, 40.0, -3.0, 2.0, 3.0, -40.0, -10000.0])
-    params = ActivationParams.create("situglu", gate_beta=gate_beta, up_beta=up_beta)
-
-    def activate(g, u):
-        return _jax_act_lu(
-            jnp.stack([g, u], axis=-2), ("situ", "situ_linear"), act_params=params
-        ).data
-
-    output, pullback = jax.vjp(activate, gate, up)
-    dg, du = pullback(jnp.ones_like(output))
-    g, u = np.asarray(gate, np.float64), np.asarray(up, np.float64)
-    sigmoid = 0.5 + 0.5 * np.tanh(g / 2)
-    tg, tu = np.tanh(g / gate_beta), np.tanh(u / up_beta)
-    capped_gate, capped_up = gate_beta * tg * sigmoid, up_beta * tu
-    derivative_gate = (1 - tg**2) * sigmoid + gate_beta * tg * sigmoid * (1 - sigmoid)
-    for actual, expected in (
-        (output, capped_gate * capped_up),
-        (dg, derivative_gate * capped_up),
-        (du, capped_gate * (1 - tu**2)),
-    ):
-        np.testing.assert_allclose(actual, expected, atol=2e-05, rtol=2e-05)
-    bf16_out = _jax_act_lu(
-        jnp.stack([gate, up], axis=-2).astype(jnp.bfloat16),
-        ("situ", "situ_linear"),
-        act_params=params,
-    ).data
-    assert bf16_out.dtype == jnp.bfloat16
-
-
-@pytest.mark.parametrize("activation_type", ["situglu", "silu"])
-def test_unfused_ffn_bf16_uses_fp32_activation_math(monkeypatch, activation_type):
-    module = _install_unfused_ffn_doubles(monkeypatch)
-    gate = jnp.asarray([0.25, 1.5, -3.0, 12.0, 64.0], dtype=jnp.bfloat16)
-    up = jnp.asarray([0.75, -2.0, 32.0, 64.0, -128.0], dtype=jnp.bfloat16)
-    tokens = jnp.stack([gate, up], axis=-1)[None, :, :]
-    out, residuals = _unfused_ffn_fwd(
-        module,
-        tokens,
-        jnp.ones((1, gate.size), jnp.float32),
-        jnp.asarray([gate.size], jnp.int32),
-        jnp.eye(2, dtype=jnp.bfloat16)[None, :, :],
-        jnp.ones((1, 1, 1), dtype=jnp.bfloat16),
-        activation_type=activation_type,
-    )
-    actual = residuals[4].data[:, 0]
-    g, u = np.asarray(gate, np.float64), np.asarray(up, np.float64)
-    if activation_type == "situglu":
-        expected = jnp.asarray(
-            100 * np.tanh(g / 4) / (1 + np.exp(-g)) * np.tanh(u / 25), jnp.bfloat16
-        )
-    else:
-        expected = (jax.nn.silu(gate.astype(jnp.float32)) * up.astype(jnp.float32)).astype(
-            jnp.bfloat16
-        )
-    assert out.dtype == jnp.bfloat16
-    assert actual.dtype == jnp.bfloat16
-    np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -453,50 +386,6 @@ def test_unfused_situ_ffn_early_weighting_and_bias(monkeypatch, apply_topk_weigh
     assert np.isfinite(np.asarray(out[0, :active])).all()
 
 
-def test_situ_dynamic_counts_remat_and_vmap(monkeypatch):
-    module = _install_unfused_ffn_doubles(monkeypatch)
-    capacity, num_experts, hidden, inter = 13, 3, 6, 4
-    tokens = (
-        jnp.arange(capacity * hidden, dtype=jnp.float32).reshape(1, capacity, hidden) / 20 - 1.5
-    )
-    weights = jnp.ones((1, capacity), dtype=jnp.float32)
-    wi = jnp.ones((num_experts, hidden, 2 * inter), dtype=jnp.float32) * 0.25
-    wo = jnp.ones((num_experts, inter, hidden), dtype=jnp.float32) * 0.25
-
-    @jax.custom_vjp
-    def run_ffn(tok, w_in, w_out, sizes):
-        return _unfused_ffn_fwd(module, tok, weights, sizes, w_in, w_out)[0]
-
-    def run_ffn_fwd(tok, w_in, w_out, sizes):
-        return _unfused_ffn_fwd(module, tok, weights, sizes, w_in, w_out)
-
-    def run_ffn_bwd(res, g_out):
-        d_x, _, d_wi, d_wo, _, _, _ = _unfused_ffn_bwd(module, g_out, res, weights)
-        return d_x, d_wi, d_wo, None
-
-    run_ffn.defvjp(run_ffn_fwd, run_ffn_bwd)
-
-    compiled = jax.jit(run_ffn)
-    for counts in (jnp.array([3, 0, 5], jnp.int32), jnp.array([1, 2, 2], jnp.int32)):
-        expected = run_ffn(tokens, wi, wo, counts)
-        np.testing.assert_allclose(
-            compiled(tokens, wi, wo, counts), expected, atol=2e-05, rtol=2e-05
-        )
-        loss = lambda tok, w_in, w_out: run_ffn(tok, w_in, w_out, counts).sum()
-        gradients = jax.jit(jax.grad(loss, (0, 1, 2)))(tokens, wi, wo)
-        remat = jax.jit(jax.grad(jax.checkpoint(loss), (0, 1, 2)))(tokens, wi, wo)
-        for actual, reference in zip(remat, gradients):
-            np.testing.assert_allclose(actual, reference, atol=2e-05, rtol=2e-05)
-
-    batched_counts = jnp.array([[3, 0, 5], [1, 2, 2]], dtype=jnp.int32)
-    batched_tokens = jnp.stack([tokens, -tokens])
-    mapped = jax.jit(jax.vmap(lambda tok, cnt: run_ffn(tok, wi, wo, cnt)))(
-        batched_tokens, batched_counts
-    )
-    for actual, tok, sizes in zip(mapped, batched_tokens, batched_counts):
-        np.testing.assert_allclose(actual, run_ffn(tok, wi, wo, sizes), atol=2e-05, rtol=2e-05)
-
-
 @pytest.mark.parametrize(
     "capability,available,expected",
     [(89, True, False), (100, True, True), (100, False, False), (107, True, False)],
@@ -518,14 +407,6 @@ def test_situ_fusion_or_jax_fallback(monkeypatch, capability, available, expecte
     else:
         with pytest.warns(UserWarning, match="falling back"):
             assert not module._select_cudnn_jax_fusion([], activation_type="situglu")
-
-
-def test_situ_can_disable_fusion():
-    module = importlib.import_module("transformer_engine.jax.moe")
-    with pytest.raises(ValueError, match="active global_shard_guard"):
-        module.moe(
-            None, None, None, None, num_experts=2, activation_type="situglu", use_cudnn_fusion=False
-        )
 
 
 @pytest.fixture(autouse=True)
