@@ -102,16 +102,12 @@ class MoeCombine(BasicOperation):
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         # NCCL EP reads the routing state from the EpBuffer, so topk_idx is unused.
-        del (
-            basic_op_extra_inputs,
-            prev_op_grad_output_quantizer,
-            next_op_input_quantizer,
-            basic_op_kwargs,
-        )
+        del basic_op_extra_inputs, prev_op_grad_output_quantizer, next_op_input_quantizer
         # Only BF16 combine forward is supported for now.
         input_ = maybe_dequantize(input_, torch.bfloat16)
         ctx = basic_op_ctxs[0]
-        buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
+        kwargs = basic_op_kwargs[0]
+        buffer = validate_ep_buffer("MoeCombine", self.config, kwargs.get("buffer", self.buffer))
         _validate_combine_inputs(input_, buffer)
         result, combine_state = _ep_combine_fwd(
             input_,

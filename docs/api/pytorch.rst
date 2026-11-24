@@ -6,6 +6,9 @@
 PyTorch
 =======
 
+General-purpose layers
+----------------------
+
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, **kwargs)
   :members: forward, set_tensor_parallel_group
 
@@ -43,6 +46,24 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
+Model layers
+------------
+
+DeepSeek-V3
+~~~~~~~~~~~
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3Layer(hidden_size, num_attention_heads, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3MoE(hidden_size, moe_ffn_hidden_size, num_experts, **kwargs)
+  :members: forward, update_expert_bias
+
+.. autoapiclass:: transformer_engine.pytorch.models.MultiLatentAttention(hidden_size, num_attention_heads, **kwargs)
+  :members: forward
+
+Other
+-----
+
 .. autoapiclass:: transformer_engine.pytorch.dot_product_attention.inference.InferenceParams(max_batch_size, max_sequence_length)
   :members: reset, allocate_memory, pre_step, get_seqlens_pre_step, convert_paged_to_nonpaged, step
 
@@ -70,6 +91,15 @@ PyTorch
 .. autoapifunction:: transformer_engine.pytorch.interleave_glu_tensor
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
+
+MLA rotary position embeddings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.build_rope_tables
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_q
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_kv
 
 Data types
 ----------
