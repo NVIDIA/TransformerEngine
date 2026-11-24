@@ -6,6 +6,7 @@
 
 import importlib
 import inspect
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from transformer_engine.jax.cpp_extensions.activation import ActivationParams
 from transformer_engine.jax.flax import _MoEBlock
 from transformer_engine.jax.moe import (
     RouterComputationInfo,
@@ -20,6 +22,65 @@ from transformer_engine.jax.moe import (
     _resolve_moe_mesh_resource,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
+
+
+@pytest.mark.parametrize("soft_caps", [None, {"gate_beta": 2.0, "up_beta": 8.0}])
+def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_caps):
+    module = importlib.import_module("transformer_engine.jax.moe")
+    adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
+    params = module._resolve_moe_activation_params("situglu", soft_caps)
+    assert isinstance(params, ActivationParams)
+    calls = []
+    scales = jnp.ones((512,), dtype=jnp.uint8)
+
+    def fused(**kwargs):
+        calls.append(kwargs)
+        return dict(
+            c_tensor=jnp.ones((1, 64)),
+            d_tensor=jnp.ones((1, 32)),
+            d_col_tensor=jnp.ones((1, 32)),
+            d_row_tensor=jnp.ones((1, 64)),
+            dprob_tensor=jnp.ones((1,)),
+            sfd_row_tensor=scales,
+            sfd_col_tensor=scales,
+        )
+
+    cudnn = SimpleNamespace(
+        grouped_gemm_glu_wrapper_sm100=fused, grouped_gemm_dglu_wrapper_sm100=fused
+    )
+    original_import = importlib.import_module
+    monkeypatch.setattr(
+        adapter.importlib,
+        "import_module",
+        lambda name: cudnn if name == "cudnn" else original_import(name),
+    )
+    adapter.grouped_gemm_glu(
+        jnp.ones((1, 32, 1)),
+        jnp.ones((1, 64, 32)),
+        scales,
+        scales,
+        jnp.asarray([1]),
+        jnp.ones((1,)),
+        compute_dtype=jnp.bfloat16,
+        output_dtype=jnp.float8_e4m3fn,
+        **module._fused_glu_activation_kwargs("situglu", params),
+    )
+    adapter.grouped_gemm_dglu(
+        jnp.ones((1, 32)),
+        jnp.ones((1, 32, 32)),
+        jnp.ones((1, 64)),
+        scales,
+        scales,
+        jnp.asarray([1]),
+        jnp.ones((1,)),
+        output_dtype=jnp.float8_e4m3fn,
+        **module._fused_glu_activation_kwargs("situglu", params, backward=True),
+    )
+    expected = soft_caps or {"gate_beta": 4.0, "up_beta": 25.0}
+    assert [call["act_func"] for call in calls] == ["situglu", "dsituglu"]
+    for call in calls:
+        assert call["situ_beta1"] == expected["gate_beta"]
+        assert call["situ_beta2"] == expected["up_beta"]
 
 
 @pytest.fixture(autouse=True)
