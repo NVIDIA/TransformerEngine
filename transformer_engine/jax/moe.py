@@ -1107,11 +1107,7 @@ def _ffn_fwd_per_shard(
         if wi_1_checkpoint_name is not None:
             up_proj_out = checkpoint_name(up_proj_out, wi_1_checkpoint_name)
 
-    # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
-    # output dtype; the activation output (`intermediate`) stays in the
-    # dtype the wo GEMM / wo's quantized input consumes. For bf16 compute
-    # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
-    # transitions to the target precision.
+    # Match native GLU kernels: FP32 activation math, then cast to the GEMM output dtype.
     if not use_cudnn_jax_fusion:
         activations = (
             ("situ", "situ_linear") if activation_type == "situglu" else (activation_type, "linear")
@@ -1120,7 +1116,9 @@ def _ffn_fwd_per_shard(
         activation_inputs = jnp.where(
             active[:, None, None], jnp.stack([gate_proj_out, up_proj_out], axis=-2), 0
         )
-        intermediate = _jax_act_lu(activation_inputs, activations, act_params=act_params).data
+        intermediate = _jax_act_lu(
+            activation_inputs.astype(jnp.float32), activations, act_params=act_params
+        ).data
         intermediate = jnp.where(active[:, None], intermediate.astype(gate_proj_out.dtype), 0)
     if apply_topk_weights_early and not use_cudnn_jax_fusion:
         # Fold the per-token combine weights into the FFN intermediate;
@@ -1299,7 +1297,7 @@ def _ffn_bwd_per_shard(
             # Masking is not required as grouped GEMMs consume only group-size rows.
             w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
             intermediate_unweighted = _jax_act_lu(
-                activation_inputs, activations, act_params=act_params
+                activation_inputs.astype(jnp.float32), activations, act_params=act_params
             ).data.astype(gate_proj_out.dtype)
             d_recv_w_from_intermediate = jnp.sum(
                 d_intermediate * intermediate_unweighted,
@@ -2266,6 +2264,8 @@ def moe(
         keeping the projection dtype at the output. Device expert counts mask
         inactive receive capacity in forward and backward, including non-finite
         inactive values. MXFP8 quantization remains separate in the fallback.
+        Unfused GLU forward and backward use FP32 intermediates and cast their
+        results to the projection dtype, matching the native PyTorch activations.
     activation_params : Optional[dict]
         Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
         (default 25.0). Values must be finite and positive. Other activations
