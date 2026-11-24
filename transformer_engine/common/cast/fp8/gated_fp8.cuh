@@ -333,8 +333,6 @@ void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   using namespace kernel;
   checkCuDriverContext(stream);
 
-  // The kernel writes row-wise data only. The dispatcher fills column-wise data, if
-  // requested, with a separate transpose of the row-wise output.
   NVTE_CHECK(output->has_data(), "Row-wise output data must be allocated.");
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;

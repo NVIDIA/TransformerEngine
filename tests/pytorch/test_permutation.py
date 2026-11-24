@@ -1791,6 +1791,9 @@ def test_permutation_mask_map_capacity_drop(torch_dtype, num_tokens):
 
     # unpermute consumes the same map: each token gets the sum of its kept copies
     unperm = te_unpermute(out, row_id_map, restore_shape=inp.shape, map_type="mask")
+    unperm_inferred = te_unpermute(out, row_id_map, map_type="mask")
+    assert unperm_inferred.shape == inp.shape
+    torch.testing.assert_close(unperm_inferred, unperm, atol=0, rtol=0)
     kept_flat = torch.zeros(num_expert * num_tokens, dtype=torch.bool, device=inp.device)
     routed_flat_idx = torch.nonzero(routing_map.T.contiguous().flatten(), as_tuple=False)[:, 0]
     kept_flat[routed_flat_idx[:capacity]] = True

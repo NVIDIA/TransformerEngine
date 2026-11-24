@@ -278,12 +278,6 @@ def disable_bf16_reduced_precision_reduction():
 
 @contextmanager
 def _enable_tf32_matmul():
-    """TE runs pure FP32 GEMMs with TF32 (CUBLAS_COMPUTE_32F_FAST_TF32).
-    PyTorch uses TF32 for FP32 matmuls only if allow_tf32 is set. It is False
-    by default and True in NGC containers (TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1),
-    so the FP32 references would depend on the environment. Enable TF32 in
-    PyTorch here to match TE's FP32 GEMM precision.
-    """
     original_value = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = True
     try:

@@ -178,7 +178,6 @@ class FusedMLAQUpProjRopeQuant:
             return False
         if not _cudnn_frontend_version_supported():
             return False
-        # The cuDNN FE kernel uses tcgen05, which SM 12.x (RTX/workstation Blackwell) does not have.
         major = get_device_compute_capability()[0]
         if major < 10 or major == 12:
             return False
