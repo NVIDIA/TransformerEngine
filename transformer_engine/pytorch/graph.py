@@ -1482,9 +1482,11 @@ def make_graphed_callables(
     `original PyTorch implementation <https://pytorch.org/docs/stable/generated/torch.cuda.make_graphed_callables.html>`_
     for more documentation.
 
-    If a callable raises during warmup, temporary discovery hooks, saved RNG state,
-    module call wrappers, and the capture flag are restored before the exception is
-    re-raised. This cleanup does not make fatal CUDA errors recoverable.
+    Capture setup and warmup clean up temporary hooks, module call wrappers,
+    saved RNG and FP8 state, and the capture flag on failure. If cleanup also
+    raises, the capture exception remains primary and the cleanup error is chained
+    to it. Capture temporarily changes class dispatch and must be serialized.
+    Fatal CUDA errors still require restarting the process.
 
     .. warning::
 
@@ -1647,8 +1649,6 @@ def make_graphed_callables(
     if cache_quantized_params is None:
         cache_quantized_params = False
 
-    set_capture_start()
-
     # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
@@ -1678,19 +1678,17 @@ def make_graphed_callables(
         capture_time_hooks,
     )
 
-    # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
+    # Validate every module before installing any class-wide wrappers.
+    for module in modules:
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError(f"Graphing for {type(module)} is not supported.")
 
-    # FP8 wrapper.
-    old_call_funcs = {}
+    # Resolve inherited calls before any class is patched.
+    classes = dict.fromkeys(type(module) for module in modules)
+    original_calls = {cls: cls.__call__ for cls in classes}
+    cleanup = contextlib.ExitStack()
 
-    def wrap_autocast(block):
-        block_cls = type(block)
-        if block_cls in old_call_funcs:
-            return
-
-        old_call_funcs[block_cls] = block_cls.__call__
-
+    def wrap_autocast(block_cls, original_call):
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
             with autocast(
@@ -1700,33 +1698,33 @@ def make_graphed_callables(
                 amax_reduction_group=amax_reduction_group,
                 _graph=True,
             ):
-                outputs = old_call_funcs[block_cls](self, *args, **kwargs)
-            return outputs
+                return original_call(self, *args, **kwargs)
 
+        if "__call__" in block_cls.__dict__:
+            restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
+        else:
+            restore_call = (delattr, block_cls, "__call__")
         block_cls.__call__ = call_func
+        cleanup.callback(*restore_call)
 
-    forward_funcs = []
-    for module in modules:
-        if not isinstance(module, torch.nn.Module):
-            raise TypeError(f"Graphing for {type(module)} is not supported.")
-        wrap_autocast(module)
-        forward_funcs.append(module)
-
-    if just_one_callable:
-        forward_funcs = forward_funcs[0]
-    else:
-        forward_funcs = tuple(forward_funcs)
-
-    # Save RNG state.
-    generators = [
-        torch.cuda.default_generators[torch.cuda.current_device()],
-        *get_all_rng_states().values(),
-    ]
-    original_rng_states = [state.get_state() for state in generators]
-
+    set_capture_start()
+    cleanup.callback(set_capture_end)
     try:
+        saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
+        cleanup.callback(restore_fp8_tensors, modules, saved_fp8_tensors)
+        for block_cls, original_call in original_calls.items():
+            wrap_autocast(block_cls, original_call)
+
+        # Ensures warmup does not affect numerics for ops such as dropout.
+        generators = [
+            torch.cuda.default_generators[torch.cuda.current_device()],
+            *get_all_rng_states().values(),
+        ]
+        for gen in reversed(generators):
+            cleanup.callback(gen.set_state, gen.get_state())
+
         graphed_callables = _make_graphed_callables(
-            forward_funcs,
+            modules[0] if just_one_callable else modules,
             sample_args,
             num_warmup_iters=num_warmup_iters,
             allow_unused_input=allow_unused_input,
@@ -1742,12 +1740,11 @@ def make_graphed_callables(
             post_warmup_hook=post_warmup_hook,
             capture_time_hooks=capture_time_hooks,
         )
-    finally:
-        # Restore capture-owned state even if warmup raises.
-        for gen, state in zip(generators, original_rng_states):
-            gen.set_state(state)
-        for module_cls, old_call in old_call_funcs.items():
-            module_cls.__call__ = old_call
-        restore_fp8_tensors(modules, saved_fp8_tensors)
-        set_capture_end()
+    except BaseException as error:
+        try:
+            cleanup.close()
+        except BaseException as cleanup_error:
+            raise error from cleanup_error
+        raise
+    cleanup.close()
     return graphed_callables
