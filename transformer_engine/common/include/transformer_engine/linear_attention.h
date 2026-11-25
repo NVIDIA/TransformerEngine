@@ -26,13 +26,15 @@ extern "C" {
  * All tensors must be contiguous device tensors. No memory is allocated.
  *
  * \param[in]  initial_states FP32 initial memories,
- *                            [initial_memories, heads, value_dim, key_dim].
+ *                            [num_initial_states, heads, value_dim, key_dim].
  * \param[in]  additive       FP32 additive summaries,
  *                            [summaries, heads, value_dim, key_dim].
  * \param[in]  transitions    FP32 transition matrices,
  *                            [summaries, heads, key_dim, key_dim].
  * \param[in]  descriptors    INT32 [outputs, 4], with rows
  *                            (initial_memory_index, first_summary, count, stride).
+ *                            initial_memory_index indexes initial_states;
+ *                            first_summary indexes additive and transitions.
  *                            An initial_memory_index of -1 selects an implicit zero state.
  *                            Other referenced memory and summary indices must be valid.
  *                            Count must be nonnegative; zero copies the initial memory
