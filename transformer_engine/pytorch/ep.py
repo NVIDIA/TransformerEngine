@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import atexit
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
 import torch
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "EpConfig",
     "EpBuffer",
+    "EpSmConfig",
     "ep_bootstrap",
     "get_ep_drop_on_overflow",
     "get_ep_group",
@@ -140,6 +141,19 @@ def _atexit_finalize() -> None:
             _BOOTSTRAP_SETTINGS = None
 
 
+@dataclass
+class EpSmConfig:
+    """Per-kernel SM budgets for an EP group; 0 leaves the choice to NCCL EP.
+
+    Dispatch/combine budgets left at 0 fall back to ``max_num_sms`` of ``ep_bootstrap``.
+    """
+
+    dispatch_num_sms: int = 0
+    combine_num_sms: int = 0
+    shuffle_num_sms: int = 0
+    preprocess_num_sms: int = 0
+
+
 def ep_bootstrap(
     ep_group: dist.ProcessGroup,
     num_experts: int,
@@ -151,6 +165,7 @@ def ep_bootstrap(
     zero_copy: bool = False,
     drop_on_overflow: bool = False,
     max_token_dtype: torch.dtype = torch.bfloat16,
+    sm_config: Optional[EpSmConfig] = None,
 ) -> None:
     """Initialize EP by borrowing ep_group's NCCL comm. Call once per process.
 
@@ -172,8 +187,18 @@ def ep_bootstrap(
 
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
+
+    ``sm_config`` (an ``EpSmConfig``) caps the SMs for each EP kernel class; zero
+    budgets are left to NCCL EP (see ``EpSmConfig``).
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    sm_config = sm_config or EpSmConfig()
+    if max_num_sms:
+        sm_config = replace(
+            sm_config,
+            dispatch_num_sms=sm_config.dispatch_num_sms or max_num_sms,
+            combine_num_sms=sm_config.combine_num_sms or max_num_sms,
+        )
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
@@ -211,11 +236,14 @@ def ep_bootstrap(
         # so the group uses the library-derived bound (0 = NCCL_EP_AUTO).
         int(recv_capacity_per_rank or 0),
         int(hidden_dim),
-        int(max_num_sms),
         max_token_dtype,
         bool(zero_copy),
         int(num_topk),
         bool(drop_on_overflow),
+        int(sm_config.dispatch_num_sms),
+        int(sm_config.combine_num_sms),
+        int(sm_config.shuffle_num_sms),
+        int(sm_config.preprocess_num_sms),
     )
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group

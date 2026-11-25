@@ -214,8 +214,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 // the group will dispatch.
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int max_token_dtype,
-                          bool drop_on_overflow, bool borrowed_comm);
+                          int hidden_dim, int max_token_dtype, bool drop_on_overflow,
+                          bool borrowed_comm, int dispatch_num_sms, int combine_num_sms,
+                          int shuffle_num_sms, int preprocess_num_sms);
 void ReleaseEpResources();
 // Atexit-safe variant of ReleaseEpResources; never shuts down a borrowed
 // backend (see definition).

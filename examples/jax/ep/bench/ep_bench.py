@@ -19,7 +19,13 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from transformer_engine.jax.cpp_extensions import ep as tex_ep
-from transformer_engine.jax.ep import EpLayerConfig, ep_bootstrap, ep_dispatch, ep_combine
+from transformer_engine.jax.ep import (
+    EpLayerConfig,
+    EpSmConfig,
+    ep_bootstrap,
+    ep_dispatch,
+    ep_combine,
+)
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -39,8 +45,15 @@ def _parse_args():
         "--max-num-sms",
         type=int,
         default=0,
-        help="Max SMs for dispatch / combine / preprocess kernels (0 = auto).",
+        help="Max SMs for dispatch/combine kernels; per-kernel flags override (0 = auto).",
     )
+    for kernel in ("dispatch", "combine", "shuffle", "preprocess"):
+        p.add_argument(
+            f"--{kernel}-sms",
+            type=int,
+            default=0,
+            help=f"Max SMs for the {kernel} kernel (0 = auto).",
+        )
     p.add_argument(
         "--mode-label",
         default=None,
@@ -137,6 +150,12 @@ def main():
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=args.hidden,
             max_num_sms=args.max_num_sms,
+            sm_config=EpSmConfig(
+                dispatch_num_sms=args.dispatch_sms,
+                combine_num_sms=args.combine_sms,
+                shuffle_num_sms=args.shuffle_sms,
+                preprocess_num_sms=args.preprocess_sms,
+            ),
         )
 
         tokens, topk_idx, topk_w = _make_inputs(args, ep_size)

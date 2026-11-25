@@ -190,8 +190,9 @@ bool ep_zero_copy_supported() {
 
 void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
-                   int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy, int64_t num_topk, bool drop_on_overflow) {
+                   int64_t hidden_dim, pybind11::object max_token_dtype, bool zero_copy,
+                   int64_t num_topk, bool drop_on_overflow, int64_t dispatch_num_sms,
+                   int64_t combine_num_sms, int64_t shuffle_num_sms, int64_t preprocess_num_sms) {
   NVTE_CHECK(!group_name.empty(), "group_name must be non-empty (used for symm-mem lookup)");
   NVTE_CHECK(comm_ptr != 0, "comm_ptr must be non-null (torch NCCL host comm pointer)");
   NVTE_CHECK(!g_ep_initialized, "ep_initialize called twice without ep_finalize");
@@ -207,11 +208,12 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .max_tokens_per_rank = static_cast<int>(max_tokens_per_rank),
       .max_recv_tokens_per_rank = static_cast<int>(max_recv_tokens_per_rank),
       .hidden_dim = static_cast<int>(hidden_dim),
-      .num_comm_sms = static_cast<int>(max_num_sms),
       .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
       .zero_copy = zero_copy ? 1 : 0,
       .num_topk = static_cast<int>(num_topk),
       .drop_on_overflow = drop_on_overflow ? 1 : 0,
+      .sm_config = {static_cast<int>(dispatch_num_sms), static_cast<int>(combine_num_sms),
+                    static_cast<int>(shuffle_num_sms), static_cast<int>(preprocess_num_sms)},
   };
   // Release the GIL only around the native init. It must stay held while pybind11 casts
   // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
@@ -718,8 +720,10 @@ void register_ep_bindings(pybind11::module_& m) {
         "Initialize the EP backend; borrows torch's NCCL comm pointed to by ``comm_ptr``.",
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
         py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
-        py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false,
-        py::arg("num_topk") = 0, py::arg("drop_on_overflow") = false);
+        py::arg("max_token_dtype"), py::arg("zero_copy") = false, py::arg("num_topk") = 0,
+        py::arg("drop_on_overflow") = false, py::arg("dispatch_num_sms") = 0,
+        py::arg("combine_num_sms") = 0, py::arg("shuffle_num_sms") = 0,
+        py::arg("preprocess_num_sms") = 0);
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");
