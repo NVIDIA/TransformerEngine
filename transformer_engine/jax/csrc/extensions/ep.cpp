@@ -463,8 +463,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP dispatch failed: ", [&] {
     nvte_ep_dispatch(handle_mem_.data(), bufs.topk_idx.data(), bufs.tokens.data(), no_win,
-                        bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
-                        bufs.recv_topk_weights.data(), no_win, &layer_cfg, stream);
+                     bufs.topk_weights.data(), no_win, bufs.recv_tokens.data(), no_win,
+                     bufs.recv_topk_weights.data(), no_win, &layer_cfg, stream);
   });
 }
 
@@ -571,7 +571,7 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP combine failed: ", [&] {
     nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
-                       stream);
+                    stream);
   });
 }
 
@@ -644,8 +644,8 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP dispatch_bwd failed: ", [&] {
     nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
-                            no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
-                            stream);
+                         no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
+                         stream);
   });
 }
 
@@ -695,8 +695,8 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   return ffi_guard("EP combine_bwd failed: ", [&] {
-    nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(),
-                           no_win, &layer_cfg, stream);
+    nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
+                        &layer_cfg, stream);
   });
 }
 
