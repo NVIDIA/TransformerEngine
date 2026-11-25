@@ -207,8 +207,10 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        # TF32 has same mantissa bits as FP16
-        return {"rtol": 1e-3, "atol": 1e-5}
+        # TF32 has same mantissa bits as FP16. The atol is looser than for FP16
+        # because near-zero gradient elements can differ by a few 1e-5 between
+        # the TP-sharded and single-device GEMM reduction orders (observed on A100).
+        return {"rtol": 1e-3, "atol": 5e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
