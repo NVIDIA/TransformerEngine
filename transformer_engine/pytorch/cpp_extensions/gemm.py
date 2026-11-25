@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
 from ..constants import TE_DType, DType
 from ..utils import (
+    get_cached_ones_tensor,
     get_device_compute_capability,
     get_sm_count,
     _empty_tensor,
@@ -102,14 +103,15 @@ def _nvfp4_row_scaled_gemm_inputs(
     a_amax_key = "amax_rowwise" if transa else "amax_columnwise"
     output_col_scales = A_metadata[a_amax_key]
     assert output_col_scales is not None
-    A_metadata[a_amax_key] = output_col_scales.new_ones(1)
+    one = get_cached_ones_tensor(1, dtype=output_col_scales.dtype, device=output_col_scales.device)
+    A_metadata[a_amax_key] = one
     A_metadata["row_scaled_nvfp4"] = False
 
     B_metadata = B.get_metadata()
     b_amax_key = "amax_columnwise" if transb else "amax_rowwise"
     output_row_scales = B_metadata[b_amax_key]
     assert output_row_scales is not None
-    B_metadata[b_amax_key] = output_row_scales.new_ones(1)
+    B_metadata[b_amax_key] = one
     B_metadata["row_scaled_nvfp4"] = False
 
     assert output_row_scales.dtype == torch.float32 and output_col_scales.dtype == torch.float32
