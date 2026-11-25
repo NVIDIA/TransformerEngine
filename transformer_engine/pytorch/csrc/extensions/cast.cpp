@@ -295,6 +295,22 @@ void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_in
   });
 }
 
+void group_quantize_nvfp4_2d_impl(const GroupedTensorWrapper &input, GroupedTensorWrapper &output,
+                                  const NVFP4Quantizer *quantizer,
+                                  const std::optional<TensorWrapper> &noop, cudaStream_t stream) {
+  NVTE_CHECK(quantizer->with_2d_quantization,
+             "Per-tensor amax with 1D grouped NVFP4 quantization is not implemented.");
+  NVTE_CHECK(!quantizer->stochastic_rounding && !quantizer->with_amax_reduction &&
+                 !quantizer->disable_second_level_scale &&
+                 quantizer->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+             "Grouped NVFP4 2D requires local per-tensor amax and deterministic rounding.");
+  QuantizationConfigWrapper config;
+  config.set_nvfp4_2d_quantization(true);
+  if (noop.has_value()) config.set_noop_tensor(noop->data());
+  config.set_use_fast_math(transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH"));
+  NVTE_SCOPED_GIL_RELEASE({ nvte_group_quantize(input.data(), output.data(), config, stream); });
+}
+
 float fp8_max_for_dtype(const DType dtype) {
   if (!is_fp8_dtype(dtype)) {
     NVTE_ERROR("Expected FP8 dtype for grouped current-scaling quantization, got ",
@@ -390,6 +406,29 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
   const bool row_scaled_nvfp4 =
       detail::IsNVFP4Quantizers(quantizer.ptr()) &&
       static_cast<const NVFP4Quantizer *>(quantizer_cpp.get())->row_scaled_nvfp4;
+  const bool per_tensor_nvfp4 = detail::IsNVFP4Quantizers(quantizer.ptr()) && !row_scaled_nvfp4 &&
+                                !static_cast<const NVFP4Quantizer *>(quantizer_cpp.get())->with_rht;
+  if (per_tensor_nvfp4) {
+    const auto *q = static_cast<const NVFP4Quantizer *>(quantizer_cpp.get());
+    NVTE_CHECK(q->with_2d_quantization,
+               "Per-tensor amax with 1D grouped NVFP4 quantization is not implemented.");
+    NVTE_CHECK(!q->stochastic_rounding && !q->with_amax_reduction &&
+                   !q->disable_second_level_scale &&
+                   q->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+               "Grouped NVFP4 2D requires local per-tensor amax and deterministic rounding.");
+    NVTE_CHECK(!last_dims.has_value(), "Grouped NVFP4 2D requires a common hidden dimension.");
+    if (first_dims.has_value()) {
+      NVTE_CHECK(first_dims->is_cuda() && first_dims->is_contiguous() &&
+                     first_dims->scalar_type() == at::kLong && first_dims->numel() == num_tensors,
+                 "Grouped NVFP4 2D requires contiguous int64 CUDA first_dims.");
+    } else if (output.is_none()) {
+      NVTE_CHECK(num_tensors > 0 && logical_first_dim % (num_tensors * 128) == 0,
+                 "Uniform grouped NVFP4 2D requires 128-aligned expert rows.");
+      first_dims = at::full({static_cast<int64_t>(num_tensors)},
+                            static_cast<int64_t>(logical_first_dim / num_tensors),
+                            tensor.options().dtype(at::kLong));
+    }
+  }
   if (row_scaled_nvfp4) {
     NVTE_CHECK(output.is_none(),
                "group_quantize: output reuse is not supported with row-scaled NVFP4.");
@@ -466,7 +505,7 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
     grouped_quantization_mode = GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE;
   }
 
-  if (empty_input_buffer) {
+  if (empty_input_buffer && !per_tensor_nvfp4) {
     // early return for empty input buffer
     // just return the output tensor as is
     // no need to quantize
@@ -483,6 +522,10 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
         group_quantize_nvfp4_row_scaled_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                              nvfp4_quantizer_cpp, noop_flag_cpp,
                                              at::cuda::getCurrentCUDAStream());
+      } else if (per_tensor_nvfp4) {
+        group_quantize_nvfp4_2d_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                     nvfp4_quantizer_cpp, noop_flag_cpp,
+                                     at::cuda::getCurrentCUDAStream());
       } else {
         group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                   nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(),

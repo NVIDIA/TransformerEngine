@@ -364,6 +364,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast.cu
      cast/cast_dbias.cu
      cast/cast_grouped.cu
+     cast/nvfp4/group_quantize_2d_nvfp4.cu
      cast/cast_grouped_dbias.cu
      cast/mxfp8/requantize_mxfp8.cu
      fused_rope/fused_mla_kv_rope_mxfp8.cu
