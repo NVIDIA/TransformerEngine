@@ -94,6 +94,49 @@ def test_grouped_disable_second_level_scale_matches_split_quantize(
             assert expected_tensor._amax_columnwise is None
 
 
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("optimize_for_gemm", [True, False], ids=["swizzled", "not_swizzled"])
+def test_grouped_rowwise_equal_splits_without_first_dims(optimize_for_gemm: bool) -> None:
+    """Rowwise-only RHT group quantize of equal-shaped groups described by tensor_offsets alone.
+
+    first_dims is optional for equal-shaped groups. Only the columnwise epilogue needs it, so the
+    rowwise-only kernel must not read it; the result must match the call that passes first_dims.
+    """
+    num_tensors, rows_per_tensor, hidden = 4, 256, 512
+    torch.manual_seed(0)
+    x = torch.randn((num_tensors * rows_per_tensor, hidden), dtype=torch.bfloat16, device="cuda")
+    first_dims = torch.full((num_tensors,), rows_per_tensor, dtype=torch.int64, device="cuda")
+    tensor_offsets = (
+        torch.arange(num_tensors + 1, dtype=torch.int64, device="cuda") * rows_per_tensor * hidden
+    )
+
+    def make_quantizer() -> NVFP4Quantizer:
+        quantizer = NVFP4Quantizer(
+            rowwise=True, columnwise=False, with_rht=True, with_post_rht_amax=True
+        )
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        return quantizer
+
+    expected = tex.group_quantize(x, make_quantizer(), num_tensors, first_dims)
+    actual = tex.group_quantize(
+        x, make_quantizer(), num_tensors, None, tensor_offsets=tensor_offsets
+    )
+    torch.cuda.synchronize()
+
+    for actual_tensor, expected_tensor in zip(
+        actual.split_into_quantized_tensors(), expected.split_into_quantized_tensors()
+    ):
+        torch.testing.assert_close(
+            actual_tensor._rowwise_data, expected_tensor._rowwise_data, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            actual_tensor._rowwise_scale_inv, expected_tensor._rowwise_scale_inv, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            actual_tensor._amax_rowwise, expected_tensor._amax_rowwise, atol=0, rtol=0
+        )
+
+
 def check_grouped_tensor_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,

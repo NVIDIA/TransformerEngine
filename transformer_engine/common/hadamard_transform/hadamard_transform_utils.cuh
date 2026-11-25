@@ -12,7 +12,11 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include <cstdint>
+#include <type_traits>
+
 #include "common/common.h"
+#include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
@@ -191,6 +195,70 @@ __device__ __forceinline__ uint32_t swizzle_128B_atom_32B(uint32_t gmem_row_idx,
   uint32_t xor_factor = (smem_row_idx * 2) % 8;
   uint32_t smem_col_idx = gmem_col_idx ^ xor_factor;
   return smem_row_idx * 8 + smem_col_idx;
+}
+
+template <typename FloatArray>
+__device__ __forceinline__ FloatArray mul_f32x2_by_scalar(const FloatArray& in, const float scale) {
+  static_assert(std::is_same_v<typename FloatArray::value_type, float>,
+                "mul_f32x2_by_scalar expects an array of floats.");
+  constexpr int kNumElts = sizeof(FloatArray) / sizeof(float);
+  FloatArray out;
+  const float* in_ptr = reinterpret_cast<const float*>(&in);
+  float* out_ptr = reinterpret_cast<float*>(&out);
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  const float2 scale_pair = {scale, scale};
+#pragma unroll
+  for (int i = 0; i < kNumElts / 2; ++i) {
+    asm("mul.rn.f32x2 %0, %1, %2;"
+        : "=l"(reinterpret_cast<uint64_t&>(out_ptr[2 * i]))
+        : "l"(reinterpret_cast<const uint64_t&>(in_ptr[2 * i])),
+          "l"(reinterpret_cast<const uint64_t&>(scale_pair)));
+  }
+  if constexpr (kNumElts % 2 != 0) {
+    out_ptr[kNumElts - 1] = in_ptr[kNumElts - 1] * scale;
+  }
+#else
+#pragma unroll
+  for (int i = 0; i < kNumElts; ++i) {
+    out_ptr[i] = in_ptr[i] * scale;
+  }
+#endif
+  return out;
+}
+
+template <typename FloatArray>
+__device__ __forceinline__ FloatArray round_to_bf16_precision(const FloatArray& in) {
+  static_assert(std::is_same_v<typename FloatArray::value_type, float>,
+                "round_to_bf16_precision expects an array of floats.");
+  constexpr int kNumElts = sizeof(FloatArray) / sizeof(float);
+  FloatArray out;
+  const float* in_ptr = reinterpret_cast<const float*>(&in);
+  float* out_ptr = reinterpret_cast<float*>(&out);
+#pragma unroll
+  for (int i = 0; i < kNumElts; ++i) {
+    uint32_t packed;
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(packed) : "f"(in_ptr[i]), "f"(0.0f));
+    out_ptr[i] = __uint_as_float(packed);
+  }
+  return out;
+}
+
+template <int N, typename PhiloxState>
+__device__ __forceinline__ void philox_generate4_batch(PhiloxState& rng, uint4 (&out)[N]) {
+  const uint64_t ctr_lo = (static_cast<uint64_t>(rng.ctr.y) << 32) | rng.ctr.x;
+  const uint64_t ctr_hi = (static_cast<uint64_t>(rng.ctr.w) << 32) | rng.ctr.z;
+#pragma unroll
+  for (int j = 0; j < N; ++j) {
+    const uint64_t lo = ctr_lo + static_cast<uint64_t>(j);
+    const uint64_t hi = ctr_hi + static_cast<uint64_t>(lo < ctr_lo);
+    const uint4 ctr = make_uint4(static_cast<uint32_t>(lo), static_cast<uint32_t>(lo >> 32),
+                                 static_cast<uint32_t>(hi), static_cast<uint32_t>(hi >> 32));
+    out[j] = curanddx::detail::multiple_rounds<PhiloxState::rounds>(ctr, rng.key);
+  }
+  const uint64_t lo = ctr_lo + static_cast<uint64_t>(N);
+  const uint64_t hi = ctr_hi + static_cast<uint64_t>(lo < ctr_lo);
+  rng.ctr = make_uint4(static_cast<uint32_t>(lo), static_cast<uint32_t>(lo >> 32),
+                       static_cast<uint32_t>(hi), static_cast<uint32_t>(hi >> 32));
 }
 
 }  // namespace transformer_engine
