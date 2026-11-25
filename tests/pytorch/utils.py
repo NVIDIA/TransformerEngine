@@ -188,13 +188,15 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         recipe.enable_cutedsl_fused_grouped_mlp = True
         return recipe
     if name in nvfp4_variant_names:
-        with_rht = name in ("nvfp4_rht", "nvfp4_rht_ue5m3")
+        row_scaled = name == "nvfp4_row_scaled"
+        with_rht = row_scaled or name in ("nvfp4_rht", "nvfp4_rht_ue5m3")
         use_4over6 = name == "nvfp4_4over6"
         kwargs = {
             "disable_rht": not with_rht,
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
-            "row_scaled_activation": name == "nvfp4_row_scaled",
+            "row_scaled_activation": row_scaled,
+            "row_scaled_weight": row_scaled,
             "nvfp4_4over6": "all" if use_4over6 else "none",
         }
         kwargs.update(recipe_kwargs)
@@ -227,13 +229,6 @@ def skip_unsupported_backward_override(
     backward_override: Optional[str],
 ) -> None:
     """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
-    if (
-        quant_recipe is not None
-        and quant_recipe.nvfp4()
-        and getattr(quant_recipe, "row_scaled_activation", False)
-        and backward_override is None
-    ):
-        pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
     if (
         quant_recipe is not None
         and quant_recipe.nvfp4()

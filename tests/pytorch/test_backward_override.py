@@ -183,6 +183,8 @@ def _maybe_skip_recipe_dtype(
             pytest.skip(f"NVFP4 only supports BF16 and FP32 for {module_type} in this test")
         elif module_type in ("ops_linear", "grouped_linear") and dtype != torch.bfloat16:
             pytest.skip(f"NVFP4 only supports BF16 for {module_type} in this test")
+    if recipe_name == "nvfp4_row_scaled" and dtype != torch.bfloat16:
+        pytest.skip("Row-scaled NVFP4 test recipe uses RHT, which requires BF16 input")
 
 
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
@@ -192,12 +194,6 @@ def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: s
         pytest.skip("Row-scaled NVFP4 currently does not support fused te_ops paths.")
     if module_type == "grouped_linear" and recipe_name == "nvfp4_4over6":
         pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
-
-
-def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
-    if recipe_name == "nvfp4_row_scaled":
-        return make_recipe(recipe_name, backward_override="dequantized")
-    return make_recipe(recipe_name)
 
 
 def _maybe_skip_unsupported_recipe_shape(
@@ -1091,7 +1087,7 @@ def test_linear_like_backward_override_matches_reference(
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
@@ -1275,7 +1271,7 @@ def test_grouped_linear_backward_override_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
@@ -1584,7 +1580,7 @@ def test_fused_linear_paths_match_backward_override_reference(
 
     reset_rng_states()
 
-    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1724,7 +1720,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     reset_rng_states()
     in_features = input_shape[-1]
 
-    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1963,11 +1959,7 @@ def test_backward_override_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = (
-        ("high_precision", "dequantized")
-        if recipe_name == "nvfp4_row_scaled"
-        else (None, "high_precision", "dequantized")
-    )
+    modes = (None, "high_precision", "dequantized")
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:

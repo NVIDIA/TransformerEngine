@@ -138,17 +138,14 @@ def nvfp4_rht_and_2d_quantization():
 
 
 def nvfp4_row_scaled():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=True,
+    return recipe.NVFP4BlockScaling(
+        disable_rht=False,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         row_scaled_activation=True,
-        backward_override="high_precision",
+        row_scaled_weight=True,
+        backward_override=None,
     )
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
 
 
 def nvfp4_4over6():

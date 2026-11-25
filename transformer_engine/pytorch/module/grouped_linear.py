@@ -1452,10 +1452,10 @@ class _GroupedLinear(torch.autograd.Function):
             weight_quantizer = weight_quantizers[0]
             if weight_quantizer is None:
                 raise RuntimeError("Quantized grouped compute requires a weight quantizer.")
-            if isinstance(weight_quantizer, NVFP4Quantizer) and not weight_quantizer.with_rht:
+            if isinstance(weight_quantizer, NVFP4Quantizer):
                 raise NotImplementedError(
-                    "single_grouped_weight is not supported for NVFP4 without RHT; "
-                    "use per-expert weights."
+                    "single_grouped_weight with high-precision weights is not supported for "
+                    "NVFP4; use per-expert weights."
                 )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             # forward() already applied _enable_weight_preswizzle(); preserve that decision
