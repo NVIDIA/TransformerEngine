@@ -30,7 +30,7 @@ export NVTE_FLASH_ATTN_V4=0
 # If CuTeDSL backend is not enabled, this will be ignored
 export NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN=ERROR
 
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install pytest==8.4.2 || error_exit "Failed to install pytest"
 
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_optional_flash_attn_import.xml $TE_PATH/tests/pytorch/test_optional_flash_attn_import.py || test_fail "test_optional_flash_attn_import.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
@@ -71,6 +71,7 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_identity_quantiz
 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention_backend_selection.xml $TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py || test_fail "test_attention_backend_selection.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_flex_attention.xml $TE_PATH/tests/pytorch/attention/test_flex_attention.py || test_fail "test_flex_attention.py"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_dsv4_attention.xml $TE_PATH/tests/pytorch/test_dsv4_attention.py || test_fail "test_dsv4_attention.py"
 NVTE_GDN_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_gdn_attention.xml $TE_PATH/tests/pytorch/attention/test_gdn_attention.py || test_fail "test_gdn_attention.py"
 for QKV_FORMAT in bshd thd; do
     python3 "$TE_PATH/docs/examples/attention/example_linear_attention.py" --qkv-format "$QKV_FORMAT" || test_fail "example_linear_attention.py ($QKV_FORMAT)"

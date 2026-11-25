@@ -852,7 +852,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     tensor._transpose is not None and not tensor._transpose_invalid
                 )
                 is_contiguous_row_shard = (
-                    tensor.dim() == 2
+                    tensor.dim() == 2  # pylint: disable=chained-comparison
                     and tensor.shape[1] > 0
                     and len(size) == 2
                     and size[1] == tensor.shape[1]

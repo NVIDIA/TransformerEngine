@@ -22,7 +22,7 @@ FAILED_CASES=""
 export NVTE_FLASH_ATTN_V4=0
 mkdir -p "$XML_LOG_DIR"
 
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install pytest==8.4.2 || error_exit "Failed to install pytest"
 
 # Run CP tests (deterministic + non-deterministic) first so they can be parallelized.
 # Each needs 4 GPUs, so >=8 GPUs allows them to run concurrently on disjoint GPU sets.
