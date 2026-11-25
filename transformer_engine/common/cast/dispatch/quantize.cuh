@@ -38,6 +38,18 @@
 namespace transformer_engine {
 namespace dispatch {
 
+// The activation table to read for OP, if any. Tables apply to BF16 inputs of the activations
+// that have one, when NVTE_ACTIVATION_TABLE=1. The first call per device builds the table.
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+activation_table::TableRef activation_lut_for(const DType input_dtype) {
+  if constexpr (activation_table::kHasTable<ParamOP, OP>) {
+    if (input_dtype == DType::kBFloat16 && activation_table::tables_enabled()) {
+      return activation_table::device_table(activation_table::kKindOf<ParamOP, OP>);
+    }
+  }
+  return {};
+}
+
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
@@ -95,18 +107,22 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
+      const activation_table::TableRef activation_lut =
+          IS_ACT ? activation_lut_for<ParamOP, OP>(input_tensor->dtype())
+                 : activation_table::TableRef{};
       bool quantized_with_cutedsl = false;
 #ifdef NVTE_WITH_CUTEDSL
       quantized_with_cutedsl =
           cutedsl_backend::mxfp8_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT,
                                                   ParamOP, OP>(
               input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-              dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+              dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, activation_lut,
+              stream);
 #endif
       if (!quantized_with_cutedsl) {
         mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
             *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-            dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+            dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, activation_lut, stream);
       }
       break;
     }
@@ -284,17 +300,21 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
+      activation_table::TableRef activation_lut;
+      if constexpr (IS_DACT) {
+        activation_lut = activation_lut_for<ParamOP, OP>(input_tensor->dtype());
+      }
       bool quantized_with_cutedsl = false;
 #ifdef NVTE_WITH_CUTEDSL
       quantized_with_cutedsl =
           cutedsl_backend::mxfp8_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
               grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-              quant_config_cpp.mxfp8_2d_quantization, stream);
+              quant_config_cpp.mxfp8_2d_quantization, activation_lut, stream);
 #endif
       if (!quantized_with_cutedsl) {
         mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
             *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-            quant_config_cpp.mxfp8_2d_quantization, stream);
+            quant_config_cpp.mxfp8_2d_quantization, activation_lut, stream);
       }
       break;
     }

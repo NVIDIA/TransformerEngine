@@ -153,6 +153,57 @@ def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
         dist.destroy_process_group()
 
 
+def _run_tensor_parallel_leading_neg_inf(rank, world_size, init_file):
+    """Compare leading masked shards, with and without a NaN, to full-vocabulary loss."""
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+        device_id=device,
+    )
+    try:
+        local_vocab = 16
+        vocab = world_size * local_vocab
+        ref_logits = torch.full((1, 2, vocab), float("-inf"), device=device, dtype=torch.float32)
+        ref_logits[..., -local_vocab:] = 0.0
+        ref_logits[0, 1, 0] = float("nan")
+        target = torch.tensor([[vocab - 1, vocab - 2]], device=device)
+
+        shard = slice(rank * local_vocab, (rank + 1) * local_vocab)
+        local_logits = ref_logits[..., shard].clone().requires_grad_()
+        ref_logits.requires_grad_()
+        loss = parallel_cross_entropy(local_logits, target, dist_process_group=dist.group.WORLD)
+        ref_loss = torch.nn.functional.cross_entropy(
+            ref_logits.transpose(1, 2), target, reduction="none"
+        )
+
+        external_grad = torch.full_like(loss, 0.5)
+        loss.backward(external_grad)
+        ref_loss.backward(external_grad)
+        torch.testing.assert_close(loss, ref_loss, equal_nan=True)
+        torch.testing.assert_close(local_logits.grad, ref_logits.grad[..., shard], equal_nan=True)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_parallel_cross_entropy_tensor_parallel_leading_neg_inf():
+    """With three ranks, the first merge combines two entirely masked vocabulary shards."""
+    world_size = min(3, torch.cuda.device_count())
+    if world_size < 2:
+        pytest.skip("tensor-parallel cross entropy test requires at least two CUDA devices")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        init_file = os.path.join(temp_dir, "distributed_init")
+        mp.spawn(
+            _run_tensor_parallel_leading_neg_inf,
+            args=(world_size, init_file),
+            nprocs=world_size,
+            join=True,
+        )
+
+
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
     """Validate tensor-parallel loss and gradients on two ranks."""
