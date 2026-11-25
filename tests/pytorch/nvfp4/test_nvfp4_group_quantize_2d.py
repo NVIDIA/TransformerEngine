@@ -57,7 +57,7 @@ def _check(x, splits, grouped, directions, swizzled):
 
 @pytest.mark.parametrize("cols", [128, 256, 384, 1024])
 @pytest.mark.parametrize("directions", [(True, True), (True, False), (False, True)])
-@pytest.mark.parametrize("swizzled", [False, True])
+@pytest.mark.parametrize("swizzled", [False, True, "post_swizzle"])
 @pytest.mark.parametrize("paged", [False, True])
 @pytest.mark.parametrize(
     "splits",
@@ -82,26 +82,40 @@ def test_grouped_2d_bitwise(cols, directions, swizzled, paged, splits):
     # A capacity tail must not affect any expert's scalar amax or quantized values.
     x[sum(splits) :] = 10000
     metadata = torch.tensor(splits, device="cuda", dtype=torch.int64)
-    q = _quantizer(directions, swizzled)
+    q = _quantizer(directions, swizzled is True)
     result = tex.group_quantize(x, q, len(splits), metadata)
+    if swizzled == "post_swizzle":
+        compact = result
+        result = compact.copy()
+        tex.grouped_swizzle_for_gemm(result, *directions)
+        assert not compact._with_gemm_swizzled_scales
+        assert result._with_gemm_swizzled_scales
     _check(x, splits, result, directions, swizzled)
 
 
 @pytest.mark.parametrize("paged", [False, True])
 @pytest.mark.parametrize("directions", [(True, True), (True, False), (False, True)])
-@pytest.mark.parametrize("swizzled", [False, True])
+@pytest.mark.parametrize("swizzled", [False, True, "post_swizzle"])
 def test_grouped_2d_graph_replay(paged, directions, swizzled):
     x = torch.randn(512, 256, device="cuda", dtype=torch.bfloat16)
     metadata = torch.tensor([128, 128, 256], device="cuda", dtype=torch.int64)
-    q = _quantizer(directions, swizzled)
+    q = _quantizer(directions, swizzled is True)
+
+    def run():
+        compact = tex.group_quantize(x, q, 3, metadata)
+        output = compact.copy() if swizzled == "post_swizzle" else compact
+        if swizzled == "post_swizzle":
+            tex.grouped_swizzle_for_gemm(output, *directions)
+        return compact, output
+
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        tex.group_quantize(x, q, 3, metadata)
+        run()
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = tex.group_quantize(x, q, 3, metadata)
+        compact, output = run()
     cases = (
         [(128, 128, 256), (256, 0, 128), (0, 0, 0), (128, 256, 128)]
         if paged
@@ -113,6 +127,30 @@ def test_grouped_2d_graph_replay(paged, directions, swizzled):
         x[sum(splits) :] = 10000
         graph.replay()
         _check(x, splits, output, directions, swizzled)
+
+
+@pytest.mark.parametrize("rows,cols", [(128, 128), (256, 384), (2048, 7168)])
+@pytest.mark.parametrize("directions", [(True, True), (True, False), (False, True)])
+def test_grouped_2d_uniform_post_swizzle(rows, cols, directions):
+    x = torch.randn(3 * rows, cols, device="cuda", dtype=torch.bfloat16)
+    compact = tex.group_quantize(x, _quantizer(directions, False), 3, None)
+    snapshots = {
+        name: (getattr(compact, name).data_ptr(), getattr(compact, name).clone())
+        for name in ("scale_inv", "columnwise_scale_inv")
+        if getattr(compact, name) is not None
+    }
+    result = compact.copy()
+    tex.grouped_swizzle_for_gemm(result, *directions)
+    _check(x, [rows] * 3, result, directions, True)
+    for name, (ptr, values) in snapshots.items():
+        assert getattr(compact, name).data_ptr() == ptr
+        assert torch.equal(getattr(compact, name), values)
+    assert not compact._with_gemm_swizzled_scales
+    # Already-swizzled inputs must be reused, not permuted a second time.
+    pointers = [getattr(result, name).data_ptr() for name in snapshots]
+    tex.grouped_swizzle_for_gemm(result, *directions)
+    assert [getattr(result, name).data_ptr() for name in snapshots] == pointers
+    _check(x, [rows] * 3, result, directions, True)
 
 
 def test_grouped_2d_noop_and_uniform_weight_reuse():

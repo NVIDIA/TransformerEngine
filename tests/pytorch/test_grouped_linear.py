@@ -2287,6 +2287,63 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     torch.testing.assert_close(single.weight.grad.float(), discrete_wgrad.float(), **tolerances)
 
 
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+@pytest.mark.parametrize("is_first_microbatch", [None, True, False])
+def test_primary_nvfp4_single_grouped_weight_swizzle(is_first_microbatch):
+    """Primary compact scales are swizzled lazily for fprop/dgrad, without requantizing."""
+    fp4_recipe = nvfp4_rht_and_2d_quantization()
+    fp4_recipe.disable_stochastic_rounding = True
+    if not is_module_grouped_tensor_path_supported(fp4_recipe, torch.bfloat16):
+        pytest.skip("NVFP4 grouped GEMM is unavailable on this system.")
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(2026)
+    with quantized_model_init(enabled=True, recipe=fp4_recipe):
+        common = dict(
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            use_grouped_tensor=True,
+        )
+        single = GroupedLinear(3, 256, 384, single_grouped_weight=True, **common)
+        discrete = GroupedLinear(3, 256, 384, **common)
+
+    splits = torch.tensor([128, 256, 128], device="cuda", dtype=torch.int64)
+    for _ in range(2):
+        weights = torch.randn(3, 384, 256, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            # This is the member-view update path used by primary grouped parameters.
+            single.weight.quantize(list(weights.unbind()))
+            for i in range(3):
+                getattr(discrete, f"weight{i}").quantize_(weights[i])
+        assert not single.weight._with_gemm_swizzled_scales
+        snapshots = {
+            name: (
+                getattr(single.weight, name).data_ptr(),
+                getattr(single.weight, name).clone(),
+            )
+            for name in ("scale_inv", "columnwise_scale_inv")
+        }
+        single.zero_grad(set_to_none=True)
+        discrete.zero_grad(set_to_none=True)
+        x = torch.randn(512, 256, device="cuda", dtype=torch.bfloat16)
+        dy = torch.randn(512, 384, device="cuda", dtype=torch.bfloat16)
+        xs = x.detach().clone().requires_grad_(True)
+        xd = x.detach().clone().requires_grad_(True)
+        with autocast(enabled=True, recipe=fp4_recipe):
+            ys = single(xs, splits, is_first_microbatch=is_first_microbatch)
+            yd = discrete(xd, splits, is_first_microbatch=is_first_microbatch)
+        ys.backward(dy)
+        yd.backward(dy)
+        torch.testing.assert_close(ys, yd, rtol=0, atol=0)
+        torch.testing.assert_close(xs.grad, xd.grad, rtol=0, atol=0)
+        dw = torch.stack([getattr(discrete, f"weight{i}").grad for i in range(3)])
+        torch.testing.assert_close(single.weight.grad, dw, rtol=1e-2, atol=5e-3)
+        assert not single.weight._with_gemm_swizzled_scales
+        for name, (ptr, values) in snapshots.items():
+            assert getattr(single.weight, name).data_ptr() == ptr
+            assert torch.equal(getattr(single.weight, name), values)
+
+
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 def test_single_grouped_weight_mxfp8_workspace_cache():
     """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""

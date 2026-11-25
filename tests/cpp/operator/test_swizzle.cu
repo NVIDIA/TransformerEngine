@@ -633,6 +633,107 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
                  num_tensors * col_numel);
 }
 
+void performTestGroupedSwizzleNVFP4(const std::vector<std::pair<size_t, size_t>>& shapes,
+                                    bool rowwise, bool columnwise) {
+  using namespace test;
+  SCOPED_TRACE(::testing::PrintToString(shapes));
+  std::vector<std::unique_ptr<Tensor>> inputs, outputs;
+  std::vector<Tensor*> input_ptrs, output_ptrs;
+  std::vector<uint8_t> expected_row, expected_col;
+  for (const auto& shape : shapes) {
+    const std::vector<size_t> dims{shape.first, shape.second};
+    auto input = std::make_unique<Tensor>("input", dims, DType::kFloat4E2M1, rowwise, columnwise,
+                                          NVTE_NVFP4_1D_SCALING);
+    auto output = std::make_unique<Tensor>("output", dims, DType::kFloat4E2M1, rowwise, columnwise,
+                                           NVTE_NVFP4_1D_SCALING);
+    for (const bool row : {true, false}) {
+      if (!(row ? rowwise : columnwise)) continue;
+      if (row) {
+        input->fill_uniform_rowwise_scale_inv();
+      } else {
+        input->fill_uniform_columnwise_scale_inv();
+      }
+      const auto s = row ? input->rowwise_scale_inv_shape() : input->columnwise_scale_inv_shape();
+      const size_t count = s.data[0] * s.data[1];
+      if (count == 0) continue;
+      auto* values = row ? input->rowwise_cpu_scale_inv_ptr<uint8_t>()
+                         : input->columnwise_cpu_scale_inv_ptr<uint8_t>();
+      const size_t m = row ? shape.first : shape.second;
+      const size_t k = divide_round_up(row ? shape.second : shape.first, size_t{16});
+      // Poison the padding to catch reads outside the logical scale matrix.
+      set_scale_inv_padding(values, s.data[0], s.data[1], m, k, 0xFF);
+      std::vector<uint8_t> padded(values, values + count);
+      zero_scale_inv_padding(padded.data(), s.data[0], s.data[1], m, k);
+      auto& expected = row ? expected_row : expected_col;
+      const size_t start = expected.size();
+      expected.resize(start + count);
+      compute_ref_swizzle<128, 4, true>(padded.data(), expected.data() + start, s.data[0],
+                                        s.data[1]);
+    }
+    input->from_cpu();
+    input_ptrs.push_back(input.get());
+    output_ptrs.push_back(output.get());
+    inputs.emplace_back(std::move(input));
+    outputs.emplace_back(std::move(output));
+  }
+  auto input = build_grouped_tensor(input_ptrs, NVTE_NVFP4_1D_SCALING);
+  auto output = build_grouped_tensor(output_ptrs, NVTE_NVFP4_1D_SCALING);
+  // The GEMM fixture adds random gaps between payloads. Swizzle needs only scale
+  // storage, so describe a logical, pointer-free data extent as the PyTorch wrapper does.
+  size_t logical_numel = 0;
+  for (const auto& shape : shapes) logical_numel += shape.first * shape.second;
+  NVTEBasicTensor data{nullptr, kNVTEFloat4E2M1, nvte_make_shape(&logical_numel, 1)};
+  for (auto handle : {input.get_handle(), output.get_handle()}) {
+    if (rowwise) {
+      nvte_set_grouped_tensor_param(handle, kNVTEGroupedRowwiseData, &data, sizeof(data));
+    }
+    if (columnwise) {
+      nvte_set_grouped_tensor_param(handle, kNVTEGroupedColumnwiseData, &data, sizeof(data));
+    }
+  }
+  const uint8_t compact = 0;
+  nvte_set_grouped_tensor_param(input.get_handle(), kNVTEGroupedWithGEMMSwizzledScales,
+                               &compact, sizeof(compact));
+  const uint8_t swizzled = 1;
+  nvte_set_grouped_tensor_param(output.get_handle(), kNVTEGroupedWithGEMMSwizzledScales, &swizzled,
+                                sizeof(swizzled));
+  nvte_swizzle_grouped_scaling_factors(input.get_handle(), output.get_handle(), 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  for (const bool row : {true, false}) {
+    const auto& expected = row ? expected_row : expected_col;
+    if (expected.empty()) continue;
+    std::vector<uint8_t> actual(expected.size());
+    NVTE_CHECK_CUDA(cudaMemcpy(actual.data(),
+                               row ? output.scale_inv.get() : output.columnwise_scale_inv.get(),
+                               actual.size(), cudaMemcpyDeviceToHost));
+    compareResults(row ? "nvfp4_grouped_row" : "nvfp4_grouped_col", actual.data(), expected.data(),
+                   expected.size());
+  }
+}
+
+TEST(SwizzleTest, GroupedNVFP4UniformAndVariable) {
+  for (const auto& directions :
+       {std::make_pair(true, false), std::make_pair(false, true), std::make_pair(true, true)}) {
+    for (const auto& shape :
+         {std::make_pair<size_t, size_t>(128, 128), {160, 96}, {128, 3584}, {2176, 4032}}) {
+      performTestGroupedSwizzleNVFP4({shape, shape, shape}, directions.first, directions.second);
+    }
+    performTestGroupedSwizzleNVFP4({{128, 128}, {256, 128}, {384, 128}}, directions.first,
+                                   directions.second);
+    performTestGroupedSwizzleNVFP4({{128, 128}, {128, 256}, {128, 384}}, directions.first,
+                                   directions.second);
+    performTestGroupedSwizzleNVFP4({{160, 96}, {128, 3584}, {384, 192}}, directions.first,
+                                   directions.second);
+    performTestGroupedSwizzleNVFP4({{0, 128}, {128, 128}, {0, 128}, {256, 128}, {0, 128}},
+                                   directions.first, directions.second);
+    // Exceed the persistent grid size so a CTA must reuse shared memory for multiple tiles.
+    performTestGroupedSwizzleNVFP4({{65536, 128}, {128, 128}, {0, 128}, {256, 128}},
+                                  directions.first, directions.second);
+    performTestGroupedSwizzleNVFP4({{128, 65536}, {128, 128}, {128, 0}, {128, 256}},
+                                  directions.first, directions.second);
+  }
+}
+
 class SwizzleTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
