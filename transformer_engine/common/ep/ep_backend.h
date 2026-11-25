@@ -46,7 +46,8 @@ class EPBackend {
   // Returns the maximum across initialized local devices.
   static size_t handle_mem_size(NVTEEpLayerConfig layer_cfg);
 
-  // Runs the routing AllGather into handle_mem.
+  // Updates handle_mem with this step's routing and writes the recv counts. NCCL EP uses count
+  // mode; the scan path is used only when the transport is IB.
   void prepare(NVTETensor handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                cudaStream_t stream);

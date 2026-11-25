@@ -135,11 +135,11 @@ size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg);
 
 /*! \brief Seed handle_mem with this step's routing plan.
  *
- *  AllGathers topk_idx across the EP group and stages per-expert offsets and
- *  counts into handle_mem so the matching dispatch/combine/_bwd can run with
- *  no further routing computation. Must precede every dispatch/combine/_bwd
- *  that uses this handle_mem. recv_tokens_per_expert and total_recv_tokens_per_rank
- *  become host-valid after a stream sync.
+ *  Stages per-expert offsets and counts for topk_idx into handle_mem so the
+ *  matching dispatch/combine/_bwd can run with no further routing computation.
+ *  Must precede every dispatch/combine/_bwd that uses this handle_mem.
+ *  recv_tokens_per_expert and total_recv_tokens_per_rank become host-valid after
+ *  a stream sync.
  *
  *  \param[in]     handle_mem                 uint8 routing-state buffer.
  *  \param[in]     topk_idx                   [T, top_k] int64 routing indices.
