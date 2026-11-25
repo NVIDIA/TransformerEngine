@@ -24,7 +24,7 @@ TEST_P(NVFP4Grouped2D, MatchesSingleTensorWithEmptyExpertAndCapacityTail) {
   const bool columnwise = GetParam() != 1;
   const std::vector<int64_t> rows{128, 0, 256};
   const std::vector<int64_t> offsets{0, 128 * k, 128 * k, 384 * k};
-  Tensor source("source", {capacity, k}, DType::kBFloat16);
+  Tensor source("source", std::vector<size_t>{capacity, k}, DType::kBFloat16);
   auto* host = source.rowwise_cpu_dptr<bf16>();
   for (size_t i = 0; i < capacity * k; ++i) {
     host[i] = bf16(i < 384 * k ? (static_cast<int>(i % 97) - 48) * 0.125f : 10000.0f);
@@ -42,20 +42,22 @@ TEST_P(NVFP4Grouped2D, MatchesSingleTensorWithEmptyExpertAndCapacityTail) {
   auto scale_c = cuda_alloc<uint8_t>(capacity * k / 16);
   auto amax_r = cuda_alloc<float>(count * sizeof(float));
   auto amax_c = cuda_alloc<float>(count * sizeof(float));
-  GroupedTensorWrapper input(count, {capacity, k});
-  input.set_rowwise_data(source.rowwise_dptr(), DType::kBFloat16, {capacity, k});
-  GroupedTensorWrapper output(count, {capacity, k}, NVTE_NVFP4_1D_SCALING);
-  output.set_first_dims(device_rows.get(), DType::kInt64, {count});
-  output.set_tensor_offsets(device_offsets.get(), DType::kInt64, {count + 1});
+  GroupedTensorWrapper input(count, std::vector<size_t>{capacity, k});
+  input.set_rowwise_data(source.rowwise_dptr(), DType::kBFloat16, std::vector<size_t>{capacity, k});
+  GroupedTensorWrapper output(count, std::vector<size_t>{capacity, k}, NVTE_NVFP4_1D_SCALING);
+  output.set_first_dims(device_rows.get(), DType::kInt64, std::vector<size_t>{count});
+  output.set_tensor_offsets(device_offsets.get(), DType::kInt64, std::vector<size_t>{count + 1});
   if (rowwise) {
-    output.set_rowwise_data(data_r.get(), DType::kFloat4E2M1, {capacity, k});
-    output.set_rowwise_scale_inv(scale_r.get(), DType::kFloat8E4M3, {capacity, k / 16});
-    output.set_amax(amax_r.get(), DType::kFloat32, {count});
+    output.set_rowwise_data(data_r.get(), DType::kFloat4E2M1, std::vector<size_t>{capacity, k});
+    output.set_rowwise_scale_inv(scale_r.get(), DType::kFloat8E4M3,
+                                 std::vector<size_t>{capacity, k / 16});
+    output.set_amax(amax_r.get(), DType::kFloat32, std::vector<size_t>{count});
   }
   if (columnwise) {
-    output.set_columnwise_data(data_c.get(), DType::kFloat4E2M1, {k, capacity});
-    output.set_columnwise_scale_inv(scale_c.get(), DType::kFloat8E4M3, {k, capacity / 16});
-    output.set_columnwise_amax(amax_c.get(), DType::kFloat32, {count});
+    output.set_columnwise_data(data_c.get(), DType::kFloat4E2M1, std::vector<size_t>{k, capacity});
+    output.set_columnwise_scale_inv(scale_c.get(), DType::kFloat8E4M3,
+                                    std::vector<size_t>{k, capacity / 16});
+    output.set_columnwise_amax(amax_c.get(), DType::kFloat32, std::vector<size_t>{count});
   }
   QuantizationConfigWrapper config;
   config.set_nvfp4_2d_quantization(true);
@@ -75,10 +77,11 @@ TEST_P(NVFP4Grouped2D, MatchesSingleTensorWithEmptyExpertAndCapacityTail) {
       continue;
     }
     const size_t m = rows[i];
-    Tensor expert("expert", {m, k}, DType::kBFloat16);
+    Tensor expert("expert", std::vector<size_t>{m, k}, DType::kBFloat16);
     std::copy_n(host + offsets[i], m * k, expert.rowwise_cpu_dptr<bf16>());
     expert.from_cpu();
-    Tensor reference("reference", {m, k}, DType::kFloat4E2M1, true, true, NVTE_NVFP4_1D_SCALING);
+    Tensor reference("reference", std::vector<size_t>{m, k}, DType::kFloat4E2M1, true, true,
+                     NVTE_NVFP4_1D_SCALING);
     nvte_compute_amax(expert.data(), reference.data(), 0);
     nvte_quantize_v2(expert.data(), reference.data(), config, 0);
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
