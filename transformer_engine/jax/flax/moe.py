@@ -107,7 +107,7 @@ class _MoEBlock(TransformerEngineBase):
         Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
         MeshResource context. An explicit resource takes precedence; one of
         these is required. Batch sharding uses DP and FSDP as outer axes and
-        EP innermost.
+        EP innermost; EP may be an ordered tuple of axes.
     quant_before_fsdp_ag : bool
         Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
         ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
@@ -212,12 +212,12 @@ class _MoEBlock(TransformerEngineBase):
         Parameters
         ----------
         inputs : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            ``[batch, sequence, hidden]`` or ``[tokens, hidden]``.
 
         Returns
         -------
         output : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            Same shape as ``inputs``.
         aux_loss : Optional[jnp.ndarray]
             Scalar load-balancing loss when ``aux_loss_coeff > 0``,
             else ``None``.
@@ -232,10 +232,11 @@ class _MoEBlock(TransformerEngineBase):
             self.quant_before_fsdp_ag,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-        assert (
-            inputs.ndim == 3
-        ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
-        _, _, hidden_size = inputs.shape
+        assert inputs.ndim in (2, 3), (
+            "_MoEBlock expects [tokens, hidden] or [batch, sequence, hidden] input, got shape"
+            f" {inputs.shape}"
+        )
+        hidden_size = inputs.shape[-1]
 
         # Param registrations -- must run OUTSIDE any JAX transform that
         # alters the variable scope (e.g. shard_map). The functional

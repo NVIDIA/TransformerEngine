@@ -35,7 +35,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import _attentio
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, compare_and_assert, get_available_attention_backends
-from mla_rope_utils import apply_mla_rope, build_rope_tables
+from transformer_engine.pytorch.attention.rope import apply_mla_rope, build_mla_rope_tables
 
 
 try:
@@ -288,7 +288,7 @@ class TestLinearMXFP8Attention:
         _set_seed()
         baseline_modules, mxfp8_modules = _build_modules()
         x = torch.randn(seq_len, batch_size, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_mla_rope_tables(seq_len, device=x.device)
 
         q_bf16, k_bf16, v_bf16, out_bf16 = _run_forward_bf16(baseline_modules, x, rope_tables)
         q_mxfp8, k_mxfp8, v_mxfp8, out_mxfp8 = _run_forward_mxfp8(
@@ -374,7 +374,7 @@ class TestLinearMXFP8Attention:
             device="cuda",
             requires_grad=True,
         )
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_mla_rope_tables(seq_len, device=x.device)
 
         *_, out_mxfp8 = _run_forward_mxfp8(mxfp8_modules, x, fp8_recipe, rope_tables)
         out_mxfp8.sum().backward()
@@ -408,7 +408,7 @@ class TestLinearMXFP8Attention:
             device="cuda",
             requires_grad=True,
         )
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_mla_rope_tables(seq_len, device=x.device)
 
         mxfp8_fprop_ms, mxfp8_bprop_ms = _benchmark_training_step(
             _run_forward_mxfp8, mxfp8_modules, x, fp8_recipe, rope_tables

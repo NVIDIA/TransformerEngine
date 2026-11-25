@@ -25,8 +25,8 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded
-  ``((*data_parallelism_axes, ep_axis), None, None)``. The public
+* Inbound activations are 2D ``[T, H]`` or 3D ``[B, S, H]`` sharded
+  ``((outer_dp_axes..., ep_axes...), None, None)``. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP, grouped-quantize, and grouped-GEMM primitives operate at global
@@ -163,7 +163,8 @@ class RoutingMapInfo:
     Parameters
     ----------
     routing_indices : jnp.ndarray
-        Integer expert indices with shape ``[batch, sequence, top_k]``.
+        Integer expert indices with shape ``[batch, sequence, top_k]``, or
+        ``[tokens, top_k]`` for a ``[tokens, hidden]`` input.
         Non-differentiable. Each token's ``top_k`` indices must be distinct,
         otherwise the default receive-capacity bound is invalid.
     routing_weights : jnp.ndarray
@@ -184,7 +185,10 @@ def _num_experts_per_tok(router_info: Union[RouterComputationInfo, RoutingMapInf
 
 def _moe_mesh_axes(resource: MeshResource):
     """Resolve physical MoE axes, keeping EP innermost in the batch shard."""
-    if not isinstance(resource.ep_resource, str) or not resource.ep_resource:
+    if resource.ep_resource is None:
+        raise ValueError("TE MoE requires MeshResource.ep_resource to name physical mesh axes.")
+    ep_axes = tex.ep._normalize_ep_axes(resource.ep_resource)
+    if not ep_axes:
         raise ValueError("TE MoE requires MeshResource.ep_resource to name a physical mesh axis.")
     outer_axes = tuple(
         dict.fromkeys(
@@ -193,7 +197,7 @@ def _moe_mesh_axes(resource: MeshResource):
     )
     if any(not isinstance(axis, str) or not axis for axis in outer_axes):
         raise ValueError("TE MoE DP and FSDP resources must name physical mesh axes.")
-    if resource.ep_resource in outer_axes:
+    if any(axis in outer_axes for axis in ep_axes):
         raise ValueError("TE MoE EP and outer data-parallel axes must be distinct.")
     return resource.ep_resource, outer_axes
 
@@ -328,8 +332,14 @@ def _cudnn_jax_fusion_rejection_reasons(
                 errors.append(f"unsupported MXFP8 payload dtype {quantizer.q_dtype} for {name}")
 
     mesh = _get_mesh()
-    if mesh is not None and not mesh.empty and ep_axis in mesh.shape:
-        num_local_experts = num_experts // mesh.shape[ep_axis]
+    if (
+        mesh is not None
+        and not mesh.empty
+        and all(a in mesh.shape for a in tex.ep._normalize_ep_axes(ep_axis))
+    ):
+        num_local_experts = num_experts // math.prod(
+            mesh.shape[a] for a in tex.ep._normalize_ep_axes(ep_axis)
+        )
         if num_local_experts > 1024:
             errors.append(f"requires at most 1024 local experts, got {num_local_experts}")
 
@@ -440,7 +450,7 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
 
 def _prepare_moe_input(
     x: jnp.ndarray,
-    ep_axis: str,
+    ep_axis: Union[str, Tuple[str, ...]],
     data_parallelism_axes: Tuple[str, ...],
     *,
     caller: str,
@@ -448,9 +458,9 @@ def _prepare_moe_input(
     """Validate and constrain an MoE input to the EP communication layout.
 
     NCCL EP forms communication groups from consecutive global ranks, with
-    ``ep_axis`` as the innermost component of the compound leading mesh axis.
+    the EP axes as the innermost components of the compound leading mesh axis.
     The expected activation layout is therefore
-    ``P((*data_parallelism_axes, ep_axis), None, None)``. If ``x`` has an
+    ``P((*data_parallelism_axes, *ep_axes), None, None)``. If ``x`` has an
     incompatible known sharding, this function warns before inserting the
     reshard. The custom constraint also keeps the backward cotangent in the
     input activation dtype.
@@ -459,8 +469,8 @@ def _prepare_moe_input(
     ----------
     x : jnp.ndarray
         Rank-3 MoE input activation.
-    ep_axis : str
-        Physical mesh axis used for expert parallelism.
+    ep_axis : Union[str, Tuple[str, ...]]
+        Physical mesh axis, or ordered tuple of axes, used for expert parallelism.
     data_parallelism_axes : Tuple[str, ...]
         Physical outer data-parallel mesh axes.
     caller : str
@@ -474,11 +484,12 @@ def _prepare_moe_input(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError(f"{caller}(...) requires an active jax.sharding.Mesh.")
-    for axis in (ep_axis, *data_parallelism_axes):
+    ep_axes = tex.ep._normalize_ep_axes(ep_axis)
+    for axis in (*ep_axes, *data_parallelism_axes):
         if axis not in mesh.shape:
             raise ValueError(f"TE MoE resource axis {axis!r} is not in the active mesh.")
 
-    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
+    expected_leading: Any = (*data_parallelism_axes, *ep_axes) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
@@ -1410,7 +1421,7 @@ def _moe_fwd_rule(
             raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
         if ep_axis is None:
             raise ValueError("moe(...) requires ep_axis to be set (TE EP backend).")
-        num_ep = mesh.shape[ep_axis]
+        num_ep = math.prod(mesh.shape[a] for a in tex.ep._normalize_ep_axes(ep_axis))
         if num_experts % num_ep != 0:
             raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
         num_local_experts = num_experts // num_ep
@@ -1504,7 +1515,7 @@ def _moe_fwd_rule(
             # ep must be innermost: ep_bootstrap forms NCCL EP comms from
             # consecutive global ranks (dp_color = rank // ep_size), so the
             # comm only stays within one model replica under (outer_dp, ep).
-            batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+            batch_pspec_axis = (*data_parallelism_axes, *tex.ep._normalize_ep_axes(ep_axis))
         ep3_spec = P(batch_pspec_axis, None, None)
         ep2_spec = P(batch_pspec_axis, None)
         x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
@@ -1871,7 +1882,7 @@ def _moe_bwd_rule(
         if not data_parallelism_axes:
             batch_pspec_axis: Any = ep_axis
         else:
-            batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+            batch_pspec_axis = (*data_parallelism_axes, *tex.ep._normalize_ep_axes(ep_axis))
         ep3_spec = P(batch_pspec_axis, None, None)
         ep2_spec = P(batch_pspec_axis, None)
         out_partition_spec = (batch_pspec_axis, None, None)
@@ -2283,7 +2294,8 @@ def moe(
         ``global_shard_guard`` context; an explicit resource takes precedence.
         One of these is required. Batch sharding combines ``dp_resource`` then
         ``fsdp_resource`` (omitting unset/duplicate axes), with ``ep_resource``
-        innermost. EP must be set and distinct from the outer axes.
+        innermost. EP must be set and distinct from the outer axes; it may be
+        an ordered tuple of axes that together form one EP domain.
     quant_before_fsdp_ag : bool
         Quantize expert-weight shards before gathering their MXFP8 data and
         scales on ``mesh_resource.fsdp_resource``. Default ``False`` gathers
@@ -2345,6 +2357,18 @@ def moe(
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
+    original_shape = x.shape
+    if x.ndim not in (2, 3):
+        raise ValueError(f"moe expects rank-2 or rank-3 input, got {x.shape}")
+    if x.ndim == 2:
+        x = x.reshape(x.shape[0], 1, x.shape[1])
+        if input_axes:
+            input_axes = (input_axes[0], None, input_axes[1])
+        if isinstance(router_info, RoutingMapInfo):
+            router_info = router_info.replace(
+                routing_indices=router_info.routing_indices[:, None],
+                routing_weights=router_info.routing_weights[:, None],
+            )
     ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
 
     if isinstance(router_info, RouterComputationInfo):
@@ -2438,4 +2462,4 @@ def moe(
         assert (
             output.dtype == x.dtype
         ), f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
-        return output, aux_loss, total_recv_tokens, expert_counts
+        return output.reshape(original_shape), aux_loss, total_recv_tokens, expert_counts
