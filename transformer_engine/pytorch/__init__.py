@@ -37,6 +37,13 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import (
+    DSv4Attention,
+    Compressor,
+    Indexer,
+    dense_indexer_loss_scores,
+    dense_indexer_loss_backward,
+)
 from transformer_engine.pytorch.attention import GatedDeltaNetAttention
 from transformer_engine.pytorch.attention import GatedDeltaNet2Attention
 from transformer_engine.pytorch.attention import GatedDeltaProductAttention
