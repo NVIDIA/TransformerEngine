@@ -152,8 +152,8 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
   const auto* rows = static_cast<const int64_t*>(output->first_dims.dptr);
   const float* noop_ptr = static_cast<const float*>(noop->data.dptr);
   // Validate on device, including all-zero splits, without introducing a D2H synchronization.
-  validate_grouped_2d_splits<<<DIVUP(count, 128), 128, 0, stream>>>(offsets, rows, count, capacity,
-                                                                    cols, noop_ptr);
+  validate_grouped_2d_splits<<<DIVUP(count, size_t{128}), 128, 0, stream>>>(
+      offsets, rows, count, capacity, cols, noop_ptr);
   group_hadamard_transform_amax_graph_safe(input, output, 0, 0, true, stream, noop_ptr);
   if (capacity == 0) return;
   const float* amax =
