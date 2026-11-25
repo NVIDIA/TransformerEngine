@@ -1471,6 +1471,9 @@ class TestGroupedMLPFusedOp:
             glu_interleave_size=glu_interleave_size,
         )
         calls = traced_cudnn_grouped_glu_wrappers
+        if glu_interleave_size is None and missing_capability is not None:
+            forbidden_kind = "fwd_hadamard_quant" if fused_quant else "fwd_hadamard"
+            assert not any(call["kind"] == forbidden_kind for call in calls)
         # RHT may run in the GLU kernel or in the subsequent quantizer.
         forwards = [call for call in calls if call["kind"].startswith("fwd")]
         assert forwards
