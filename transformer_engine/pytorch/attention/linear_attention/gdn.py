@@ -293,8 +293,10 @@ class GatedDeltaNetAttention(LinearAttentionBase):
                `b` batch size, `h` the number of heads, `d` head size, and
                `t` the total number of tokens in a batch, with
                ``t = sum(s_i)`` for all sequences in the batch. Gated DeltaNet is
-               inherently causal. Pack valid tokens from padded batches into
-               `qkv_format='thd'` and pass their `cu_seqlens` to `forward`.
+               inherently causal. Packed inputs (THD) must currently contain valid
+               tokens without padding gaps between sequences. GDN does not expose
+               SDPA's ``pad_between_seqs`` option or separate padded sequence offsets;
+               pack valid tokens before calling it and pass their `cu_seqlens`.
     tp_size : int, default = 1
             tensor parallel world size.
     tp_group : ProcessGroup, default = `None`
@@ -418,6 +420,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         sequence, where ``S`` is the global sequence length. Supply
         ``cu_seqlens=[0, S, 2*S, ..., B*S]`` (``B`` is batch size) for uneven
         slices; otherwise TE infers ``S = local_sequence_length * P``.
+        For example, ``B=2``, ``S=10``, and ``P=4`` give local sequence lengths
+        ``[2, 3, 2, 3]``; every rank supplies ``cu_seqlens=[0, 10, 20]``.
         Arbitrary rank splits are unsupported.
 
         With CP, ``initial_state`` covers all global sequences and must match on
