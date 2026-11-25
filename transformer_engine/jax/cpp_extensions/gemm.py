@@ -28,6 +28,7 @@ from transformer_engine_jax import (
     is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
     get_grouped_gemm_setup_workspace_size,
+    get_cublasLt_version,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -2212,14 +2213,23 @@ def _is_v2_grouped_gemm_supported(
             ),
         )
 
-    # nvte_grouped_gemm (the v2 kernel) supports BF16 on SM90+ (Hopper or newer).
-    # MXFP8 remains gated to SM100+.
+    # nvte_grouped_gemm (the v2 kernel) supports BF16 on SM90+ (Hopper or newer), with
+    # cuBLAS 13.4+ on Hopper. MXFP8 remains gated to SM100+.
     if get_min_device_compute_capability() < 90:
         return (
             False,
             (
                 "The TE V2 grouped GEMM requires SM90+ (Hopper or newer) but current min device"
                 f" compute capability is {get_min_device_compute_capability()}."
+            ),
+        )
+
+    if get_min_device_compute_capability() < 100 and get_cublasLt_version() < 130400:
+        return (
+            False,
+            (
+                "The TE V2 grouped GEMM on Hopper (SM90) requires cuBLAS 13.4+ but the run-time"
+                f" cuBLAS version is {get_cublasLt_version()}."
             ),
         )
 

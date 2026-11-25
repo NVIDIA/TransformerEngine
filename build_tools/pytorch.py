@@ -44,7 +44,6 @@ def test_requirements() -> List[str]:
         "transformers",
         "torchao==0.13",
         "onnxruntime",
-        "onnxruntime_extensions",
     ]
 
 

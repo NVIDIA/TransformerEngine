@@ -388,17 +388,27 @@ struct AdamCapturableFunctor {
                                              const int bias_correction, const float epsilon,
                                              const float *lr_ptr, adamMode_t mode,
                                              const float decay, const float *inv_scale_ptr) {
+    // Compute bias corrections on thread 0
+    __shared__ float bias_corrections[2];
+    if (threadIdx.x == 0) {
+      bias_corrections[0] = 1.0f;
+      bias_corrections[1] = 1.0f;
+      if (bias_correction == 1) {
+        bias_corrections[0] = 1 - pow(beta1, *step);
+        bias_corrections[1] = 1 - pow(beta2, *step);
+      }
+    }
+    __syncthreads();
+    const float beta1_correction = bias_corrections[0];
+    const float beta2_correction = bias_corrections[1];
+
+    // Exit early if noop flag is set
+    // Note: Check after __syncthreads to ensure all threads enter sync
     if (*noop_gmem == 1) return;
 
     const float lr = *lr_ptr;
     const float inv_scale = *inv_scale_ptr;
     const bool write_unscaled_grads = inv_scale != 1.0f;
-
-    float beta1_correction = 1.0f, beta2_correction = 1.0f;
-    if (bias_correction == 1) {
-      beta1_correction = 1 - pow(beta1, *step);
-      beta2_correction = 1 - pow(beta2, *step);
-    }
 
     index_t tensor_loc = tl.block_to_tensor[blockIdx.x];
 
@@ -494,17 +504,27 @@ struct AdamCapturableMasterFunctor {
                                              const int bias_correction, const float epsilon,
                                              const float *lr_ptr, adamMode_t mode,
                                              const float decay, const float *inv_scale_ptr) {
+    // Compute bias corrections on thread 0
+    __shared__ float bias_corrections[2];
+    if (threadIdx.x == 0) {
+      bias_corrections[0] = 1.0f;
+      bias_corrections[1] = 1.0f;
+      if (bias_correction == 1) {
+        bias_corrections[0] = 1 - pow(beta1, *step);
+        bias_corrections[1] = 1 - pow(beta2, *step);
+      }
+    }
+    __syncthreads();
+    const float beta1_correction = bias_corrections[0];
+    const float beta2_correction = bias_corrections[1];
+
+    // Exit early if noop flag is set
+    // Note: Check after __syncthreads to ensure all threads enter sync
     if (*noop_gmem == 1) return;
 
     const float lr = *lr_ptr;
     const float inv_scale = *inv_scale_ptr;
     const bool write_unscaled_grads = inv_scale != 1.0f;
-
-    float beta1_correction = 1.0f, beta2_correction = 1.0f;
-    if (bias_correction == 1) {
-      beta1_correction = 1 - pow(beta1, *step);
-      beta2_correction = 1 - pow(beta2, *step);
-    }
 
     index_t tensor_loc = tl.block_to_tensor[blockIdx.x];
 

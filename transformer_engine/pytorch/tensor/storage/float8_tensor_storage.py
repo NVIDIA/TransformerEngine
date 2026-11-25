@@ -159,14 +159,8 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
             "fake_dtype": self._dtype,
+            "transpose_invalid": self._transpose_invalid,
         }
-
-    def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
-        kwargs = super()._flatten_nontensor_kwargs()
-        # Not derivable from the buffers: an allocated transpose may be stale
-        # (invalidated by _reset_caches); reconstruction must not revalidate it.
-        kwargs["transpose_invalid"] = self._transpose_invalid
-        return kwargs
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""

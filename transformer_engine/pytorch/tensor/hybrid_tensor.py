@@ -1132,27 +1132,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 device=device,
             )
 
-        # ── FSDP2: clone ─────────────────────────────────────────────
-        if func == aten.clone.default:
-            tensor = args[0]
-            row_clone = (
-                torch.clone(tensor._rowwise_storage)
-                if tensor._rowwise_storage is not None
-                else None
-            )
-            col_clone = (
-                torch.clone(tensor._columnwise_storage)
-                if tensor._columnwise_storage is not None
-                else None
-            )
-            return HybridQuantizedTensor(
-                shape=tensor.shape,
-                dtype=tensor.dtype,
-                rowwise_storage=row_clone,
-                columnwise_storage=col_clone,
-                quantizer=tensor._quantizer,
-            )
-
         return super().__torch_dispatch__(func, types, args, kwargs)
 
 
