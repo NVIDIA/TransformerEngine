@@ -43,6 +43,7 @@ from ..utils import (
     nvtx_range_push,
     needs_quantized_gemm,
     get_nvtx_range_context,
+    get_cudnn_version,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -181,6 +182,9 @@ class LayerNormLinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
+    # --- Gradient fan-in (see LayerNormLinear.supports_grad_fanin) ---
+    grad_fanin: Optional[Any] = None
+
     def any_requires_grad(self) -> bool:
         """Whether any differentiable input requires a gradient."""
         return any(
@@ -277,6 +281,10 @@ class LayerNormLinearBwdArgs:
 
     # --- Per-backward scratch state (populated inside the backward impl) ---
     ub_obj_gradout: Optional[Any] = None
+
+    # --- Gradient fan-in (see LayerNormLinear.supports_grad_fanin) ---
+    grad_fanin: Optional[Any] = None
+    grad_fanin_accumulated: bool = False
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
@@ -1420,14 +1428,36 @@ def _layernorm_linear_backward_impl(
                 args.zero_centered_gamma,
             )
         elif args.normalization == "RMSNorm":
-            dgrad, dgamma = tex.rmsnorm_bwd(
-                dgrad,
-                inputmat,
-                rsigma,
-                ln_weight,
-                args.bwd_ln_sm_margin,
-                args.zero_centered_gamma,
-            )
+            fanin_acc = _grad_fanin_partial_sum(args.grad_fanin)
+            if (
+                fanin_acc is not None
+                and fanin_acc.dtype == dgrad.dtype
+                and fanin_acc.dtype == ln_weight.dtype
+                and fanin_acc.is_contiguous()
+                and fanin_acc.numel() == inputmat.numel()
+                and _rmsnorm_bwd_add_supported()
+            ):
+                # Gradient fan-in: add the other consumers' gradient (the residual branch) in
+                # the norm backward kernel instead of a separate elementwise add.
+                dgrad, dgamma = tex.rmsnorm_bwd_add(
+                    dgrad,
+                    inputmat,
+                    fanin_acc.view(inputmat.shape),
+                    rsigma,
+                    ln_weight,
+                    args.bwd_ln_sm_margin,
+                    args.zero_centered_gamma,
+                )
+                args.grad_fanin_accumulated = True
+            else:
+                dgrad, dgamma = tex.rmsnorm_bwd(
+                    dgrad,
+                    inputmat,
+                    rsigma,
+                    ln_weight,
+                    args.bwd_ln_sm_margin,
+                    args.zero_centered_gamma,
+                )
             dbeta = None
         nvtx_range_pop(f"{nvtx_label}.norm")
         clear_tensor_data(mu)
@@ -1462,6 +1492,36 @@ def _layernorm_linear_backward_impl(
         wgrad,
         grad_bias,
     )
+
+
+def _env_flag(name: str) -> bool:
+    """Value of a boolean NVTE environment variable (unset or empty is False)."""
+    value = os.getenv(name, "")
+    return value != "" and int(value) != 0
+
+
+def _rmsnorm_bwd_add_supported() -> bool:
+    """Whether ``tex.rmsnorm_bwd_add`` runs with the selected normalization backend.
+
+    The cuDNN backend (``NVTE_NORM_BWD_USE_CUDNN=1``) needs cuDNN 9.21 or newer for the fused
+    add. The TE backend rejects ``NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE=1``. When unsupported, the
+    plain RMSNorm backward runs and the fan-in adds the sum in ``finish``.
+    """
+    if _env_flag("NVTE_NORM_BWD_USE_CUDNN"):
+        return get_cudnn_version() >= (9, 21, 0)
+    return not _env_flag("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE")
+
+
+def _grad_fanin_partial_sum(grad_fanin: Any) -> Optional[torch.Tensor]:
+    """Running gradient sum of a gradient fan-in for read-only use, or ``None``.
+
+    Uses ``partial_sum()`` when the fan-in provides it (a sum that may not be written in
+    place), else ``accum_target()``.
+    """
+    if grad_fanin is None:
+        return None
+    partial_sum = getattr(grad_fanin, "partial_sum", None)
+    return partial_sum() if partial_sum is not None else grad_fanin.accum_target()
 
 
 class _LayerNormLinear(torch.autograd.Function):
@@ -1501,6 +1561,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ) = _layernorm_linear_forward_impl(fwd_args)
         if ctx is not None:
             bwd_args = LayerNormLinearBwdArgs()
+            bwd_args.grad_fanin = fwd_args.grad_fanin
             tensors_to_save_from_setup = _layernorm_linear_setup_ctx(
                 bwd_args,
                 fwd_args,
@@ -1535,6 +1596,10 @@ class _LayerNormLinear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         dgrad, dgamma, dbeta, wgrad, grad_bias = _layernorm_linear_backward_impl(bwd_args)
+        if bwd_args.grad_fanin is not None:
+            # Only the last fan-in consumer returns the summed input gradient.
+            dgrad = bwd_args.grad_fanin.finish(dgrad, accumulated=bwd_args.grad_fanin_accumulated)
+            bwd_args.grad_fanin = None
         reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
@@ -1651,6 +1716,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    When set to ``None``, standard all-reduce is used.
     """
+
+    #: Gradient fan-in support, with the protocol of :attr:`Linear.supports_grad_fanin`: a
+    #: caller sets ``module._grad_fanin`` before a forward call, and a call with grad enabled
+    #: and an input that requires grad consumes it and calls ``finish`` once in backward.
+    #:
+    #: Here the running sum of the other consumers' gradients is not accumulated into but read:
+    #: with RMSNorm, the norm backward adds it to the input gradient in the same kernel
+    #: (``rmsnorm_bwd_add``) and reports ``accumulated=True``. This removes the separate add of a
+    #: residual-branch gradient when the input norm is fused into this layer. The sum is read
+    #: through ``partial_sum()`` if the fan-in provides it (it need not be safe to write in
+    #: place), else ``accum_target()``. With LayerNorm, or when there is no running sum yet,
+    #: the input gradient is passed to ``finish`` unchanged.
+    supports_grad_fanin = True
 
     def __init__(
         self,
@@ -2208,6 +2286,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             if is_grad_enabled:
+                # Consumed only by a call that reports to it in backward (see supports_grad_fanin).
+                if inp.requires_grad:
+                    fwd_args.grad_fanin = self.__dict__.pop("_grad_fanin", None)
                 out, ln_out, new_weight_workspace = _LayerNormLinear.apply(
                     inp,
                     self.layer_norm_weight,
