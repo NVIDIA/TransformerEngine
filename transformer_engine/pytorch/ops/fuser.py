@@ -111,7 +111,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # tensors are created outside this function, and a higher-order op may
         # not mutate anything from an enclosing scope. Under fullgraph there is
         # no falling back out of the graph, so the constraint holds either way.
-        if not torch.compiler.is_compiling():
+        is_compiling = torch.compiler.is_compiling()
+        if not is_compiling:
             for tensor in (input_,) + params_and_extra_inputs:
                 tensor._do_not_clear = True
 
@@ -252,21 +253,18 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
             # Other context
+            # The routing metadata is fixed when the fuser is constructed. Keep
+            # only invocation-specific state and the selected backward plan on
+            # the autograd context.
+            func_ctx.fuser = fuser
             func_ctx.backward_ops = fuser._backward_ops
-            func_ctx.basic_ops = fuser._basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
-            func_ctx.basic_op_num_params = fuser._basic_op_num_params
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
-            func_ctx.external_extra_input_slots = fuser._external_extra_input_slots
-            func_ctx.public_extra_output_slots = fuser._public_extra_output_slots
-            func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
-            func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
-            func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
             func_ctx.use_custom_ops = use_custom_ops[1]
 
         # Mark output tensors as not deletable in backward (eager only; see above)
-        if not torch.compiler.is_compiling():
+        if not is_compiling:
             for tensor in itertools.chain(
                 (x,),
                 (y for ys in extra_outputs for y in ys if y is not None),
@@ -276,7 +274,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Autograd marks the outputs of an ``apply`` itself, so this is only
         # needed on the eager path -- and AOTAutograd's functionalization drops
         # a requires_grad_() applied to a graph output anyway.
-        if set_output_requires_grad and not torch.compiler.is_compiling():
+        if set_output_requires_grad and not is_compiling:
             x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
         if extra_outputs_flat:
@@ -294,8 +292,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         """Backward pass"""
 
         # Operations and autograd state
+        fuser = func_ctx.fuser
         backward_ops = func_ctx.backward_ops
-        basic_ops = func_ctx.basic_ops
+        basic_ops = fuser._basic_ops
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Restore saved tensors
@@ -312,9 +311,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             ctx._saved_tensors_range = None
 
         # Channel wiring saved from forward
-        basic_op_extra_output_channels = func_ctx.basic_op_extra_output_channels
-        basic_op_extra_output_consumers = func_ctx.basic_op_extra_output_consumers
-        basic_op_extra_input_sources = func_ctx.basic_op_extra_input_sources
+        basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
+        basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
+        basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
 
         # Place caller-provided extra-output grads into their basic-op slots.
         # Gradients from internal channel consumers are added during backward.
@@ -328,7 +327,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         ]
         for grad, (op_idx, output_idx) in zip(
             grad_extra_outputs,
-            func_ctx.public_extra_output_slots,
+            fuser._public_extra_output_slots,
         ):
             basic_op_grad_extra_outputs[op_idx][output_idx] = grad
 
@@ -384,7 +383,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Flatten list of parameter gradients
         grad_params_flat = []
         for idx, dparams in enumerate(grad_params):
-            num_params = func_ctx.basic_op_num_params[idx]
+            num_params = fuser._basic_op_num_params[idx]
             if dparams is None:
                 dparams = [None for _ in range(num_params)]
             else:
@@ -411,7 +410,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Collect the gradient for each public extra input.
         grad_extra_inputs_flat = [
             grad_extra_inputs[op_idx][input_idx]
-            for op_idx, input_idx in func_ctx.external_extra_input_slots
+            for op_idx, input_idx in fuser._external_extra_input_slots
         ]
 
         # Update FP8 scaling factors
@@ -480,6 +479,8 @@ class OperationFuser:
             [[] for _ in range(op.num_extra_outputs)] for op in basic_ops
         ]
         self._external_extra_input_slots: list[tuple[int, int]] = []
+        # Indices in the caller's flat extra-input tuple, grouped by op.
+        self._external_extra_input_arg_indices: list[list[int]] = [[] for _ in basic_ops]
         self._public_extra_output_slots: list[tuple[int, int]] = []
 
         # Find channel producers and reject ambiguous names.
@@ -501,6 +502,9 @@ class OperationFuser:
         for op_idx, op in enumerate(basic_ops):
             for input_idx, channel in enumerate(op._extra_input_channels):
                 if channel is None:
+                    self._external_extra_input_arg_indices[op_idx].append(
+                        len(self._external_extra_input_slots)
+                    )
                     self._external_extra_input_slots.append((op_idx, input_idx))
                     continue
                 producer = channel_producers.get(channel)
@@ -587,6 +591,14 @@ class OperationFuser:
         self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
+        # Only these ops can start backward when the main input has no grad.
+        # Keep both parameter lists and caller-argument positions ready so
+        # fusion planning does not build per-op input collections per call.
+        self._grad_input_sources = tuple(
+            (idx, params, self._external_extra_input_arg_indices[idx])
+            for idx, params in enumerate(self._basic_op_params)
+            if params or self._external_extra_input_arg_indices[idx]
+        )
 
     @staticmethod
     def _apply_fusions(
@@ -648,9 +660,9 @@ class OperationFuser:
         is_grad_enabled: bool,
         recipe: Optional[Recipe],
         input_: torch.Tensor,
-        extra_inputs: list[Iterable[torch.Tensor]],
+        extra_inputs: Sequence[Optional[torch.Tensor]],
     ):
-        """Attempt to fuse operations if neccesary"""
+        """Select a fusion plan using caller extra inputs in flat argument order."""
 
         # Determine which basic ops require backward
         if not is_grad_enabled:
@@ -659,10 +671,16 @@ class OperationFuser:
             first_op_requiring_backward = 0
         else:
             first_op_requiring_backward = self._num_basic_ops
-            for op_idx in range(self._num_basic_ops):
-                op_inputs = itertools.chain(self._basic_op_params[op_idx], extra_inputs[op_idx])
-                if any(tensor is not None and tensor.requires_grad for tensor in op_inputs):
+            for op_idx, params, extra_arg_indices in self._grad_input_sources:
+                if params and any(param.requires_grad for param in params):
                     first_op_requiring_backward = op_idx
+                    break
+                for arg_idx in extra_arg_indices:
+                    tensor = extra_inputs[arg_idx]
+                    if tensor is not None and tensor.requires_grad:
+                        first_op_requiring_backward = op_idx
+                        break
+                if first_op_requiring_backward != self._num_basic_ops:
                     break
 
         # Update the runtime backward boundary on every invocation, including
@@ -768,8 +786,6 @@ class OperationFuser:
 
     def _use_custom_ops(self, basic_op_kwargs: list[dict[str, Any]], mode: str) -> bool:
         """Whether this pass runs through its operations' custom ops."""
-        if not torch.compiler.is_compiling():
-            return False
         reason = self._custom_ops_unsupported_reason(basic_op_kwargs, mode)
         if reason is None:
             return True
@@ -793,14 +809,6 @@ class OperationFuser:
         if basic_op_kwargs is None:
             basic_op_kwargs = [{}] * self._num_basic_ops
 
-        # Place public extra inputs into their basic-op slots. Internal slots
-        # are not available until forward executes their producers.
-        basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
-            [None] * op.num_extra_inputs for op in self._basic_ops
-        ]
-        for tensor, (op_idx, input_idx) in zip(extra_inputs, self._external_extra_input_slots):
-            basic_op_extra_inputs[op_idx][input_idx] = tensor
-
         # Get environment state
         recipe = None
         if FP8GlobalStateManager.is_fp8_enabled():
@@ -808,11 +816,12 @@ class OperationFuser:
         is_grad_enabled = torch.is_grad_enabled()
 
         # Attempt to fuse operations if neccesary
-        self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+        self.maybe_fuse_ops(is_grad_enabled, recipe, input, extra_inputs)
 
         # Initialization before forward
+        is_compiling = torch.compiler.is_compiling()
         for idx, op in enumerate(self._basic_ops):
-            if torch.compiler.is_compiling() and op._fp8_metas is not None:
+            if is_compiling and op._fp8_metas is not None:
                 if any(
                     meta is not None and _has_delayed_scaling_state(meta)
                     for meta in op._fp8_metas.values()
@@ -828,8 +837,9 @@ class OperationFuser:
         # which can expose non-leaf tensors to the inner ops. Avoid
         # problems in this case by passing set_output_requires_grad=False.
         use_custom_ops = (
-            self._use_custom_ops(basic_op_kwargs, "forward"),
-            is_grad_enabled
+            is_compiling and self._use_custom_ops(basic_op_kwargs, "forward"),
+            is_compiling
+            and is_grad_enabled
             and self.first_op_requiring_backward < self._num_basic_ops
             and self._use_custom_ops(basic_op_kwargs, "backward"),
         )

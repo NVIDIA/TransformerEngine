@@ -178,9 +178,8 @@ def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
     #   1: the boundary is past the only op, so no backward work is required.
     fuser = OperationFuser([te_ops.Identity()])
     x = torch.ones(1, requires_grad=True)
-    # maybe_fuse_ops expects one extra-input collection per basic op. Identity
-    # has no extra inputs, so its collection is an empty tuple.
-    extra_inputs = [()]
+    # Identity has no caller-supplied extra inputs.
+    extra_inputs = ()
 
     # Phase 1: the original checkpointed forward runs with grad disabled. This
     # is the first invocation, so the fuser must construct and cache the no-grad
@@ -222,6 +221,35 @@ def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
     assert fuser._backward_ops is grad_backward_ops
 
 
+def test_operation_fuser_extra_input_routes_across_outstanding_calls() -> None:
+    """Extra-input gradients select the right plan and stay with their call."""
+
+    fuser = OperationFuser(
+        [te_ops.Identity(), te_ops.AddExtraInput(), te_ops.Identity(), te_ops.AddExtraInput()]
+    )
+    x = torch.ones(4)
+    first_extra = torch.full((4,), 2.0, requires_grad=True)
+    second_extra = torch.full((4,), 3.0, requires_grad=True)
+    later_extra = torch.full((4,), 4.0)
+    last_extra = torch.full((4,), 5.0, requires_grad=True)
+
+    first_output = fuser(x, first_extra, second_extra)
+    assert fuser.first_op_requiring_backward == 1
+    second_output = fuser(x, later_extra, last_extra)
+    assert fuser.first_op_requiring_backward == 3
+    torch.testing.assert_close(first_output, x + first_extra + second_extra)
+    torch.testing.assert_close(second_output, x + later_extra + last_extra)
+
+    # Both graphs are live when backward starts, and use different cached
+    # fusion plans. Running them in reverse order checks that no slot retains
+    # a tensor or a gradient from the other invocation.
+    second_output.sum().backward()
+    first_output.sum().backward()
+    torch.testing.assert_close(first_extra.grad, torch.ones_like(first_extra))
+    torch.testing.assert_close(second_extra.grad, torch.ones_like(second_extra))
+    torch.testing.assert_close(last_extra.grad, torch.ones_like(last_extra))
+
+
 def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monkeypatch) -> None:
     """Track recipe-state resets independently from fusion-plan construction."""
 
@@ -256,7 +284,7 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
 
     fuser = OperationFuser([op])
     x = torch.ones(1)
-    extra_inputs = [()]
+    extra_inputs = ()
 
     current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(backward_override=None)
     fuser.maybe_fuse_ops(False, current_scaling, x, extra_inputs)
