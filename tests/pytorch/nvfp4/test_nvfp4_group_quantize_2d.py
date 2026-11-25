@@ -73,6 +73,10 @@ def test_grouped_2d_bitwise(cols, directions, swizzled, paged, splits):
     torch.manual_seed(32)
     capacity = sum(splits) + (256 if paged else 0)
     x = torch.randn(capacity, cols, device="cuda", dtype=torch.bfloat16)
+    start = 0
+    for expert, rows in enumerate(splits):
+        x[start : start + rows].mul_(16.0 ** (expert - 1))
+        start += rows
     # A capacity tail must not affect any expert's scalar amax or quantized values.
     x[sum(splits) :] = 10000
     metadata = torch.tensor(splits, device="cuda", dtype=torch.int64)

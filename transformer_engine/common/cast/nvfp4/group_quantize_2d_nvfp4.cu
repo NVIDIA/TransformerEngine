@@ -128,7 +128,8 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
   const auto validate_direction = [&](bool enabled, const SimpleTensor& data,
                                       const SimpleTensor& scales, const SimpleTensor& amax) {
     if (!enabled) return;
-    NVTE_CHECK(data.dtype == DType::kFloat4E2M1 && data.numel() >= capacity * cols / 2,
+    NVTE_CHECK(data.dtype == DType::kFloat4E2M1 && (capacity == 0 || data.dptr) &&
+                   data.numel() >= capacity * cols / 2,
                "Invalid grouped NVFP4 data buffer.");
     NVTE_CHECK((capacity == 0 || scales.dptr) && scales.numel() >= capacity * cols / 16,
                "Invalid grouped NVFP4 scale buffer.");
@@ -147,7 +148,6 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
                  output->tensor_offsets.numel() >= count + 1 && output->first_dims.dptr &&
                  output->first_dims.numel() >= count,
              "Grouped NVFP4 2D requires int64 device splits and offsets.");
-  if (count == 0) return;
   const auto* offsets = static_cast<const int64_t*>(output->tensor_offsets.dptr);
   const auto* rows = static_cast<const int64_t*>(output->first_dims.dptr);
   const float* noop_ptr = static_cast<const float*>(noop->data.dptr);
