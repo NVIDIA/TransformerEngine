@@ -197,6 +197,9 @@ def test_grouped_2d_rejects_invalid_metadata(device, dtype):
 def test_grouped_2d_rejects_unsupported_recipe(option):
     q = _quantizer((True, True), False)
     setattr(q, option, option != "with_2d_quantization")
+    if option == "with_amax_reduction":
+        # Quantizer construction needs a group, but dispatch must reject it before any collective.
+        q.amax_reduction_group = torch.distributed.ProcessGroup(torch.distributed.HashStore(), 0, 1)
     x = torch.zeros(256, 128, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="not implemented|local per-tensor amax"):
         tex.group_quantize(x, q, 2, None)
