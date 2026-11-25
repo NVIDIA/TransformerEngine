@@ -26,85 +26,142 @@ __global__ void validate_grouped_2d_splits(const int64_t* offsets, const int64_t
 }
 
 #if FP4_TYPE_SUPPORTED
-template <typename ScaleType>
-__global__ void grouped_nvfp4_2d_quantize_transpose(const bf16* input, uint8_t* row_data,
-                                                    uint8_t* col_data, ScaleType* row_scales,
-                                                    ScaleType* col_scales, const float* amax,
-                                                    const int64_t* offsets, const int64_t* rows,
-                                                    size_t count, size_t cols, bool swizzled,
-                                                    const float* noop) {
+template <typename ScaleType, bool ROWWISE, bool COLUMNWISE, bool SWIZZLED>
+__global__ __launch_bounds__(128) void grouped_nvfp4_2d_quantize_transpose(
+    const __grid_constant__ CUtensorMap input_map, uint8_t* row_data, uint8_t* col_data,
+    ScaleType* row_scales, ScaleType* col_scales, const float* amax, const int64_t* offsets,
+    const int64_t* rows, size_t count, size_t cols, const float* noop) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
   if (noop && *noop == 1.0f) return;
-  const size_t global_row = (static_cast<size_t>(blockIdx.x) / (cols / 128)) * 32;
+  const size_t global_row = (static_cast<size_t>(blockIdx.x) / (cols / 128)) * 128;
   if (global_row * cols >= offsets[count]) return;
   const size_t expert = common::find_tensor_from_offsets(offsets, count, global_row * cols);
   const size_t start = offsets[expert] / cols;
   const size_t local_row = global_row - start;
-  // Each half-warp owns one 16x16 scale block; a CTA covers a 32x128 tile.
-  const int scale_block = threadIdx.x / 16;
-  const int block_row = (scale_block / 8) * 16;
-  const int block_col = (scale_block % 8) * 16;
-  const int lane = threadIdx.x % 16;
-  const size_t col = (blockIdx.x % (cols / 128)) * 128 + block_col;
+  const size_t col = (blockIdx.x % (cols / 128)) * 128;
   const size_t m = rows[expert];
-  __shared__ bf16 tile[32][129];
-  alignas(16) bf16 values[16];
-  const bf16* source = input + (global_row + block_row + lane) * cols + col;
-  reinterpret_cast<uint4*>(values)[0] = reinterpret_cast<const uint4*>(source)[0];
-  reinterpret_cast<uint4*>(values)[1] = reinterpret_cast<const uint4*>(source)[1];
-  float a = 0.0f;
-#pragma unroll
-  for (int j = 0; j < 16; ++j) {
-    tile[block_row + lane][block_col + j] = values[j];
-    a = fmaxf(a, fabsf(static_cast<float>(values[j])));
-  }
-  for (int delta = 8; delta > 0; delta /= 2) {
-    a = fmaxf(a, __shfl_xor_sync(0xffffffff, a, delta, 16));
-  }
-  __syncwarp();
-
-  // Use the same arithmetic and packed BF16 conversion as single-tensor 2D quantization.
   const float encode = core::compute_global_encode_scaling_factor_FP4<ScaleType>(amax[expert]);
   const float decode = 1.0 / encode;
-  const ScaleType scale = core::compute_decoding_scaling_factor<ScaleType>(a, encode);
-  const float inverse =
-      fminf(1.0f / (static_cast<float>(scale) * decode), detail::TypeExtrema<float>::max);
-  const float2 inverse2{inverse, inverse};
   const size_t scale_base = offsets[expert] / 16;
-  if (row_data) {
-    uint64_t packed_values = 0;
+  const int tid = threadIdx.x;
+  const bool leader = tid == 0;
+  __shared__ alignas(128) bf16 input[2][32][128];
+  __shared__ alignas(16) uint32_t packed[8][64];
+  __shared__ alignas(16) ScaleType scales[8][8];
+  __shared__ alignas(8) uint64_t barriers[4];
+  initialize_barriers<4, 128>(barriers, leader);
+  copy_2d_to_shared(input[0], &input_map, col, global_row, 32 * 128 * sizeof(bf16), &barriers[0],
+                    leader);
+
+  // A 128x128 chunk is consumed in four 32x128 stages. Prefetch into the other
+  // input buffer while quantizing the current stage; no dynamic tensor maps or D2H.
 #pragma unroll
-    for (int p = 0; p < 4; ++p) {
-      const auto packed = ptx::mul_cvt_bf16_to_fp4_4x<false>(
-          *reinterpret_cast<const uint64_t*>(values + 4 * p), inverse2, 0);
-      packed_values |= static_cast<uint64_t>(packed.__x) << (16 * p);
+  for (int stage = 0; stage < 4; ++stage) {
+    const int buff = stage % 2;
+    if (stage + 1 < 4) {
+      copy_2d_to_shared(input[(stage + 1) % 2], &input_map, col, global_row + (stage + 1) * 32,
+                        32 * 128 * sizeof(bf16), &barriers[stage + 1], leader);
     }
-    *reinterpret_cast<uint64_t*>(row_data + (global_row + block_row + lane) * (cols / 2) +
-                                 col / 2) = packed_values;
-    const size_t r = local_row + block_row + lane;
-    const size_t c = col / 16;
-    const size_t index =
-        swizzled ? swizzle::gemm_swizzled_scale_idx(r, c, cols / 16) : r * (cols / 16) + c;
-    row_scales[scale_base + index] = scale;
-  }
-  if (col_data) {
-    uint64_t packed_values = 0;
+    ptx::mbarrier_wait_parity(&barriers[stage], 0);
+    uint32_t col_words[4] = {};
 #pragma unroll
-    for (int p = 0; p < 4; ++p) {
+    for (int half = 0; half < 2; ++half) {
+      alignas(8) bf16 values[16];
+      float a = 0.0f;
 #pragma unroll
-      for (int j = 0; j < 4; ++j) values[j] = tile[block_row + 4 * p + j][block_col + lane];
-      const auto packed = ptx::mul_cvt_bf16_to_fp4_4x<false>(
-          *reinterpret_cast<const uint64_t*>(values), inverse2, 0);
-      packed_values |= static_cast<uint64_t>(packed.__x) << (16 * p);
+      for (int r = 0; r < 16; ++r) {
+        values[r] = input[buff][half * 16 + r][tid];
+        a = fmaxf(a, fabsf(static_cast<float>(values[r])));
+      }
+#pragma unroll
+      for (int delta = 8; delta > 0; delta /= 2) {
+        a = fmaxf(a, __shfl_xor_sync(0xffffffff, a, delta, 16));
+      }
+      const ScaleType scale = core::compute_decoding_scaling_factor<ScaleType>(a, encode);
+      const float inverse =
+          fminf(1.0f / (static_cast<float>(scale) * decode), detail::TypeExtrema<float>::max);
+      const float2 inverse2{inverse, inverse};
+      if (tid % 16 == 0) scales[stage * 2 + half][tid / 16] = scale;
+        // With deterministic 2D scaling, both directions share the same FP4 values.
+        // Quantize once using the single-tensor arithmetic, then transpose the nibbles.
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const uint32_t bits = ptx::mul_cvt_bf16_to_fp4_4x<false>(
+                                  *reinterpret_cast<const uint64_t*>(values + 4 * q), inverse2, 0)
+                                  .__x;
+        col_words[half * 2 + q / 2] |= bits << ((q % 2) * 16);
+        if constexpr (ROWWISE) {
+          // Pair adjacent columns into whole words before storing to shared memory.
+          const uint32_t adjacent = __shfl_xor_sync(0xffffffff, bits, 1);
+          if (tid % 2 == 0) packed[half * 4 + q][tid / 2] = bits | (adjacent << 16);
+        }
+      }
     }
-    *reinterpret_cast<uint64_t*>(col_data + offsets[expert] / 2 + (col + lane) * (m / 2) +
-                                 (local_row + block_row) / 2) = packed_values;
-    const size_t r = col + lane;
-    const size_t c = (local_row + block_row) / 16;
-    const size_t index =
-        swizzled ? swizzle::gemm_swizzled_scale_idx(r, c, m / 16) : r * (m / 16) + c;
-    col_scales[scale_base + index] = scale;
+    if constexpr (COLUMNWISE) {
+      *reinterpret_cast<uint4*>(col_data + offsets[expert] / 2 + (col + tid) * (m / 2) +
+                                (local_row + stage * 32) / 2) =
+          make_uint4(col_words[0], col_words[1], col_words[2], col_words[3]);
+    }
+    __syncthreads();
+    if constexpr (ROWWISE) {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int r = (tid + i * 128) / 16;
+        const int c = (tid % 16) * 8;
+        const uint4 v = *reinterpret_cast<const uint4*>(&packed[r / 4][c / 2]);
+        const int shift = (r % 4) * 4;
+        const auto pair = [shift](uint32_t x) {
+          return ((x >> shift) & 15u) | ((x >> (shift + 12)) & 240u);
+        };
+        const uint32_t out = pair(v.x) | (pair(v.y) << 8) | (pair(v.z) << 16) | (pair(v.w) << 24);
+        *reinterpret_cast<uint32_t*>(row_data + (global_row + stage * 32 + r) * (cols / 2) +
+                                     (col + c) / 2) = out;
+      }
+    }
+    __syncthreads();
   }
+  // Emit the replicated scale matrix in 8-byte vectors rather than scattered
+  // byte stores per stage. Two 512-byte base blocks cover each swizzled tile.
+  static_assert(sizeof(ScaleType) == 1);
+  const auto* scale_bytes = reinterpret_cast<const uint8_t*>(scales);
+  if constexpr (SWIZZLED) {
+    const int r0 = (tid / 2) % 32 + (tid % 2) * 64;
+    const int r1 = r0 + 32;
+    const int c = (tid / 64) * 4;
+    if constexpr (ROWWISE) {
+      const uint32_t lo = *reinterpret_cast<const uint32_t*>(&scales[r0 / 16][c]);
+      const uint32_t hi = *reinterpret_cast<const uint32_t*>(&scales[r1 / 16][c]);
+      const size_t base = swizzle::gemm_swizzled_scale_idx(local_row, col / 16, cols / 16);
+      reinterpret_cast<uint64_t*>(row_scales + scale_base + base)[tid] =
+          static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32);
+    }
+    if constexpr (COLUMNWISE) {
+      uint64_t bits = 0;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        bits |= static_cast<uint64_t>(scale_bytes[(c + j) * 8 + r0 / 16]) << (8 * j);
+        bits |= static_cast<uint64_t>(scale_bytes[(c + j) * 8 + r1 / 16]) << (32 + 8 * j);
+      }
+      const size_t base = swizzle::gemm_swizzled_scale_idx(col, local_row / 16, m / 16);
+      reinterpret_cast<uint64_t*>(col_scales + scale_base + base)[tid] = bits;
+    }
+  } else {
+    if constexpr (ROWWISE) {
+      *reinterpret_cast<uint64_t*>(row_scales + scale_base + (local_row + tid) * (cols / 16) +
+                                   col / 16) =
+          *reinterpret_cast<const uint64_t*>(&scales[tid / 16][0]);
+    }
+    if constexpr (COLUMNWISE) {
+      uint64_t bits = 0;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        bits |= static_cast<uint64_t>(scale_bytes[j * 8 + tid / 16]) << (8 * j);
+      }
+      *reinterpret_cast<uint64_t*>(col_scales + scale_base + (col + tid) * (m / 16) +
+                                   local_row / 16) = bits;
+    }
+  }
+  destroy_barriers<4>(barriers, leader);
 #else
   NVTE_DEVICE_ERROR("Grouped NVFP4 2D quantization requires Blackwell.");
 #endif
@@ -171,15 +228,24 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
   if (capacity == 0) return;
   const float* amax =
       static_cast<const float*>(rowwise ? output->amax.dptr : output->columnwise_amax.dptr);
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-      scale_type, ScaleType,
-      grouped_nvfp4_2d_quantize_transpose<ScaleType>
-      <<<dim3((cols / 128) * (capacity / 32)), 256, 0, stream>>>(
-          static_cast<const bf16*>(input->data.dptr), static_cast<uint8_t*>(output->data.dptr),
-          static_cast<uint8_t*>(output->columnwise_data.dptr),
-          static_cast<ScaleType*>(output->scale_inv.dptr),
-          static_cast<ScaleType*>(output->columnwise_scale_inv.dptr), amax, offsets, rows, count,
-          cols, output->with_gemm_swizzled_scales, noop_ptr););
+  checkCuDriverContext(stream);
+  alignas(64) CUtensorMap input_map{};
+  create_2D_tensor_map(input_map, input->data, capacity, cols, 32, 128, cols, 0, 16);
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_type, ScaleType, {
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(rowwise, ROWWISE, {
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(columnwise, COLUMNWISE, {
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(output->with_gemm_swizzled_scales, SWIZZLED, {
+          grouped_nvfp4_2d_quantize_transpose<ScaleType, ROWWISE, COLUMNWISE, SWIZZLED>
+              <<<dim3((cols / 128) * (capacity / 128)), 128, 0, stream>>>(
+                  input_map, static_cast<uint8_t*>(output->data.dptr),
+                  static_cast<uint8_t*>(output->columnwise_data.dptr),
+                  static_cast<ScaleType*>(output->scale_inv.dptr),
+                  static_cast<ScaleType*>(output->columnwise_scale_inv.dptr), amax, offsets, rows,
+                  count, cols, noop_ptr);
+        });
+      });
+    });
+  });
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("Grouped NVFP4 2D requires FP4 support in the CUDA toolkit.");
