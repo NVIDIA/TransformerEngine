@@ -1072,6 +1072,209 @@ class TestQuantizedTensor:
             x.grad is not None and x.grad.norm().item() > 0
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
+    @staticmethod
+    def _make_empty_quantized(
+        kind: str,
+        direction: str,
+        value: int,
+        *,
+        shape: Tuple[int, int] = (128, 128),
+        requires_grad: bool = True,
+    ) -> QuantizedTensor:
+        device = torch.device("cuda", torch.cuda.current_device())
+        usage = {"rowwise": direction != "column", "columnwise": direction != "row"}
+        if kind == "float8":
+            quantizer = Float8Quantizer(
+                torch.ones(1, device=device),
+                torch.zeros(1, device=device),
+                te.DType.kFloat8E4M3,
+                **usage,
+            )
+        elif kind == "mxfp8":
+            quantizer = MXFP8Quantizer(te.DType.kFloat8E4M3, **usage)
+        elif kind == "nvfp4":
+            quantizer = NVFP4Quantizer(with_random_sign_mask=False, **usage)
+        elif kind == "nvfp4_row_scaled":
+            quantizer = NVFP4Quantizer(row_scaled_nvfp4=True, with_random_sign_mask=False, **usage)
+        elif kind == "blockwise":
+            quantizer = Float8BlockQuantizer(te.DType.kFloat8E4M3, **usage)
+        else:
+            raise ValueError(f"Unknown quantized kind: {kind}")
+        tensor = quantizer.make_empty(
+            shape, dtype=torch.float32, device=device, requires_grad=requires_grad
+        )
+        with torch.no_grad():
+            for buf in TestQuantizedTensor._owned_buffers(tensor).values():
+                buf.fill_(value)
+        return tensor
+
+    @staticmethod
+    def _owned_storages(tensor: QuantizedTensor) -> Dict[str, QuantizedTensor]:
+        if isinstance(tensor, te.HybridQuantizedTensor):
+            return {
+                "row": tensor.rowwise_sub_storage,
+                "column": tensor.columnwise_sub_storage,
+            }
+        return {"direct": tensor}
+
+    @staticmethod
+    def _owned_buffers(tensor: QuantizedTensor) -> Dict[str, torch.Tensor]:
+        return {
+            f"{direction}.{name}": value
+            for direction, storage in TestQuantizedTensor._owned_storages(tensor).items()
+            for name, value in storage.get_metadata().items()
+            if isinstance(value, torch.Tensor)
+        }
+
+    @staticmethod
+    def _assert_clone_isolation(factory, use_torch_clone: bool) -> None:
+        original = factory(1)
+        before = {
+            name: buf.clone() for name, buf in TestQuantizedTensor._owned_buffers(original).items()
+        }
+        copied = torch.clone(original) if use_torch_clone else original.clone()
+
+        assert type(copied) is type(original)
+        assert {
+            name: type(storage)
+            for name, storage in TestQuantizedTensor._owned_storages(copied).items()
+        } == {
+            name: type(storage)
+            for name, storage in TestQuantizedTensor._owned_storages(original).items()
+        }
+
+        copied_buffers = TestQuantizedTensor._owned_buffers(copied)
+        assert copied_buffers.keys() == before.keys()
+        for name, buf in copied_buffers.items():
+            assert torch.equal(buf, before[name]), f"clone changed buffer {name}"
+            assert (
+                buf.data_ptr() != TestQuantizedTensor._owned_buffers(original)[name].data_ptr()
+            ), f"clone shares buffer {name}"
+
+        grad = torch.full(original.shape, 3.0, device=original.device)
+        copied.backward(grad)
+        assert original.grad is not None and torch.equal(original.grad, grad)
+
+        replacement = factory(2)
+        with torch.no_grad():
+            copied.copy_(replacement)
+
+        copied_buffers = TestQuantizedTensor._owned_buffers(copied)
+        replacement_buffers = TestQuantizedTensor._owned_buffers(replacement)
+        for name, orig_buf in TestQuantizedTensor._owned_buffers(original).items():
+            assert torch.equal(orig_buf, before[name]), f"copy_ mutated original buffer {name}"
+            assert (
+                orig_buf.data_ptr() != copied_buffers[name].data_ptr()
+            ), f"clone shares buffer {name}"
+            assert torch.equal(
+                copied_buffers[name], replacement_buffers[name]
+            ), f"copy_ did not update clone buffer {name}"
+
+        detached_buffers = TestQuantizedTensor._owned_buffers(original.detach())
+        for name, orig_buf in TestQuantizedTensor._owned_buffers(original).items():
+            assert detached_buffers[name].data_ptr() == orig_buf.data_ptr()
+
+    @pytest.mark.parametrize(
+        "kind,direction",
+        [
+            (kind, direction)
+            for kind in ("float8", "mxfp8", "nvfp4", "blockwise")
+            for direction in ("row", "column", "both")
+        ]
+        + [("nvfp4_row_scaled", "row")],
+    )
+    @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
+    def test_clone_isolates_buffers(self, kind: str, direction: str, use_torch_clone: bool) -> None:
+        """Cloning copies all storage buffers independently while preserving autograd."""
+        self._assert_clone_isolation(
+            lambda value: self._make_empty_quantized(kind, direction, value),
+            use_torch_clone,
+        )
+
+    @pytest.mark.parametrize("kind", ("float8", "mxfp8", "nvfp4", "blockwise"))
+    @pytest.mark.parametrize("direction", ("row", "column"))
+    @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
+    def test_clone_hybrid_isolates_buffers(
+        self, kind: str, direction: str, use_torch_clone: bool
+    ) -> None:
+        """Cloning a HybridQuantizedTensor isolates sub-storage buffers in both directions."""
+        device = torch.device("cuda", torch.cuda.current_device())
+
+        def make_hybrid(value: int) -> te.HybridQuantizedTensor:
+            row = self._make_empty_quantized(
+                kind if direction == "row" else "float8",
+                "row",
+                value,
+                requires_grad=False,
+            )
+            col = self._make_empty_quantized(
+                kind if direction == "column" else "float8",
+                "column",
+                value,
+                requires_grad=False,
+            )
+            return te.HybridQuantizedTensor(
+                shape=(128, 128),
+                dtype=torch.float32,
+                device=device,
+                rowwise_storage=row,
+                columnwise_storage=col,
+                quantizer=te.HybridQuantizer(
+                    rowwise_quantizer=row._quantizer,
+                    columnwise_quantizer=col._quantizer,
+                ),
+                requires_grad=True,
+            )
+
+        self._assert_clone_isolation(make_hybrid, use_torch_clone)
+
+    @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
+    def test_clone_float8_preserves_stale_transpose_cache(self, use_torch_clone: bool) -> None:
+        """Cloning a Float8Tensor does not revalidate a stale transpose cache."""
+        device = torch.device("cuda", torch.cuda.current_device())
+        tensor = Float8Tensor(
+            shape=(128, 128),
+            dtype=torch.float32,
+            data=torch.ones((128, 128), dtype=torch.uint8, device=device),
+            fp8_scale_inv=torch.ones(1, dtype=torch.float32, device=device),
+            fp8_dtype=te.DType.kFloat8E4M3,
+            data_transpose=torch.full((128, 128), 2, dtype=torch.uint8, device=device),
+            device=device,
+        )
+        tensor._reset_caches()
+        assert tensor._transpose is not None and tensor._transpose_invalid
+
+        copied = torch.clone(tensor) if use_torch_clone else tensor.clone()
+        assert copied._transpose is not None
+        assert copied._transpose_invalid
+        assert copied._transpose.data_ptr() != tensor._transpose.data_ptr()
+        assert copied._scale_inv.data_ptr() != tensor._scale_inv.data_ptr()
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
+    @pytest.mark.parametrize("mutation", ["copy_", "quantize_"])
+    def test_clone_current_scaling_values(self, use_torch_clone: bool, mutation: str) -> None:
+        """Mutating a cloned current-scaling FP8 tensor leaves original decoded values intact."""
+        device = torch.device("cuda", torch.cuda.current_device())
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3, device=device, rowwise=True, columnwise=True
+        )
+        ones = torch.ones((128, 128), device=device)
+        twos = torch.full((128, 128), 2.0, device=device)
+        original = quantizer(ones)
+        before = {name: buf.clone() for name, buf in self._owned_buffers(original).items()}
+
+        copied = torch.clone(original) if use_torch_clone else original.clone()
+        if mutation == "copy_":
+            copied.copy_(quantizer(twos))
+        else:
+            copied.quantize_(twos)
+
+        assert torch.equal(original.dequantize(), ones)
+        assert torch.equal(copied.dequantize(), twos)
+        for name, orig_buf in self._owned_buffers(original).items():
+            assert torch.equal(orig_buf, before[name])
+
 
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
 class TestNVFP4Tensor:
