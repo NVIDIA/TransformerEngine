@@ -67,6 +67,8 @@ struct GroupedGemmV2Config {
   int64_t lhs_right_size;
   int64_t rhs_left_size;
   int64_t rhs_right_size;
+  bool rhs_interleaved;
+  bool out_interleaved;
 };
 
 struct GroupedGemmConfig {
@@ -276,7 +278,9 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     ::xla::ffi::StructMember<int64_t>("lhs_left_size"),
     ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
     ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
-    ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
+    ::xla::ffi::StructMember<int64_t>("rhs_right_size"),
+    ::xla::ffi::StructMember<bool>("rhs_interleaved"),
+    ::xla::ffi::StructMember<bool>("out_interleaved"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::GroupedGemmConfig, ::xla::ffi::StructMember<bool>("lhs_is_trans"),

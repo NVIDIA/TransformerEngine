@@ -7,7 +7,7 @@ import math
 import operator
 import os
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial, reduce, cache
 from typing import Tuple, Sequence, Union, Optional
 from enum import Enum
@@ -1556,7 +1556,7 @@ class GroupedGemmPrimitive(BasePrimitive):
     #        out_first_dims, out_last_dims, alpha, beta
     name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
+    impl_static_args = (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)
     inner_primitive = None
     outer_primitive = None
 
@@ -1588,6 +1588,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         lhs_right_size,
         rhs_left_size,
         rhs_right_size,
+        rhs_interleaved,
+        out_interleaved,
     ):
         """
         Grouped GEMM operation.
@@ -1616,6 +1618,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             lhs_right_size: Product of lhs dims after axis_boundary
             rhs_left_size: Product of rhs dims before axis_boundary
             rhs_right_size: Product of rhs dims after axis_boundary
+            rhs_interleaved: Whether rhs groups are interleaved, i.e. rhs is stored as
+                (first, G, last) instead of (G, first, last). V2 FFI only.
+            out_interleaved: Whether the output groups are interleaved. V2 FFI only.
 
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
@@ -1624,6 +1629,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         del lhs_is_trans, rhs_is_trans
         del lhs_axis_boundary, rhs_axis_boundary
         del lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size
+        del rhs_interleaved, out_interleaved
         del bias_aval
         del has_bias, use_async_d2h_group_sizes
 
@@ -1763,6 +1769,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         lhs_right_size,
         rhs_left_size,
         rhs_right_size,
+        rhs_interleaved,
+        out_interleaved,
     ):
         del out_dtype, out_shape  # Python-only; not forwarded to C++
         if use_v2_ffi:
@@ -1779,7 +1787,12 @@ class GroupedGemmPrimitive(BasePrimitive):
                 lhs_right_size=lhs_right_size,
                 rhs_left_size=rhs_left_size,
                 rhs_right_size=rhs_right_size,
+                rhs_interleaved=rhs_interleaved,
+                out_interleaved=out_interleaved,
             )
+        assert not (
+            rhs_interleaved or out_interleaved
+        ), "Interleaved grouped GEMM operands require the V2 grouped GEMM FFI."
         ffi_name = GroupedGemmPrimitive.name
         return jax.ffi.ffi_lowering(ffi_name)(
             ctx,
@@ -1826,6 +1839,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         lhs_right_size,
         rhs_left_size,
         rhs_right_size,
+        rhs_interleaved,
+        out_interleaved,
     ):
         if GroupedGemmPrimitive.inner_primitive is None:
             raise RuntimeError("GroupedGemmPrimitive.inner_primitive has not been registered")
@@ -1860,6 +1875,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             lhs_right_size=lhs_right_size,
             rhs_left_size=rhs_left_size,
             rhs_right_size=rhs_right_size,
+            rhs_interleaved=rhs_interleaved,
+            out_interleaved=out_interleaved,
         )
         return (out,)
 
@@ -2521,6 +2538,8 @@ def grouped_gemm(
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
     use_async_d2h_group_sizes: bool = False,
+    rhs_interleaved: bool = False,
+    out_interleaved: bool = False,
 ) -> jnp.ndarray:
     """
     Grouped GEMM operation.
@@ -2534,6 +2553,15 @@ def grouped_gemm(
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
         quantizer_set: Set of quantizers for FP8 quantization of the input and output
+        rhs_interleaved: If True, rhs is a non-ragged 3D tensor stored with its groups
+            interleaved: shape (A, G, B) holding group g at [:, g], instead of (G, A, B).
+            contracting_dims refer to the (G, A, B) order. This lets a weight that was
+            gathered along its middle dimension be used without a transpose.
+        out_interleaved: If True, a non-ragged 3D output (e.g. a weight gradient of shape
+            (G, A, B)) is written interleaved and returned with shape (A, G, B).
+
+    Interleaved operands are only supported for unquantized inputs with the V2 grouped GEMM
+    (today: BF16 on SM90+).
 
     Returns:
         A jnp.ndarray containing the result of the grouped GEMM operation
@@ -2543,6 +2571,22 @@ def grouped_gemm(
     del precision
 
     empty_gs = jnp.empty((0,), jnp.int32)
+
+    if rhs_interleaved or out_interleaved:
+        if not (
+            isinstance(lhs, GroupedNoScaleTensor)
+            and isinstance(rhs, GroupedNoScaleTensor)
+            and quantizer_set == noop_quantizer_set
+        ):
+            raise ValueError("Interleaved grouped GEMM operands require unquantized inputs.")
+    if rhs_interleaved:
+        if rhs.first_dims is not None or rhs.last_dims is not None:
+            raise ValueError("rhs_interleaved requires a non-ragged rhs.")
+        if len(rhs.original_shape) != 3:
+            raise ValueError("rhs_interleaved requires a 3D (A, G, B) rhs.")
+        # The shape logic below works on the (G, ...) order; the data keeps its layout.
+        shape = rhs.original_shape
+        rhs = replace(rhs, original_shape=(shape[1], shape[0], *shape[2:]))
 
     out_dtype, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
     rhs_out_dtype, rhs_scaling_mode = _get_out_dtype_and_scaling_mode(rhs)
@@ -2594,6 +2638,10 @@ def grouped_gemm(
             "grouped_gemm requires at least one non-empty dimension array. "
             "Ensure lhs or rhs tensor objects carry first_dims or last_dims."
         )
+    if rhs_interleaved and rhs.data.shape[1] != num_gemms:
+        raise ValueError(
+            f"rhs_interleaved expects {num_gemms} groups on rhs axis 1, got shape {rhs.data.shape}."
+        )
 
     # Pre-compute collapsed 2D sizes from original N-D shapes.
     # These are static Python ints passed as primitive parameters (must be hashable).
@@ -2622,6 +2670,12 @@ def grouped_gemm(
         out_shape = (num_gemms, *lhs_non_contracting, *rhs_non_contracting)
     else:
         out_shape = (*lhs_non_contracting, *rhs_non_contracting)
+    if out_interleaved:
+        if out_first_dims is not None or out_last_dims is not None:
+            raise ValueError("out_interleaved requires a non-ragged output.")
+        if len(out_shape) != 3:
+            raise ValueError("out_interleaved requires a 3D (G, A, B) output.")
+        out_shape = (out_shape[1], out_shape[0], *out_shape[2:])
 
     has_bias = bias is not None
     if has_bias:
@@ -2639,7 +2693,7 @@ def grouped_gemm(
             " and padded with zeros to not affect the result of the MoE block."
         )
 
-    use_v2_ffi, _ = is_v2_grouped_gemm_supported(
+    use_v2_ffi, v2_unsupported_reason = is_v2_grouped_gemm_supported(
         scaling_mode,
         lhs.data.dtype,
         has_bias,
@@ -2648,6 +2702,11 @@ def grouped_gemm(
         lhs_axis_boundary=lhs_axis_boundary,
         rhs_axis_boundary=rhs_axis_boundary,
     )
+    if (rhs_interleaved or out_interleaved) and not use_v2_ffi:
+        raise ValueError(
+            "Interleaved grouped GEMM operands require the V2 grouped GEMM: "
+            + v2_unsupported_reason
+        )
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         # Both V1 and V2 quantize produce pre-swizzled scales (V1 via
@@ -2694,5 +2753,7 @@ def grouped_gemm(
         lhs_right_size=int(lhs_right_size),
         rhs_left_size=int(rhs_left_size),
         rhs_right_size=int(rhs_right_size),
+        rhs_interleaved=rhs_interleaved,
+        out_interleaved=out_interleaved,
     )
     return out

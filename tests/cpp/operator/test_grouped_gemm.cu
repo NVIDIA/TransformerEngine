@@ -119,8 +119,13 @@ Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shap
   return fp8;
 }
 
-Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& shape) {
+Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& shape,
+                         bool random = false) {
   Tensor t(name, shape, DType::kBFloat16);
+  if (random) {
+    fillUniform(&t);
+    return t;
+  }
   const size_t numel = shape[0] * shape[1];
   std::vector<__nv_bfloat16> ones(numel, __float2bfloat16(1.0f));
   NVTE_CHECK_CUDA(cudaMemcpy(t.rowwise_dptr(), ones.data(),
@@ -294,7 +299,10 @@ struct GroupedGemmRefSetup {
   bool use_split_accum = false;
 };
 
-inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
+// random_bf16: fill BF16 operands with random values instead of ones, so that a misplaced
+// row, column or group changes the result.
+inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params,
+                                                 bool random_bf16 = false) {
   GroupedGemmRefSetup s;
   s.shapes = make_shapes(params.shape_case);
   s.num_gemms = s.shapes.size();
@@ -309,8 +317,8 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
     const std::vector<size_t> b_shape =
         params.transb ? std::vector<size_t>{K, M} : std::vector<size_t>{M, K};
     if (params.recipe == InputRecipe::kBF16) {
-      s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
-      s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
+      s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape, random_bf16));
+      s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape, random_bf16));
     } else {
       const bool a_use_rowwise = params.transa;
       const bool b_use_rowwise = !params.transb;
@@ -937,6 +945,169 @@ void run_grouped_gemm_discrete_in_graph_case(const TestParams& params) {
       });
 
   NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+// Rewrite a uniform-shape grouped tensor's rowwise data between the default
+// (num_groups, first, last) layout and the interleaved (first, num_groups, last) layout.
+void relayout_groups(GroupedBuffers& grouped, bool to_interleaved) {
+  const size_t groups = grouped.num_tensors;
+  const size_t first = grouped.logical_shape.data[0] / groups;
+  const size_t row_bytes = grouped.logical_shape.data[1] * grouped.elem_size;
+  const size_t total_bytes = groups * first * row_bytes;
+  auto tmp = cuda_alloc(total_bytes);
+  auto* src = static_cast<char*>(grouped.get_data());
+  auto* dst = static_cast<char*>(tmp.get());
+  for (size_t g = 0; g < groups; ++g) {
+    char* contiguous = (to_interleaved ? src : dst) + g * first * row_bytes;
+    char* interleaved = (to_interleaved ? dst : src) + g * row_bytes;
+    if (to_interleaved) {
+      NVTE_CHECK_CUDA(cudaMemcpy2D(interleaved, groups * row_bytes, contiguous, row_bytes,
+                                   row_bytes, first, cudaMemcpyDeviceToDevice));
+    } else {
+      NVTE_CHECK_CUDA(cudaMemcpy2D(contiguous, row_bytes, interleaved, groups * row_bytes,
+                                   row_bytes, first, cudaMemcpyDeviceToDevice));
+    }
+  }
+  NVTE_CHECK_CUDA(cudaMemcpy(src, dst, total_bytes, cudaMemcpyDeviceToDevice));
+}
+
+struct InterleavedParams {
+  bool transa;
+  bool transb;
+  bool a_interleaved;
+  bool b_interleaved;
+  bool d_interleaved;
+};
+
+TestParams interleaved_base_params(const InterleavedParams& params) {
+  return {InputRecipe::kBF16, params.transa, params.transb, ShapeCase::kAllSameMul128,
+          /*use_null_c=*/true};
+}
+
+void run_grouped_gemm_interleaved_case(const InterleavedParams& params) {
+  const TestParams base = interleaved_base_params(params);
+  if (auto reason = grouped_gemm_skip_reason(base); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+  auto ref = make_grouped_gemm_ref(base, /*random_bf16=*/true);
+  const size_t num_gemms = ref.num_gemms;
+
+  std::vector<Tensor*> A_views, B_views, D_views;
+  std::vector<Tensor> D_group_tensors;
+  D_group_tensors.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    const auto [M, N, K] = ref.shapes[i];
+    (void)K;
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
+    D_group_tensors.emplace_back(Tensor("D_group" + std::to_string(i),
+                                        std::vector<size_t>{M, N}, base.output_dtype));
+    D_views.push_back(&D_group_tensors.back());
+  }
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
+  if (params.a_interleaved) relayout_groups(grouped_A, /*to_interleaved=*/true);
+  if (params.b_interleaved) relayout_groups(grouped_B, /*to_interleaved=*/true);
+
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
+  Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
+
+  GroupedMatmulConfigWrapper grouped_config;
+  grouped_config.set_a_interleaved(params.a_interleaved);
+  grouped_config.set_b_interleaved(params.b_interleaved);
+  grouped_config.set_d_interleaved(params.d_interleaved);
+
+  nvte_grouped_gemm(grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
+                    nullptr, grouped_D.get_handle(), ab.alpha.data(), ab.beta.data(),
+                    setup_ws.data(), cublas_ws.data(), grouped_config, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  if (params.d_interleaved) relayout_groups(grouped_D, /*to_interleaved=*/false);
+  compare_grouped_d_to_multi(grouped_D, ref.shapes, ref.D_multi, "interleaved_vs_multi");
+}
+
+class GroupedGemmInterleavedTest : public ::testing::TestWithParam<InterleavedParams> {};
+
+TEST_P(GroupedGemmInterleavedTest, CompareWithMultiTensorGemm) {
+  run_grouped_gemm_interleaved_case(GetParam());
+}
+
+std::string MakeGroupedGemmInterleavedTestName(
+    const testing::TestParamInfo<GroupedGemmInterleavedTest::ParamType>& info) {
+  const auto& p = info.param;
+  return std::string("ta") + (p.transa ? "T" : "N") + "tb" + (p.transb ? "T" : "N") +
+         (p.a_interleaved ? "_A" : "") + (p.b_interleaved ? "_B" : "") +
+         (p.d_interleaved ? "_D" : "");
+}
+
+// InterleavedParams: {transa, transb, a_interleaved, b_interleaved, d_interleaved}
+INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedGemmInterleavedTest,
+                         ::testing::ValuesIn(std::vector<InterleavedParams>{
+                             {false, false, true, false, false},
+                             {true, false, true, false, false},
+                             {false, false, false, true, false},
+                             {false, true, false, true, false},
+                             {false, false, false, false, true},
+                             {true, true, true, true, true},
+                         }),
+                         MakeGroupedGemmInterleavedTestName);
+
+// Interleaved operands are addressed by group stride alone, so inputs that would make
+// that addressing wrong must be rejected rather than silently ignored.
+TEST(GroupedGemmInterleavedRejectTest, UnsupportedOperands) {
+  const InterleavedParams params{false, false, true, false, true};
+  const TestParams base = interleaved_base_params(params);
+  if (auto reason = grouped_gemm_skip_reason(base); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+  auto ref = make_grouped_gemm_ref(base);
+  const size_t num_gemms = ref.num_gemms;
+  std::vector<Tensor*> A_views, B_views, D_views;
+  std::vector<Tensor> D_group_tensors;
+  D_group_tensors.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    const auto [M, N, K] = ref.shapes[i];
+    (void)K;
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
+    D_group_tensors.emplace_back(Tensor("D_group" + std::to_string(i),
+                                        std::vector<size_t>{M, N}, base.output_dtype));
+    D_views.push_back(&D_group_tensors.back());
+  }
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedBuffers grouped_C = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
+
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
+  Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
+  auto run = [&](bool a_interleaved, bool d_interleaved, NVTEGroupedTensor C) {
+    GroupedMatmulConfigWrapper grouped_config;
+    grouped_config.set_a_interleaved(a_interleaved);
+    grouped_config.set_d_interleaved(d_interleaved);
+    nvte_grouped_gemm(grouped_A.get_handle(), params.transa, grouped_B.get_handle(),
+                      params.transb, C, grouped_D.get_handle(), ab.alpha.data(), ab.beta.data(),
+                      setup_ws.data(), cublas_ws.data(), grouped_config, 0);
+  };
+
+  // A separate C would be read with D's interleaved layout.
+  EXPECT_THROW(run(false, true, grouped_C.get_handle()), std::runtime_error);
+
+  // Explicit tensor offsets cannot be combined with interleaved groups.
+  const size_t num_offsets = num_gemms + 1;
+  auto offsets_dev = cuda_alloc<int64_t>(num_offsets * sizeof(int64_t));
+  NVTE_CHECK_CUDA(cudaMemcpy(offsets_dev.get(), grouped_A.offsets_host.data(),
+                             num_offsets * sizeof(int64_t), cudaMemcpyHostToDevice));
+  NVTEShape offsets_shape = nvte_make_shape(&num_offsets, 1);
+  NVTEBasicTensor offsets{offsets_dev.get(), kNVTEInt64, offsets_shape};
+  nvte_set_grouped_tensor_param(grouped_A.get_handle(), kNVTEGroupedTensorOffsets, &offsets,
+                                sizeof(offsets));
+  EXPECT_THROW(run(true, false, nullptr), std::runtime_error);
 }
 
 class GroupedGemmTest : public ::testing::TestWithParam<TestParams> {};

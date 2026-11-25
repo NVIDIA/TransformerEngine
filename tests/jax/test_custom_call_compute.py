@@ -1969,6 +1969,45 @@ class TestGroupedDense:
         # comparable and the cotangent dtype on `out` is unambiguous.
         return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size)
 
+    def test_grouped_dense_grad_interleaved_kernel(self, input_shape):
+        """A (K, G, N) kernel with kernel_group_axis=1 matches a per-group jnp reference."""
+        dtype = jnp.bfloat16
+        is_supported, reason = tex.is_v2_grouped_gemm_supported(
+            ScalingMode.NO_SCALING, dtype, has_bias=False
+        )
+        if not is_supported:
+            pytest.skip(reason)
+        x, kernel, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            dtype, input_shape
+        )
+
+        # A random cotangent, so that misplaced rows or columns in dgrad/wgrad change the result.
+        cotangent = jax.random.uniform(
+            jax.random.PRNGKey(1), (x.shape[0], kernel.shape[2]), jnp.float32
+        )
+
+        def ref_loss(x, kernel):
+            out_list = self._ref_grouped_dense(x, kernel, None, group_sizes, contracting_dims)
+            out = jnp.concatenate(out_list, axis=0)
+            return jnp.sum(out.astype(jnp.float32) * cotangent) / jnp.sqrt(x.size)
+
+        def interleaved_loss(x, interleaved_kernel):
+            out = grouped_dense(
+                x, interleaved_kernel, group_sizes, contracting_dims, kernel_group_axis=1
+            )
+            return jnp.sum(out.astype(jnp.float32) * cotangent) / jnp.sqrt(x.size)
+
+        # Not jitted: the reference splits by the concrete group sizes.
+        ref_out, (ref_dgrad, ref_wgrad) = value_and_grad(ref_loss, (0, 1))(x, kernel)
+        out, (dgrad, wgrad) = jit(value_and_grad(interleaved_loss, (0, 1)))(
+            x, jnp.transpose(kernel, (1, 0, 2))
+        )
+
+        assert wgrad.shape == (kernel.shape[1], kernel.shape[0], kernel.shape[2])
+        assert_allclose(out, ref_out, dtype=dtype)
+        assert_allclose(dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(wgrad, jnp.transpose(ref_wgrad, (1, 0, 2)), dtype=dtype)
+
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(

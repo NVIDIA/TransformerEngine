@@ -94,6 +94,26 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigSMCount = 3,
   /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
   kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
+  /*! Whether A is stored with its groups interleaved. Default: false.
+   *
+   *  By default the groups of a grouped tensor are stored one after another:
+   *  group g with logical shape (first, last) starts at element g * first * last.
+   *  When interleaved, the tensor is stored as (first, num_groups, last) in row-major
+   *  order instead: group g starts at element g * last, and consecutive rows of a group
+   *  are num_groups * last elements apart. This is, for example, the layout produced by
+   *  gathering a (num_groups, first, last) tensor that is sharded along its middle
+   *  dimension, so the grouped GEMM can consume it without a transpose.
+   *
+   *  Requires uniform per-group shapes, no explicit tensor offsets, and unscaled
+   *  (non-FP8/FP4) data.
+   */
+  kNVTEGroupedMatmulConfigAInterleaved = 5,
+  /*! Whether B is stored with its groups interleaved. See kNVTEGroupedMatmulConfigAInterleaved. */
+  kNVTEGroupedMatmulConfigBInterleaved = 6,
+  /*! Whether D (and C) is stored with its groups interleaved.
+   *  See kNVTEGroupedMatmulConfigAInterleaved. C must be null or the same tensor as D.
+   */
+  kNVTEGroupedMatmulConfigDInterleaved = 7,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -733,7 +753,27 @@ class GroupedMatmulConfigWrapper {
                                              &val, sizeof(val));
   }
 
+  /*! \brief Set whether A is stored with its groups interleaved. */
+  void set_a_interleaved(bool a_interleaved) {
+    set_bool(kNVTEGroupedMatmulConfigAInterleaved, a_interleaved);
+  }
+
+  /*! \brief Set whether B is stored with its groups interleaved. */
+  void set_b_interleaved(bool b_interleaved) {
+    set_bool(kNVTEGroupedMatmulConfigBInterleaved, b_interleaved);
+  }
+
+  /*! \brief Set whether D (and C) is stored with its groups interleaved. */
+  void set_d_interleaved(bool d_interleaved) {
+    set_bool(kNVTEGroupedMatmulConfigDInterleaved, d_interleaved);
+  }
+
  private:
+  void set_bool(NVTEGroupedMatmulConfigAttribute attr, bool value) {
+    const auto val = static_cast<uint8_t>(value);
+    nvte_set_grouped_matmul_config_attribute(config_, attr, &val, sizeof(val));
+  }
+
   /*! \brief Wrapped NVTEGroupedMatmulConfig. */
   NVTEGroupedMatmulConfig config_ = nullptr;
 };
