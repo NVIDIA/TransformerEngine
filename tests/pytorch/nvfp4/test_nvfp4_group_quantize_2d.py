@@ -157,6 +157,17 @@ def test_grouped_2d_constant_blocks(value):
     _check(x, [128, 256], result, (True, True), False)
 
 
+@pytest.mark.parametrize("swizzled", [False, True])
+@pytest.mark.parametrize("cols", [2048, 4096])
+def test_grouped_2d_random_uneven_experts(cols, swizzled):
+    torch.manual_seed(57)
+    splits = (torch.randint(0, 17, (16,)) * 128).tolist()
+    x = torch.randn(sum(splits), cols, device="cuda", dtype=torch.bfloat16)
+    metadata = torch.tensor(splits, device="cuda", dtype=torch.int64)
+    result = tex.group_quantize(x, _quantizer((True, True), swizzled), 16, metadata)
+    _check(x, splits, result, (True, True), swizzled)
+
+
 @pytest.mark.parametrize("shape", [(128, 64), (128, 192), (64, 128)])
 def test_grouped_2d_rejects_unaligned_shape(shape):
     x = torch.zeros(shape, device="cuda", dtype=torch.bfloat16)
