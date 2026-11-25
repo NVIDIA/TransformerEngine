@@ -143,6 +143,13 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>, ptx::ArchSpecific<107>)
 
+#define ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE                           \
+  [&] {                                                            \
+    __NVTE_CURRENT_ARCH__                                          \
+    __NVTE_ARCH_FAMILY_SPECIFIC__                                  \
+    return current_arch == 1070 && FamilySpecific == current_arch; \
+  }();
+
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -1938,6 +1945,57 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-overriding-tensor-property-value
+// global -> shared::cluster, with tensor base address, dimensions, and stride overridden.
+__device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared_rubin(
+    uint64_t *dst_shmem, const uint64_t *tensor_map_ptr, const uint64_t gaddr_to_override,
+    const uint16_t tensor_size_x, const uint16_t tensor_size_y, const uint32_t tensor_lower_stride,
+    const uint16_t tensor_upper_stride, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ == 1070)
+  constexpr bool has_tma_descriptor_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
+  if constexpr (has_tma_descriptor_override) {
+    uint32_t dst_shmem_ptr = __cvta_generic_to_shared(dst_shmem);
+    uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile"
+        ".mbarrier::complete_tx::bytes"
+        ".override::global_address.override::global_dim_stride "
+        "[%0], [%1, %2, {%3, %4}, {%5}, %6, {0, 0}], [%7];" ::"r"(dst_shmem_ptr),
+        "l"(tensor_map_ptr), "l"(gaddr_to_override), "h"(tensor_size_x), "h"(tensor_size_y),
+        "r"(tensor_lower_stride), "h"(tensor_upper_stride), "r"(mbar_ptr)
+        : "memory");
+    return;
+  }
+#endif  // __CUDA_ARCH__ == 1070
+  NVTE_DEVICE_ERROR(
+      "cp_async_bulk_tensor_2d_global_to_shared_rubin is only supported on SM 10.7f+.");
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-overriding-tensor-property-value
+// shared::cta -> global, with tensor base address, dimensions, and stride overridden.
+__device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global_rubin(
+    const uint64_t *tensor_map_ptr, const uint64_t gaddr_to_override, const uint16_t tensor_size_x,
+    const uint16_t tensor_size_y, const uint32_t tensor_lower_stride,
+    const uint16_t tensor_upper_stride, uint64_t *src_shmem) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ == 1070)
+  constexpr bool has_tma_descriptor_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
+  if constexpr (has_tma_descriptor_override) {
+    uint32_t src_shmem_ptr = __cvta_generic_to_shared(src_shmem);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.tile"
+        ".override::global_address.override::global_dim_stride "
+        "[%0, %1, {%2, %3}, {%4}, %5, {0, 0}], [%6];" ::"l"(tensor_map_ptr),
+        "l"(gaddr_to_override), "h"(tensor_size_x), "h"(tensor_size_y), "r"(tensor_lower_stride),
+        "h"(tensor_upper_stride), "r"(src_shmem_ptr)
+        : "memory");
+    return;
+  }
+#endif  // __CUDA_ARCH__ == 1070
+  NVTE_DEVICE_ERROR(
+      "cp_async_bulk_tensor_2d_shared_to_global_rubin is only supported on SM 10.7f+.");
+}
+
 }  // namespace ptx
 
 namespace {

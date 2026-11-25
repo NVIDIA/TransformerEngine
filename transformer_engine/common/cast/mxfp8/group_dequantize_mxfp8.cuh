@@ -122,6 +122,7 @@ template <typename IType, typename OType, bool ROWWISE>
 __global__ void __launch_bounds__(128)
     group_dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input_static,
                                   const __grid_constant__ CUtensorMap tensor_map_output_static,
+                                  const IType *const input_data, OType *const output_data,
                                   const ShapeRepresentation shape_rep, const size_t num_tensors,
                                   const size_t first_logical_dim, const size_t last_logical_dim,
                                   const int64_t *const __restrict__ offsets_ptr,
@@ -153,6 +154,8 @@ __global__ void __launch_bounds__(128)
   constexpr size_t SCALES_COLWISE_PER_CHUNK_X = CHUNK_DIM_X;
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE = DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);
+
+  constexpr bool has_tma_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
 
   // Group-awareness: determine which tensor this block belongs to
   const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
@@ -210,15 +213,22 @@ __global__ void __launch_bounds__(128)
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
 
   // Select TMA descriptors (static for single tensor, per-tensor for multi-tensor)
-  const CUtensorMap &tensor_map_input =
-      is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
-  const CUtensorMap &tensor_map_output =
-      is_single_tensor ? tensor_map_output_static : g_tensor_maps_output[tensor_id];
+  const CUtensorMap &tensor_map_input = (is_single_tensor || has_tma_override)
+                                            ? tensor_map_input_static
+                                            : g_tensor_maps_input[tensor_id];
+  const CUtensorMap &tensor_map_output = (is_single_tensor || has_tma_override)
+                                             ? tensor_map_output_static
+                                             : g_tensor_maps_output[tensor_id];
 
-  if (!is_single_tensor) {
+  if (!is_single_tensor && !has_tma_override) {
     fence_acquire_tensormap(&tensor_map_input);
     fence_acquire_tensormap(&tensor_map_output);
   }
+
+  const IType *const override_input =
+      (!is_single_tensor && has_tma_override) ? input_data + tensor_base : nullptr;
+  OType *const override_output =
+      (!is_single_tensor && has_tma_override) ? output_data + tensor_base : nullptr;
 
   const int chunk_offset_Y = block_id_Y * CHUNK_DIM_Y;
   const int chunk_offset_X = block_id_X * CHUNK_DIM_X;
@@ -273,40 +283,40 @@ __global__ void __launch_bounds__(128)
 
   initialize_barriers<ITERATIONS, THREADS_PER_CHUNK>(mbar, is_master_thread);
 
+  // Every thread arrives, while only the leader issues the transfer. For a
+  // fully OOB stage, publish zeroes without registering asynchronous tx bytes.
+  auto prefetch_stage = [&](const int buff, const int x, const int y, const int iter) {
+    if (is_master_thread) {
+      if (override_input != nullptr && (x >= cols || y >= rows)) {
+        IType *const dst = reinterpret_cast<IType *>(&in_sh[buff]);
+        for (size_t i = 0; i < SHMEM_DIM_Y * SHMEM_DIM_X; ++i) {
+          dst[i] = static_cast<IType>(0.0f);
+        }
+        ptx::mbarrier_arrive(&mbar[iter]);
+      } else {
+        common::load_grouped_tma_2d<SHMEM_DIM_Y, SHMEM_DIM_X>(
+            reinterpret_cast<IType *>(&in_sh[buff]), tensor_map_input, x, y, &mbar[iter],
+            override_input, rows, cols);
+        ptx::mbarrier_arrive_expect_tx(&mbar[iter], transaction_size);
+      }
+    } else {
+      ptx::mbarrier_arrive(&mbar[iter]);
+    }
+  };
+
   int parity = 0;
   constexpr int iteration_zero = 0;
   constexpr int buffer_zero = 0;
-  if (is_master_thread) {
-    const int chunk_stage_offset_Y = chunk_offset_Y;
-    const int chunk_stage_offset_X = chunk_offset_X;
-    ptx::cp_async_bulk_tensor_2d_global_to_shared(
-        reinterpret_cast<uint64_t *>(&in_sh[buffer_zero]),
-        reinterpret_cast<const uint64_t *>(&tensor_map_input), chunk_stage_offset_X,
-        chunk_stage_offset_Y, &mbar[iteration_zero]);
-
-    ptx::mbarrier_arrive_expect_tx(&mbar[iteration_zero], transaction_size);
-  } else {
-    ptx::mbarrier_arrive(&mbar[iteration_zero]);
-  }
+  prefetch_stage(buffer_zero, chunk_offset_X, chunk_offset_Y, iteration_zero);
 
 #pragma unroll
   for (int iter = 0; iter < ITERATIONS; ++iter) {
     const int buff = iter % BUFFERS_NUM;
     const int next_iter = iter + 1;
     if (next_iter < ITERATIONS) {
-      if (is_master_thread) {
-        const int next_buff = next_iter % BUFFERS_NUM;
-        const int chunk_it_offset_y = chunk_offset_Y + next_iter * BUFFER_DIM_Y;
-        const int chunk_it_offset_x = chunk_offset_X;
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&in_sh[next_buff]),
-            reinterpret_cast<const uint64_t *>(&tensor_map_input), chunk_it_offset_x,
-            chunk_it_offset_y, &mbar[next_iter]);
-
-        ptx::mbarrier_arrive_expect_tx(&mbar[next_iter], transaction_size);
-      } else {
-        ptx::mbarrier_arrive(&mbar[next_iter]);
-      }
+      const int next_buff = next_iter % BUFFERS_NUM;
+      prefetch_stage(next_buff, chunk_offset_X, chunk_offset_Y + next_iter * BUFFER_DIM_Y,
+                     next_iter);
     }
 
     // Wait for the data to have arrived
@@ -354,9 +364,9 @@ __global__ void __launch_bounds__(128)
     if (is_master_thread) {
       const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
       const int chunk_it_offset_x = chunk_offset_X;
-      ptx::cp_async_bulk_tensor_2d_shared_to_global(
-          reinterpret_cast<const uint64_t *>(&tensor_map_output), chunk_it_offset_x,
-          chunk_it_offset_y, reinterpret_cast<uint64_t *>(&out_sh[buff]));
+      common::store_grouped_tma_2d<SHMEM_DIM_Y, SHMEM_DIM_X>(
+          reinterpret_cast<OType *>(&out_sh[buff]), tensor_map_output, chunk_it_offset_x,
+          chunk_it_offset_y, override_output, rows, cols);
 
       ptx::cp_async_bulk_commit_group();
       ptx::cp_async_bulk_wait_group_read<BUFFERS_NUM - 1>();
@@ -430,9 +440,10 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
     const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
     blocks = blocks_Y * blocks_X;
   } else {
-    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-               "Number of tensors in a group is larger than "
-               "the MAX number of supported descriptors (64).");
+    NVTE_CHECK(
+        common::use_tma_descriptor_override() || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+        "Number of tensors in a group is larger than "
+        "the MAX number of supported descriptors (64).");
     NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
                "Last dimension of a grouped tensor should be divisible by 128.");
     if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
@@ -463,18 +474,18 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_output{};
 
-          create_2D_tensor_map(tensor_map_input, input_data, first_logical_dim, last_logical_dim,
-                               SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
-                               typeToNumBits(input->dtype()));
-          create_2D_tensor_map(tensor_map_output, output->data, first_logical_dim, last_logical_dim,
-                               SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
-                               typeToNumBits(output->dtype()));
+          const bool override_map = !is_single_tensor && common::use_tma_descriptor_override();
+          common::create_grouped_tma_map(tensor_map_input, input_data, override_map,
+                                         first_logical_dim, last_logical_dim, SHMEM_DIM_Y,
+                                         SHMEM_DIM_X, typeToNumBits(input->dtype()));
+          common::create_grouped_tma_map(tensor_map_output, output->data, override_map,
+                                         first_logical_dim, last_logical_dim, SHMEM_DIM_Y,
+                                         SHMEM_DIM_X, typeToNumBits(output->dtype()));
 
-          // Update tensor descriptors before launching the kernel
-          if (!is_single_tensor) {
-            const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
-            OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
-
+          const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
+          OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
+          // Rubin consumes instruction-local overrides from the static descriptors.
+          if (!is_single_tensor && !common::use_tma_descriptor_override()) {
             update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                 tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
@@ -483,12 +494,14 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
           if (use_rowwise_scaling) {
             group_dequantize_mxfp8_kernel<IType, OType, true><<<grid, block, 0, stream>>>(
-                tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
+                tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
+                num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                last_dims_ptr, scales_ptr);
           } else {
             group_dequantize_mxfp8_kernel<IType, OType, false><<<grid, block, 0, stream>>>(
-                tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
+                tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
+                num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                last_dims_ptr, scales_ptr);
           });  // NOLINT(*)
   );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
