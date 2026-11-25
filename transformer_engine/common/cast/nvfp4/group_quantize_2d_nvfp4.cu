@@ -34,12 +34,12 @@ __global__ void grouped_nvfp4_2d_quantize_transpose(const bf16* input, uint8_t* 
                                                     const float* noop) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
   if (noop && *noop == 1.0f) return;
-  const size_t global_row = blockIdx.y * 16;
+  const size_t global_row = (static_cast<size_t>(blockIdx.x) / (cols / 16)) * 16;
   if (global_row * cols >= offsets[count]) return;
   const size_t expert = common::find_tensor_from_offsets(offsets, count, global_row * cols);
   const size_t start = offsets[expert] / cols;
   const size_t local_row = global_row - start;
-  const size_t col = blockIdx.x * 16;
+  const size_t col = (blockIdx.x % (cols / 16)) * 16;
   const size_t m = rows[expert];
   const int lane_row = threadIdx.x / 4;
   const int lane_col = (threadIdx.x % 4) * 4;
@@ -161,7 +161,7 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_type, ScaleType,
       grouped_nvfp4_2d_quantize_transpose<ScaleType>
-      <<<dim3(cols / 16, capacity / 16), 64, 0, stream>>>(
+      <<<dim3((cols / 16) * (capacity / 16)), 64, 0, stream>>>(
           static_cast<const bf16*>(input->data.dptr), static_cast<uint8_t*>(output->data.dptr),
           static_cast<uint8_t*>(output->columnwise_data.dptr),
           static_cast<ScaleType*>(output->scale_inv.dptr),

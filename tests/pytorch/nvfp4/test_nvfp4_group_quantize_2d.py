@@ -139,6 +139,16 @@ def test_grouped_2d_noop_and_uniform_weight_reuse():
     _check(x, [128] * 4, output, (True, True), True)
 
 
+def test_grouped_2d_large_capacity_grid():
+    # A flattened weight/capacity buffer can exceed CUDA's 65535-block grid.y limit.
+    x = torch.full((4194304, 128), 10000, device="cuda", dtype=torch.bfloat16)
+    x[:128].normal_()
+    splits = torch.tensor([128, 0], device="cuda", dtype=torch.int64)
+    q = _quantizer((True, True), False)
+    result = tex.group_quantize(x, q, 2, splits)
+    _check(x, [128, 0], result, (True, True), False)
+
+
 @pytest.mark.parametrize(
     "option",
     [

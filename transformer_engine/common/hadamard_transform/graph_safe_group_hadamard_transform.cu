@@ -242,7 +242,10 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
   float* output_transpose_amax_ptr;
 
   // calculate the global offset to get tensor id
-  size_t global_offset = blockIdx.y * CHUNK_DIM_Y * last_logical_dim;
+  const size_t tiles_x = DIVUP(last_logical_dim, size_t{CHUNK_DIM_X});
+  const size_t tile_x = blockIdx.x % tiles_x;
+  const size_t tile_y = blockIdx.x / tiles_x;
+  size_t global_offset = tile_y * CHUNK_DIM_Y * last_logical_dim;
   // paged stashing: will have input buffer [M, N], where M is larger than sum(first_dims)
   // also need to early return if this CTA is processing a region larger than the last offsets[num_tensors]
   if (global_offset >= offsets_ptr[num_tensors]) {
@@ -261,8 +264,8 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 
   constexpr int kNumWarps = (THREADS_PER_CHUNK * THREADS_PER_Y) / kThreadsPerWarp;
 
-  const int input_block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-  const int input_block_offset_X = blockIdx.x * CHUNK_DIM_X;
+  const int input_block_offset_Y = tile_y * CHUNK_DIM_Y;
+  const int input_block_offset_X = tile_x * CHUNK_DIM_X;
 
   extern __shared__ __align__(128) char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -494,7 +497,7 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   constexpr uint64_t kNumWarps = kThreadBlockX * kThreadBlockY;
 
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
-  dim3 grid(DIVUP(last_logical_dim, kChunkBlockXSmall),
+  dim3 grid(DIVUP(last_logical_dim, kChunkBlockXSmall) *
             DIVUP(first_logical_dim, kChunkBlockYSmall));
 
   ShapeRepresentation shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
