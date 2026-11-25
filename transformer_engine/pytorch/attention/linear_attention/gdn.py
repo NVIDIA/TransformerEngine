@@ -137,6 +137,17 @@ class GatedDeltaNetAttention(LinearAttentionBase):
           ``kv_channels`` is a tuple).
     """
 
+    def get_context_parallel_backend(self):
+        """Return experimental local state operations for chunkwise CP.
+
+        The external orchestrator owns packing, process groups, prefix/suffix
+        composition and autograd. Operations accept packed THD tensors and do
+        not use this module's head count. No process group is created here.
+        """
+        from ._gdn_cp import GDNContextParallelBackend
+
+        return GDNContextParallelBackend()
+
     def __init__(
         self,
         num_attention_heads: int,
