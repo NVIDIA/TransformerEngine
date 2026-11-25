@@ -135,7 +135,8 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
   // Currently, only the CuTeDSL counterpart of quantize_transpose_tuned_1D is supported
   if constexpr (use_2d_quantization) {
     // TODO: implement 2D quantization in CuTeDSL. Until then it falls back to CUDA without a
-    // report, since CI turns every report into an error.
+    // report, since CI turns every report into an error. With the 2D kernel, move
+    // use_2d_quantization into NVFP4QuantConfig (to_id, to_key and the Python entrypoint).
     return false;
   } else {
     // TODO: implement each config below that returns false without a report. Like 2D, these fall
