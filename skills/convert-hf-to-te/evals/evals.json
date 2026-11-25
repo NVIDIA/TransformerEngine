@@ -1,0 +1,69 @@
+{
+  "skill_name": "convert-hf-to-te",
+  "evals": [
+    {
+      "id": "convert-hf-to-te-001",
+      "files": [],
+      "prompt": "Plan a BF16 training port of language-model layer 0, routed expert 0 of [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/tree/2508b2437e382c605eb0fc52b83f5545960f6b4a) for one H100 using [TE PyTorch](https://github.com/NVIDIA/TransformerEngine/tree/27486e03cfc1fa41f6932dcecdc47c71c47eac3e/transformer_engine/pytorch). Keep changes local to that expert. Use the pinned [HF implementation](https://github.com/huggingface/transformers/blob/26d8e7164fb94b5f5b004c03d6c405ab083a56c7/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py#L845-L923) and checkpoint metadata.\n\nSubmit a compact plan with source locations. Describe the HF computation and feasibility on the target, justify the HF/TE boundary and any fusion, and tabulate the gate, up and down mappings. Give the source tensor, shard, expert and feature slices, destination layout and any cast. Explain how the loader would verify coverage and reject a missing slice. Stop at the plan. Use the config, weight index and, if needed, bounded header-only reads; no tensor downloads or implementation are needed.",
+      "expected_output": "A source-grounded architecture and feasibility assessment, a justified HF/TE boundary, and a concrete checkpoint-to-destination map and coverage plan for one routed expert.",
+      "expected_skill": "convert-hf-to-te",
+      "assertions": [
+        "Step 1: The plan identifies the routed-token input and unweighted expert result at hidden width 2048, the 512-wide intermediate, and how the gate, up and down operations and HF routing weights produce the contribution. It cites the pinned config and HF computation.",
+        "Step 1: It identifies a TE operation supported for this BF16 projection workload on the specified target, grounds that choice in the target API, and distinguishes any remaining runtime condition from an observed result.",
+        "Step 2: It justifies the exact region to replace and its fusion or separate operations, preserving token selection, application of routing weights, combine and the shared-expert path with their HF owners. The boundary and chosen TE operations agree.",
+        "Step 3: The map uses the pinned language-model checkpoint keys and correct shard filenames. It identifies the expert-0 gate and up row ranges in the first packed tensor and the down slice in the second, and gives destination parameters, axes, packing order and dtype for the chosen implementation.",
+        "Step 3: The loader plan tracks every required source and destination region across both shards, fails on a missing region even if its containing tensor exists, and verifies gate/up/down values and order against the named source slices."
+      ]
+    },
+    {
+      "id": "convert-hf-to-te-002",
+      "prompt": "How do I serve my fine-tuned Llama 3 with vLLM?",
+      "expected_output": "An answer about serving the model with vLLM, with no Transformer Engine conversion.",
+      "expected_skill": null,
+      "assertions": [
+        "The response explains how to serve the model with vLLM.",
+        "The model is not converted to Transformer Engine."
+      ],
+      "files": []
+    },
+    {
+      "id": "convert-hf-to-te-003",
+      "prompt": "Which workflow should I use to speed up fine-tuning of ESM-2 650M with Transformer Engine?",
+      "expected_output": "A pointer to the BioNeMo Recipes acceleration skill, which covers protein language models such as ESM-2, instead of a module built from the Llama or Mixtral tutorial.",
+      "expected_skill": "convert-hf-to-te",
+      "assertions": [
+        "The answer points to the BioNeMo Recipes acceleration skill and explains why it applies to ESM-2 as a protein language model.",
+        "The answer does not recommend a Llama or Mixtral tutorial as the workflow for ESM-2."
+      ],
+      "files": []
+    },
+    {
+      "id": "convert-hf-to-te-004",
+      "prompt": "Implement the contribution of heads 4 and 5 (zero-based) to one [DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/config.json) causal attention output for BF16 on H100 with [TE PyTorch](https://github.com/NVIDIA/TransformerEngine/tree/27486e03cfc1fa41f6932dcecdc47c71c47eac3e/transformer_engine/pytorch). Start from these heads’ projected Q, K and V after RoPE and KV expansion. End after their contribution to the bias-free HF output projection, before the residual. Keep the published per-head widths, effective attention scale and all output features. Initialize only the relevant projection-weight slice deterministically; do not construct the full matrix or download weights. Use the pinned [HF attention and projection](https://github.com/huggingface/transformers/blob/26d8e7164fb94b5f5b004c03d6c405ab083a56c7/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py#L248-L493).\n\nBriefly document the shapes, target feasibility, chosen TE and retained HF operations, and the source-to-destination weight map. Submit the callable and source for a runnable BF16 forward test against HF at that boundary. Use distinct head inputs, dropout off and a short causal sequence with multiple visible keys. Give the test command and summarize what it checks. Do not run GPU code for this task.",
+      "expected_output": "A compact architecture and boundary rationale, a two-head output-projection weight map, and a TE-backed callable and forward-only BF16 test comparing the projected two-head contribution to the same HF computation.",
+      "expected_skill": "convert-hf-to-te",
+      "assertions": [
+        "Step 1: The inventory identifies Q/K width 192, V width 128, the configured YaRN-adjusted softmax scale, causal visibility, and 7168 output features. It identifies an applicable TE operation and the target shape or backend condition relevant to it.",
+        "Step 2: The rationale explains which operations between expanded Q/K/V and the projected contribution belong to HF or TE and why. It preserves the post-RoPE inputs, causal semantics and caller’s output layout at the two-head boundary.",
+        "Step 3: The map identifies the logical HF o_proj.weight input columns for heads 4 and 5, all output rows, the head concatenation order and the destination weight or slices, orientation and dtype. The seeded source covers only the selected contribution.",
+        "Step 4: The submitted callable copies the seeded source values into the stated destination mapping and computes the two-head projected result. The supported code path calls a TE operation whose result contributes to the projected output. Any HF fallback documents its limitation.",
+        "Step 4: The runnable forward test compares the same BF16 projected contribution to pinned HF eager attention plus its linear projection with identical source weights and deterministic head-distinguishing inputs, dropout off, causal masking including a future key, and stated tolerances.",
+        "Step 4: The submission gives the forward-test command and describes the comparison the test implements."
+      ],
+      "files": []
+    },
+    {
+      "id": "convert-hf-to-te-006",
+      "files": [],
+      "prompt": "Adapt one [Mamba-130M](https://huggingface.co/state-spaces/mamba-130m-hf/blob/1e76775f628fbf1350fbe4dbb3d971ba64af25a1/config.json) mixer for BF16 training with Transformer Engine. Choose and explain a useful partial replacement that preserves its full-sequence behavior. Use one seeded [HF MambaMixer](https://github.com/huggingface/transformers/blob/5f4ecf2d9f867a1255131d2461d75793c0cf1db2/src/transformers/models/mamba/modeling_mamba.py#L237-L317) at the published widths as the reference. Use the PyTorch reference path without a cache or padding. No pretrained weights are needed.\n\nIn adapter.py expose build_adapter(reference), returning a trainable module whose forward(hidden_states) returns the mixer output. Submit source for a runnable HF comparison on BF16 hidden states of shape [2,8,768] with identical weights and a nonzero upstream gradient. In the test, exercise causal dependence beyond the convolution window and compare outputs and gradients for the input, a recurrent parameter and a corresponding weight on the replaced path. Give the test command and summarize what it checks. Do not run GPU code for this task.",
+      "expected_output": "A trainable partial port of one Mamba-1 mixer, with a justified conversion boundary, source for a runnable comparison to the pinned HF recurrence, and the command to run it.",
+      "expected_skill": "convert-hf-to-te",
+      "assertions": [
+        "The adapter starts from the seeded reference parameters, preserves the input-dependent selective recurrence, and calls a TE operation whose result contributes to the returned mixer output. The stated conversion boundary agrees with the code.",
+        "With identical parameters and inputs, the runnable test compares BF16 output to HF and includes an observable dependence of a later output on input beyond the convolution window. A change to later input leaves an earlier output unchanged.",
+        "With the same nonzero upstream gradient, the test compares input gradients and corresponding nonzero gradients for a recurrent parameter and a mapped weight on the replaced path against HF within stated tolerances.",
+        "The submission gives the test command and describes the comparisons the test implements."
+      ]
+    }
+  ]
+}

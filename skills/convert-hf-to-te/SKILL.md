@@ -1,5 +1,5 @@
 ---
-name: transformer-engine-convert-hf
+name: convert-hf-to-te
 description: >-
   Adapt a Hugging Face PyTorch model for training with compatible Transformer Engine modules.
   Replace a decoder layer, sublayer or individual operation and map its checkpoint weights.
@@ -30,8 +30,10 @@ Replace compatible building blocks of the Hugging Face (HF) model with Transform
 modules and load the original checkpoint into them. The building block is the whole transformer
 layer, as for Llama and Gemma, or else the attention
 (MHA, linear attention) and MLP or MoE blocks inside it. A partial conversion can also replace
-a single operation inside an HF block. Steps 1–3 plan the port, Step 4 implements and checks
-each replacement, and Step 5 validates the integrated model.
+a single operation inside an HF block. For a review or plan, stop after the requested feasibility,
+boundary or weight-mapping decision in Steps 1–3. For a local implementation, Step 4 ends at the
+first BF16 forward comparison. Use Step 5 for requested training checks, integration or performance
+measurements at the scope the user specified.
 In this skill `te` means `transformer_engine.pytorch`.
 
 Not for JAX or inference serving (vLLM, TensorRT-LLM). For Megatron-LM or another PyTorch
@@ -41,9 +43,10 @@ the weights map.
 ## 1. Check the architecture and feasibility
 
 Identify the training path, representative inputs and target precision from the request and project.
-Read the model's `config.json`, checkpoint keys and decoder `forward` in the installed
-`transformers`. For each distinct layer type, record its modules, which tensors they consume
+Read the model's `config.json`, checkpoint keys and decoder `forward` at the requested revision
+or installed version. For each distinct layer type, record its modules, which tensors they consume
 or share, and their checkpoint keys. Use this inventory to identify candidate TE modules.
+Consult examples for the relevant boundary and verify API choices against the target TE release.
 
 | HF component | Candidate TE module |
 |---|---|
@@ -149,6 +152,8 @@ non-exhaustive.
 - A norm that multiplies by `1 + weight` (Gemma, Qwen3.5) needs `zero_centered_gamma=True`.
 - Head sizes: pass the attention's real query/key and value head sizes as `kv_channels`.
   `config.head_dim` is not always that; in GLM-5 it is only the RoPE part of each head.
+  For multi-head latent attention, check HF's effective softmax scale and which slice of
+  Q and K receives rotary embeddings before substituting the attention core.
 - Match attention dropout and projection biases to HF. Check the installed module's defaults.
 - HF's `post_init()` overwrites TE weights; load the checkpoint before training.
 
@@ -158,7 +163,10 @@ Once the replacement outputs match, compare integrated HF and TE
 outputs on the same BF16 inputs and with the same stochastic controls. For training, match
 labels and loss reduction, then compare loss and a gradient or optimizer update on a replaced
 parameter in each changed path. Use the same parameter layout and exercise a routed expert for
-MoE. If only a stack of layers fits, report the verified layers. Use FP32 to diagnose discrepancies.
+MoE. If the full model does not fit, start with a deterministic check for each changed layer type
+and report the layers it covers. Leave a command to rerun the checks, the weight mapping coverage,
+and the result or blocker for each check. If the environment cannot run the checks, provide the
+command and mark the results as unverified. Use FP32 to diagnose discrepancies.
 If the workload calls for lower-precision execution, repeat the relevant checks with that recipe
 and its own tolerances.
 
