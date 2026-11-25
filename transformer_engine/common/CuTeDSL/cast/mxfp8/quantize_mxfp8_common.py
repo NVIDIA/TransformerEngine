@@ -104,8 +104,8 @@ def dactivation_op(activation: str, activation_table: str):
 
 @cute.jit
 def derive_swizzled_scale_layout(
-    M: Int32,
-    N: Int32,
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ROWWISE: cutlass.Constexpr[bool],
     COLWISE: cutlass.Constexpr[bool],
     mS_row: Optional[cute.Tensor],
