@@ -2,6 +2,7 @@
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * See LICENSE for license information.
  ************************************************************************/
+#include "../../util/ptx_arch_spec.cuh"
 #include "../core/grouped_layout.cuh"
 #include "core_nvfp4.cuh"
 #include "group_quantize_2d_nvfp4.h"
