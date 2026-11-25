@@ -74,8 +74,13 @@ run_pass() {
 # Opt-in via NVTE_TEST_EP_CLASSIC_PG=1: cover only the classic ProcessGroupNCCL
 # comm-borrow branch. Recent torch defaults the "nccl" backend to ProcessGroupNCCL2,
 # which the passes below exercise; forcing the classic backend covers the other
-# get_nccl_comm_ptr branch.
+# get_nccl_comm_ptr branch. Torch builds without the classic backend (pytorch#205374)
+# ignore TORCH_DIST_USE_NCCL2=0, so this pass would only repeat the NCCL2 coverage.
 if [ "${NVTE_TEST_EP_CLASSIC_PG:-0}" = "1" ]; then
+  if ! python3 -c 'import torch, pathlib, sys; sys.exit(not (pathlib.Path(torch.__file__).parent / "include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp").exists())'; then
+    echo "SKIP classic_pg: this torch build has no classic ProcessGroupNCCL"
+    exit 0
+  fi
   TORCH_DIST_USE_NCCL2=0 run_pass "classic_pg" 0
   exit $RET
 fi
