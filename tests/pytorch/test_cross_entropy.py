@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import random
 import pytest
 import torch
@@ -523,3 +524,24 @@ def test_parallel_cross_entropy_return_argmax_nan():
             target = torch.zeros(logits.shape[:-1], dtype=torch.long, device="cuda")
             _, argmax = parallel_cross_entropy(logits, target, return_argmax=True)
             torch.testing.assert_close(argmax, torch.argmax(logits, dim=-1), rtol=0, atol=0)
+
+
+def test_parallel_cross_entropy_leading_neg_inf_block():
+    """A masked prefix contributes zero mass, but a NaN in that prefix propagates."""
+    vocab = 32768 + 8
+    logits = torch.full((1, 2, vocab), float("-inf"), device="cuda", dtype=torch.float32)
+    logits[..., -8:] = 0.0
+    logits[0, 1, 0] = float("nan")
+    logits.requires_grad_()
+    target = torch.full((1, 2), vocab - 1, device="cuda", dtype=torch.long)
+
+    loss = parallel_cross_entropy(logits, target)
+    loss.backward(torch.ones_like(loss))
+
+    expected_loss = logits.new_tensor([[math.log(8), float("nan")]])
+    expected_grad = torch.zeros_like(logits)
+    expected_grad[0, 0, -8:] = 1 / 8
+    expected_grad[0, 0, -1] -= 1
+    expected_grad[0, 1] = float("nan")
+    torch.testing.assert_close(loss, expected_loss, equal_nan=True)
+    torch.testing.assert_close(logits.grad, expected_grad, equal_nan=True)

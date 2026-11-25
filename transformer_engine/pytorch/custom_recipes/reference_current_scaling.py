@@ -338,7 +338,7 @@ class CurrentScalingQuantizerRef(Quantizer):
     def quantize(
         self,
         tensor: torch.Tensor,
-        **kwargs,  # pylint: disable=unused-argument
+        **_kwargs,
     ) -> CurrentScalingTensorRef:
         # sanity checks
         assert (

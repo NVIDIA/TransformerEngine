@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <iomanip>
@@ -138,6 +139,63 @@ std::vector<std::vector<size_t>> test_cases = {
   {217, 256},
 };
 
+// The FP8 quantize sums each 128-row tile of a column into an FP32 workspace row, then adds those
+// rows in row order, starting from 0, and rounds once to the input type. With one nonzero row per
+// tile, each tile sum is exact, so this checks dbias bit for bit against the sum of those rows in
+// order. Their magnitudes span many binades with mixed signs, so for FP32 any other order or
+// grouping of the adds changes some sums; BF16 and FP16 mostly check the rounding.
+template <typename IType>
+void performTestDBiasOrder(const size_t tiles, const size_t cols, const uint32_t seed,
+                           const int min_exponent, const int max_exponent) {
+  using namespace test;
+  constexpr size_t tile_rows = 128;                 // FP8_CHUNK_DIM_Y
+  const size_t rows = (tiles - 1) * tile_rows + 1;  // The last tile holds one row.
+  const DType itype = TypeInfo<IType>::dtype;
+
+  Tensor input("input", std::vector<size_t>{rows, cols}, itype);
+  Tensor output("output", std::vector<size_t>{rows, cols}, DType::kFloat8E4M3);
+  Tensor dbias("dbias", std::vector<size_t>{cols}, itype);
+  setRandomScale(&output);
+
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> mantissa(1.0f, 2.0f);
+  std::uniform_int_distribution<int> exponent(min_exponent, max_exponent);
+  std::bernoulli_distribution negative(0.5);
+  IType *const input_h = input.rowwise_cpu_dptr<IType>();
+  std::vector<float> ref_dbias(cols, 0.0f);
+  for (size_t r = 0; r < rows; r += tile_rows) {
+    for (size_t c = 0; c < cols; ++c) {
+      const float m = mantissa(gen);
+      const int e = exponent(gen);
+      const IType x = static_cast<IType>(std::ldexp(negative(gen) ? -m : m, e));
+      input_h[r * cols + c] = x;
+      ref_dbias[c] += static_cast<float>(x);
+    }
+  }
+  input.from_cpu();
+
+  Tensor workspace;
+  nvte_quantize_dbias(input.data(), output.data(), dbias.data(), workspace.data(), 0);
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+  nvte_quantize_dbias(input.data(), output.data(), dbias.data(), workspace.data(), 0);
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  dbias.to_cpu();
+  const IType *const dbias_h = dbias.rowwise_cpu_dptr<IType>();
+  size_t mismatches = 0;
+  for (size_t c = 0; c < cols; ++c) {
+    const IType expected = static_cast<IType>(ref_dbias[c]);
+    if (std::memcmp(&dbias_h[c], &expected, sizeof(IType)) != 0 && mismatches++ < 4) {
+      ADD_FAILURE() << typeName(itype) << " column " << c << " of " << rows << "x" << cols
+                    << ": got " << static_cast<float>(dbias_h[c]) << ", expected "
+                    << static_cast<float>(expected);
+    }
+  }
+  EXPECT_EQ(mismatches, 0u);
+}
+
 }  // namespace;
 
 
@@ -179,4 +237,30 @@ INSTANTIATE_TEST_SUITE_P(
         name += "X" + std::to_string(s);
       }
       return name;
+    });
+
+class CastDBiasOrderTestSuite : public ::testing::TestWithParam<std::tuple<size_t, size_t>> {};
+
+TEST_P(CastDBiasOrderTestSuite, TestCastDBiasOrder) {
+  using namespace test;
+  // Skip tests for pre-Blackwell architectures
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  const auto [tiles, cols] = GetParam();
+  performTestDBiasOrder<fp32>(tiles, cols, 1, -30, 30);
+  performTestDBiasOrder<bf16>(tiles, cols, 2, -30, 30);
+  // Most FP16 sums stay finite; some overflow.
+  performTestDBiasOrder<fp16>(tiles, cols, 3, -24, 12);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest, CastDBiasOrderTestSuite,
+    // Tiles: around the 32-row stages of the dbias reduction and its 4-stage pipeline, up to 128K
+    // rows. Columns: multiples of 16, as TMA needs, around its 64-thread CTA.
+    ::testing::Combine(::testing::Values(1, 2, 31, 32, 33, 63, 64, 65, 97, 128, 129, 512, 1000),
+                       ::testing::Values(16, 48, 64, 80, 1040)),
+    [](const testing::TestParamInfo<CastDBiasOrderTestSuite::ParamType> &info) {
+      return std::to_string(std::get<0>(info.param)) + "X" +
+             std::to_string(std::get<1>(info.param));
     });
