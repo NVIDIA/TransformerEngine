@@ -2708,10 +2708,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
         fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
-        # The FC2 dgrad kernel is the last user of the saved activation input
-        # and of the row-wise FC2 grad output views passed to it. The saved
-        # activation input is a view of the FC1 kernel's output, which holds
-        # the same memory.
         del fc2_dactivation_kwargs, fc2_dy_data, fc2_dy_scales
         clear_tensor_data(activation_in, activation_in._base)
 
@@ -2906,8 +2902,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     grouped_fc2_x.columnwise_scale_inv,
                 )
             if isinstance(grad_output, GroupedTensor):
-                # The buffers are shared with the caller's grad output: drop
-                # this backward's references only.
                 clear_tensor_data(grouped_fc2_dy)
             else:
                 clear_tensor_data(
