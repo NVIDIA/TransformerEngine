@@ -22,6 +22,8 @@ def _check(x, splits, grouped, directions, swizzled):
     # Debug views cache host metadata. Refresh only outside graph capture/replay.
     grouped.tensor_shapes = None
     grouped.offsets = None
+    grouped.scale_inv_offsets = None
+    grouped.columnwise_scale_inv_offsets = None
     results = grouped.split_into_quantized_tensors()
     reference_quantizer = _quantizer(directions, False)
     start = 0
