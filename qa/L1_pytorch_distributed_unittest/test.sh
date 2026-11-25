@@ -43,6 +43,11 @@ else
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
 fi
 
+# Run once after both CP variants so CP8 can use all visible GPUs without contention.
+python3 -m pytest -v -s --junitxml="$XML_LOG_DIR/pytest_cp_uniform.xml" \
+    "$TE_PATH/tests/pytorch/attention/benchmark_cp.py::test_cp_benchmark_configs["{2,4,8}"-FusedAttention-"{p2p,all_gather,a2a}"-thd-uniform_256x2k]" \
+    || test_fail "CP uniform correctness"
+
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_parallel_cross_entropy.xml $TE_PATH/tests/pytorch/distributed/test_parallel_cross_entropy.py || test_fail "test_parallel_cross_entropy.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_symmetric_memory.xml $TE_PATH/tests/pytorch/distributed/test_symmetric_memory.py || test_fail "test_symmetric_memory.py"

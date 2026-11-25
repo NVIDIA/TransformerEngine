@@ -161,6 +161,11 @@ do
       NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
       NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_CP $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py (FA $fa_version)"
     fi
+    # Wait for both suites before CP8 uses all visible GPUs; Fused is covered by L1.
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+      --junitxml="$XML_LOG_DIR/pytest_cp_uniform_flash_fa${fa_tag}.xml" \
+      "$TE_PATH/tests/pytorch/attention/benchmark_cp.py::test_cp_benchmark_configs["{2,4,8}"-FlashAttention-"{p2p,all_gather,a2a}"-thd-uniform_256x2k]" \
+      || test_fail "CP uniform correctness (FA $fa_version)"
   else
     if [ -n "$CP_FA_VERSION" ]; then
       echo "Skipping CP tests for FA $fa_version (CP uses FA $CP_FA_VERSION on sm$sm_arch)"

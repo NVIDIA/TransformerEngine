@@ -558,20 +558,6 @@ def run_dpa_with_cp(
             for shape in input_shapes
         ]
 
-    _save_path = os.environ.get("CP_CROSS_BACKEND_SAVE_DIR")
-    if _save_path and not cp_bench_only:
-        os.makedirs(_save_path, exist_ok=True)
-        torch.save(
-            {
-                "q": q_orig,
-                "k": k_orig,
-                "v": v_orig,
-                "dout": dout_orig,
-                "cu_seqlens_q": cu_seqlens_q,
-                "cu_seqlens_q_padded": cu_seqlens_q_padded,
-            },
-            os.path.join(_save_path, f"inputs_rank{rank}.pt"),
-        )
     if scaling_mode == "delayed":
         qkv_quantizer = Float8Quantizer(
             fp8_dtype=DType.kFloat8E4M3,
@@ -822,17 +808,6 @@ def run_dpa_with_cp(
             dq_, dk_, dv_, dbias_ = None, None, None, None
             d_softmax_offset_ = None
 
-    if _save_path and not cp_bench_only:
-        torch.save(
-            {
-                "out": out_.detach(),
-                "dq": dq_.detach() if dq_ is not None else None,
-                "dk": dk_.detach() if dk_ is not None else None,
-                "dv": dv_.detach() if dv_ is not None else None,
-            },
-            os.path.join(_save_path, f"outputs_{cp_comm_type}_rank{rank}.pt"),
-        )
-
     # Input leaves are recreated outside the timed window. Rank-local durations
     # are reduced after profiling so the endpoint metric is the mean of the
     # per-iteration rank maxima, which represents distributed completion time.
@@ -840,7 +815,7 @@ def run_dpa_with_cp(
         warmup = 10
         local_latencies_ms = []
         for iteration in range(warmup + benchmark_iters):
-            q_b, k_b, v_b = [x.clone().detach().requires_grad_() for x in (q_, k_, v_)]
+            q_b, k_b, v_b = [x.clone().detach().requires_grad_(is_training) for x in (q_, k_, v_)]
             if bias_ is not None:
                 bias_.grad = None
             if config.softmax_type != "vanilla":
@@ -867,10 +842,7 @@ def run_dpa_with_cp(
                 if isinstance(out_b, tuple):
                     out_b = out_b[0]
                 if is_training:
-                    if fp8_bwd and fp8_mha:
-                        out_b.backward(dout_quantizer(dout_))
-                    else:
-                        out_b.backward(dout_)
+                    out_b.backward(dout_)
             torch.cuda.synchronize()
             if iteration >= warmup:
                 local_latencies_ms.append((time.perf_counter() - start) * 1000)
