@@ -1021,6 +1021,12 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   const bool has_columnwise = !grouped_x.attr("columnwise_data").is_none() &&
                               !grouped_x.attr("columnwise_scale_inv").is_none();
   const bool swizzled = grouped_x.attr("_with_gemm_swizzled_scales").cast<bool>();
+  const auto block_scaling_rowwise_scale_layout =
+      static_cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>(
+          grouped_x.attr("_block_scaling_rowwise_scale_layout").cast<int>());
+  const bool compact_block_scaling_rowwise_scale_layout =
+      block_scaling_rowwise_scale_layout ==
+      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
   const DType op_dtype = quantizer.attr("dtype").cast<DType>();
 
   NVTE_CHECK(has_rowwise, "Grouped input has no rowwise data and scales for the GEMM to consume.");
@@ -1065,7 +1071,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
 
   NVTE_CHECK(is_block_scale_1d || detail::IsMXFP8Quantizers(quantizer.ptr()),
              "Grouped requantization requires MXFP8 or block128 FP8.");
-  if (is_block_scale_1d && swizzled && (!need_columnwise || has_columnwise) &&
+  if (is_block_scale_1d && !compact_block_scaling_rowwise_scale_layout &&
+      (!need_columnwise || has_columnwise) &&
       !return_dequantized) {
     return py::none();
   }
@@ -1160,7 +1167,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
           at::empty({static_cast<int64_t>(columnwise_num_scales)}, scale_options);
     }
     at::Tensor swizzled_rowwise_scale_inv =
-        is_block_scale_1d && swizzled
+        is_block_scale_1d && !compact_block_scaling_rowwise_scale_layout
             ? rowwise_scale_inv
             : at::empty({static_cast<int64_t>(num_scales)}, scale_options);
     at::Tensor first_dims_i64;
@@ -1187,6 +1194,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       input_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
     }
     input_nvte.set_with_gemm_swizzled_scales(swizzled);
+    input_nvte.set_block_scaling_rowwise_scale_layout(
+        static_cast<uint8_t>(block_scaling_rowwise_scale_layout));
 
     GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, scaling_mode);
     output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
@@ -1202,6 +1211,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
     }
     output_nvte.set_with_gemm_swizzled_scales(true);
+    output_nvte.set_block_scaling_rowwise_scale_layout(static_cast<uint8_t>(
+        transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
 
     at::Tensor dequantized;
     TensorWrapper dequantized_nvte;
@@ -1228,6 +1239,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
     }
     grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
+    grouped_x.attr("_block_scaling_rowwise_scale_layout") = py::cast(
+        static_cast<int>(transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
     return return_dequantized ? py::cast(dequantized) : py::none();
   }
 

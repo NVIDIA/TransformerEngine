@@ -1345,6 +1345,16 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorPa
     case kNVTEGroupedRowScaledNVFP4:
       t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTEGroupedBlockScalingRowwiseScaleLayout: {
+      t.block_scaling_rowwise_scale_layout =
+          static_cast<detail::FP8BlockwiseRowwiseOption>(*reinterpret_cast<const uint8_t *>(buf));
+      NVTE_CHECK(t.block_scaling_rowwise_scale_layout ==
+                         detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY ||
+                     t.block_scaling_rowwise_scale_layout ==
+                         detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
+                 "Grouped rowwise scale layout must be GEMM-ready or compact.");
+      break;
+    }
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1442,6 +1452,9 @@ void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTe
       break;
     case kNVTEGroupedRowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
+      break;
+    case kNVTEGroupedBlockScalingRowwiseScaleLayout:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->block_scaling_rowwise_scale_layout);
       break;
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");

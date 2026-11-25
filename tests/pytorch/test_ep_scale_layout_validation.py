@@ -10,8 +10,10 @@ import transformer_engine_torch as tex
 
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9,
-    reason="EP block scaling requires Hopper or newer",
+    not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] < 9
+    or not hasattr(tex, "ep_dispatch"),
+    reason="EP block scaling requires Hopper or newer and an NCCL EP build",
 )
 
 

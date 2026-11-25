@@ -1125,7 +1125,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
-    kwargs["rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
+    kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
@@ -1152,7 +1152,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
-    kwargs["rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
+    kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
@@ -1235,8 +1235,10 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
                                      getTensorShape(*columnwise_scale_inv));
   }
-  // FP8 block-scaling grouped GEMM reads compact scales; never swizzle.
+  // Block-scaled FP8 GEMM uses per-expert block-major scales without an MXFP8-style swizzle.
   out_cpp.set_with_gemm_swizzled_scales(false);
+  out_cpp.set_block_scaling_rowwise_scale_layout(static_cast<uint8_t>(
+      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -1270,6 +1272,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
+  kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(
+      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();

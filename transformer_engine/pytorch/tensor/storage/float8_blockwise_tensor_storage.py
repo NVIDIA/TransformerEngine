@@ -126,7 +126,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool
-    _rowwise_scale_layout: int
+    _block_scaling_rowwise_scale_layout: int
 
     def __new__(
         cls,
@@ -138,7 +138,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
-        rowwise_scale_layout: int = int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY),
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
@@ -154,7 +156,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
-        instance._rowwise_scale_layout = rowwise_scale_layout
+        instance._block_scaling_rowwise_scale_layout = int(block_scaling_rowwise_scale_layout)
 
         return instance
 
@@ -197,7 +199,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
-            "rowwise_scale_layout": self._rowwise_scale_layout,
+            "block_scaling_rowwise_scale_layout": self._block_scaling_rowwise_scale_layout,
             "fake_dtype": self._dtype,
         }
 
@@ -261,7 +263,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 q_K = q.shape[-1]
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
-            if self._rowwise_scale_layout == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT):
+            if self._block_scaling_rowwise_scale_layout == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT):
                 orig_shape = q.shape
                 q = q.reshape(q_M, q_K)
                 scale_inv = scale_inv.reshape(q_M, -1)
@@ -398,7 +400,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             self._fp8_dtype,
             self._quantizer,
             self._is_2D_scaled,
-            rowwise_scale_layout=self._rowwise_scale_layout,
+            block_scaling_rowwise_scale_layout=self._block_scaling_rowwise_scale_layout,
             fake_dtype=self._dtype,
         )
 

@@ -507,6 +507,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
+                self._block_scaling_rowwise_scale_layout,
                 None,  # data_format
             ),
         )
@@ -523,6 +524,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         data_format: Any = None,
     ) -> Float8BlockwiseQTensor:
         """This classmethod is kept for backward compatibility only.
@@ -547,6 +551,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             dtype,
             quantizer,
             is_2D_scaled,
+            block_scaling_rowwise_scale_layout,
             data_format,
         )
 
@@ -751,6 +756,9 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,
+    block_scaling_rowwise_scale_layout: int = int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+    ),
     data_format: Any = None,  # pylint: disable=unused-argument
 ) -> Float8BlockwiseQTensor:
     """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""
@@ -771,6 +779,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
         dtype=dtype,
         quantizer=quantizer,
         is_2D_scaled=is_2D_scaled,
+        block_scaling_rowwise_scale_layout=block_scaling_rowwise_scale_layout,
         device=device,
     )
 
@@ -855,6 +864,7 @@ class _ViewFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            block_scaling_rowwise_scale_layout=tensor._block_scaling_rowwise_scale_layout,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -885,6 +895,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                block_scaling_rowwise_scale_layout=grad._block_scaling_rowwise_scale_layout,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )
@@ -971,6 +982,7 @@ class _ReshapeFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            block_scaling_rowwise_scale_layout=tensor._block_scaling_rowwise_scale_layout,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -1000,6 +1012,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                block_scaling_rowwise_scale_layout=grad._block_scaling_rowwise_scale_layout,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )

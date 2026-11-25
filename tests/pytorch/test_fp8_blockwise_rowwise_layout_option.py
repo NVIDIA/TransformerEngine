@@ -3,12 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """FP8 blockwise rowwise scale layout selection through Float8BlockQuantizer."""
 
+import pickle
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -83,4 +88,56 @@ def test_grouped_quantizer_remains_gemm_ready():
     # Block128 grouped GEMM uses per-expert block-major scales without the
     # MXFP8-style 128x4 swizzle.
     assert not grouped._with_gemm_swizzled_scales
+    assert (
+        grouped._block_scaling_rowwise_scale_layout
+        == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY)
+    )
     torch.testing.assert_close(grouped.scale_inv, expected_scales, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("rebuild", ["view", "reshape", "flatten", "pickle"])
+def test_compact_layout_is_preserved_by_tensor_rebuild(rebuild):
+    compact = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT, False)(
+        torch.randn(2, 128, 384, dtype=torch.bfloat16, device="cuda")
+    )
+    expected = compact.dequantize()
+    if rebuild == "view":
+        rebuilt = compact.view(256, 384)
+        expected = expected.view(256, 384)
+    elif rebuild == "reshape":
+        rebuilt = compact.reshape(256, 384)
+        expected = expected.reshape(256, 384)
+    elif rebuild == "flatten":
+        names, context = compact.__tensor_flatten__()
+        inner = {name: getattr(compact, name) for name in names}
+        rebuilt = compact.__tensor_unflatten__(inner, context, compact.shape, compact.stride())
+    else:
+        rebuilt = pickle.loads(pickle.dumps(compact))
+    assert rebuilt._block_scaling_rowwise_scale_layout == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT)
+    torch.testing.assert_close(rebuilt.dequantize(), expected, rtol=0, atol=0)
+
+
+def test_storage_only_compact_dequantize_does_not_need_quantizer():
+    rows, hidden = 128, 384
+    data = torch.arange(rows * hidden, device="cuda", dtype=torch.int32)
+    data = ((data % 32 + 1) * 8).to(torch.uint8).view(rows, hidden)
+    scales = torch.linspace(0.5, 2.0, rows * (hidden // 128), device="cuda").reshape(
+        rows, hidden // 128
+    )
+    storage = Float8BlockwiseQTensorStorage(
+        data,
+        scales,
+        None,
+        None,
+        te.DType.kFloat8E4M3,
+        None,
+        False,
+        block_scaling_rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
+        fake_dtype=torch.bfloat16,
+    )
+    expected = (
+        data.view(torch.float8_e4m3fn).float().view(rows, hidden // 128, 128)
+        * scales.unsqueeze(-1)
+    ).reshape(rows, hidden).bfloat16()
+    assert storage._quantizer is None
+    torch.testing.assert_close(storage.dequantize(), expected, rtol=0, atol=0)

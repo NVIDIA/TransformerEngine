@@ -36,6 +36,8 @@ pytestmark = pytest.mark.skipif(
 def test_block128_requant_matches_grouped_tma(
     hidden, shape_rep, group_rows, power_of_two, return_dequantized, compact_input
 ):
+    if not power_of_two and torch.cuda.get_device_capability()[0] >= 10:
+        pytest.skip("Blackwell group quantization requires power-of-two scales")
     counts = torch.tensor(group_rows, dtype=torch.int64, device="cuda")
     rows = int(counts.sum())
     offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))) * hidden
@@ -49,17 +51,26 @@ def test_block128_requant_matches_grouped_tma(
         force_pow_2_scales=power_of_two,
     )
     direct = tex.group_quantize(source, quantizer, counts.numel(), counts, tensor_offsets=offsets)
-    input_scales = direct.scale_inv.clone().flatten()
+    rowwise_scale_layout = tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
     if compact_input:
-        blocks = hidden // 128
-        input_scales = torch.cat(
-            [
-                scales.view(blocks, count).T.contiguous().flatten()
-                for scales, count in zip(
-                    input_scales.split([count * blocks for count in group_rows]), group_rows
-                )
-            ]
+        wire_quantizer = Float8BlockQuantizer(
+            te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            block_scaling_dim=1,
+            force_pow_2_scales=power_of_two,
+            rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
         )
+        wire = wire_quantizer(source)
+        torch.testing.assert_close(
+            wire._rowwise_data.flatten(), direct.rowwise_data, rtol=0, atol=0
+        )
+        input_scales = wire._rowwise_scale_inv.clone().flatten()
+        rowwise_scale_layout = tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+    else:
+        # Requantization must also accept the grouped quantizer's native
+        # GEMM-ready scales; the swizzle flag does not describe this layout.
+        input_scales = direct.scale_inv.clone().flatten()
     first_dims = None if shape_rep == "same" else counts
     tensor_offsets = None if shape_rep == "same" else offsets
     requant = GroupedTensor(
@@ -71,7 +82,8 @@ def test_block128_requant_matches_grouped_tma(
         scale_inv=input_scales,
         first_dims=first_dims,
         tensor_offsets=tensor_offsets,
-        with_gemm_swizzled_scales=not compact_input,
+        with_gemm_swizzled_scales=False,
+        block_scaling_rowwise_scale_layout=rowwise_scale_layout,
     )
     reconstructed = tex.group_requantize_inplace(
         requant,
@@ -163,6 +175,7 @@ def test_block128_requant_output_modes(
         first_dims=None if shape_rep == "same" else counts,
         tensor_offsets=None if shape_rep == "same" else offsets,
         with_gemm_swizzled_scales=False,
+        block_scaling_rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
     )
 
     def run():

@@ -1368,6 +1368,7 @@ def _make_grouped_blockwise(
         rowwise=True,
         columnwise=False,
         block_scaling_dim=1,
+        rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
     )
     # Each expert owns a separate [hidden/128, expert_rows] scale matrix.
     # A global transpose would interleave experts once hidden has >1 block.
@@ -1398,6 +1399,7 @@ def _make_grouped_blockwise(
         first_dims=token_counts,
         tensor_offsets=tensor_offsets,
         scale_inv_offsets=scale_inv_offsets,
+        block_scaling_rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
     )
     grouped._with_gemm_swizzled_scales = fused_gemm_layout
     return grouped

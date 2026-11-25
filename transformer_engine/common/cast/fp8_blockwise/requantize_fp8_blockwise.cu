@@ -522,7 +522,13 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   NVTE_CHECK(last_logical_dim > 0 && last_logical_dim % kTileDim == 0,
              "Block scaling grouped requant requires hidden divisible by 128.");
   const size_t blocks = last_logical_dim / kTileDim;
-  if (input.with_gemm_swizzled_scales) {
+  const bool compact_scale_layout =
+      input.block_scaling_rowwise_scale_layout == detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
+  NVTE_CHECK(compact_scale_layout ||
+                 input.block_scaling_rowwise_scale_layout ==
+                     detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY,
+             "Block scaling grouped requant requires compact or GEMM-ready rowwise scales.");
+  if (!compact_scale_layout) {
     NVTE_CHECK(input.scale_inv.numel() == first_logical_dim * blocks,
                "Block scaling GEMM rowwise scale capacity must match logical shape.");
   } else {
@@ -531,10 +537,9 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   }
   NVTE_CHECK(output->scale_inv.numel() == first_logical_dim * blocks,
              "Block scaling output rowwise scale capacity must match logical shape.");
-  NVTE_CHECK(input.with_gemm_swizzled_scales == (input.scale_inv.dptr == output->scale_inv.dptr) ||
+  NVTE_CHECK(!compact_scale_layout == (input.scale_inv.dptr == output->scale_inv.dptr) ||
                  first_logical_dim == 0,
              "Block scaling compact-to-GEMM scale conversion requires separate storage.");
-  const bool compact_scale_layout = !input.with_gemm_swizzled_scales;
   const size_t row_scale_cols = compact_scale_layout && first_logical_dim != 0
                                     ? input.scale_inv.numel() / first_logical_dim
                                     : blocks;

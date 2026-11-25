@@ -8,6 +8,7 @@ from typing import Optional, Tuple, List, Union
 import math
 
 import torch
+import transformer_engine_torch as tex
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import DType, TE_DType
 
@@ -75,6 +76,9 @@ class GroupedTensorStorage:
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
         with_gemm_swizzled_scales: bool = False,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 0,
@@ -156,6 +160,7 @@ class GroupedTensorStorage:
         instance.quantized_tensors = None
 
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._block_scaling_rowwise_scale_layout = int(block_scaling_rowwise_scale_layout)
         instance.row_scaled_nvfp4 = row_scaled_nvfp4
         instance.nvfp4_use_4over6 = nvfp4_use_4over6
         instance.nvfp4_e4m3_max = nvfp4_e4m3_max
@@ -185,6 +190,9 @@ class GroupedTensorStorage:
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
         with_gemm_swizzled_scales: bool = False,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 0,
@@ -214,6 +222,7 @@ class GroupedTensorStorage:
             requires_grad=requires_grad,
             stride=stride,
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            block_scaling_rowwise_scale_layout=block_scaling_rowwise_scale_layout,
             row_scaled_nvfp4=row_scaled_nvfp4,
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
@@ -652,6 +661,7 @@ class GroupedTensorStorage:
             scale_inv_offsets=self.scale_inv_offsets,
             columnwise_scale_inv_offsets=self.columnwise_scale_inv_offsets,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            block_scaling_rowwise_scale_layout=self._block_scaling_rowwise_scale_layout,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
             nvfp4_use_4over6=self.nvfp4_use_4over6,
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,

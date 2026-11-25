@@ -587,6 +587,8 @@ enum NVTEGroupedTensorParam {
       10, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTEGroupedRowScaledNVFP4 =
       11, /*!< Whether NVFP4 data uses row scaling instead of tensor scaling */
+  kNVTEGroupedBlockScalingRowwiseScaleLayout =
+      12, /*!< FP8 blockwise rowwise scale layout: 1 = GEMM-ready, 2 = compact */
   kNVTENumGroupedTensorParams
 };
 
@@ -1324,6 +1326,12 @@ class GroupedTensorWrapper {
     nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_block_scaling_rowwise_scale_layout(uint8_t block_scaling_rowwise_scale_layout) {
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedBlockScalingRowwiseScaleLayout,
+                                  &block_scaling_rowwise_scale_layout,
+                                  sizeof(block_scaling_rowwise_scale_layout));
+  }
+
   // Parameter getters
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
     NVTEBasicTensor ret;
@@ -1374,6 +1382,13 @@ class GroupedTensorWrapper {
     uint8_t val = 0;
     nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
+  }
+
+  uint8_t get_block_scaling_rowwise_scale_layout() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedBlockScalingRowwiseScaleLayout, &val,
+                                  sizeof(val), nullptr);
+    return val;
   }
 
   /*! \brief Get an underlying NVTEGroupedTensor.
