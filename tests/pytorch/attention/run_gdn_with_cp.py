@@ -112,7 +112,7 @@ def _case(
     def select_local_tokens(tensor):
         """Return this CP rank's token slice in the requested layout.
 
-        THD slices the packed token axis; dense layouts slice each batch row.
+        THD slices the packed token axis; dense layouts slice each sequence.
         Use the same selection for inputs, reference outputs and gradients.
         """
         if layout == "thd":

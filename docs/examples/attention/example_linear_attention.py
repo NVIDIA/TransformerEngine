@@ -70,7 +70,7 @@ def run_single_gpu(inputs, initial_state, cu_seqlens, qkv_format):
 
 
 def local_tokens(tensor, qkv_format, cp_group):
-    """Select this rank's contiguous interval of the packed buffer or each batch row."""
+    """Select this rank's contiguous interval of the packed buffer or each sequence."""
     rank, size = dist.get_rank(cp_group), dist.get_world_size(cp_group)
     if qkv_format == "thd":
         length = tensor.shape[0]

@@ -432,8 +432,10 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         gradients across replicas; divide a replicated final-state loss by ``P``
         to count it once.
 
-        All CP ranks must call forward and backward with matching options, even
-        with zero local loss or tokens. Only first-order gradients are supported.
+        All CP ranks must use the same attention settings and, when supplied,
+        the same global ``cu_seqlens``. Q/K/V and gates contain each rank's local
+        tokens. During training, every rank must run forward and backward, even
+        with no tokens or no local loss. Only first-order gradients are supported.
         CP executes eagerly, including inside a ``torch.compile`` model.
         """
         if g is None or beta is None:
