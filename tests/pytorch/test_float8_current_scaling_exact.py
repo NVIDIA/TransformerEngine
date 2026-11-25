@@ -808,6 +808,24 @@ class TestFP8CurrentScalingNativeVsRef:
         torch.testing.assert_close(qx_native, qx_ref, atol=0.0, rtol=0.0)
         torch.testing.assert_close(sx_native, sx_ref, atol=0.0, rtol=0.0)
 
+    def test_tiny_positive_amax_scale_inv_is_flt_min(self):
+        # Public quantizer: a positive tiny amax stores scale_inv FLT_MIN, not zero codes.
+        x = torch.full((128, 128), 7.7e-37, dtype=torch.float32, device="cuda")
+        te_quant, ref_quant = self._make_quantizers(rowwise=True, columnwise=False)
+        x_te = te_quant(x)
+        x_ref = ref_quant.quantize(x)
+        qx_native = x_te._data.view(dtype=torch.float8_e4m3fn)
+        torch.testing.assert_close(qx_native, x_ref.data, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(x_te._scale_inv, x_ref.scale, atol=0.0, rtol=0.0)
+        flt_min = torch.full_like(x_te._scale_inv, torch.finfo(torch.float32).tiny)
+        torch.testing.assert_close(x_te._scale_inv, flt_min, atol=0.0, rtol=0.0)
+        assert not torch.all(qx_native.to(dtype=torch.float32) == 0)
+
+        zeros = torch.zeros_like(x)
+        z_te = te_quant(zeros)
+        ones = torch.ones_like(z_te._scale_inv, dtype=torch.float32)
+        torch.testing.assert_close(z_te._scale_inv.float(), ones, atol=0.0, rtol=0.0)
+
     @pytest.mark.parametrize(
         "M, K, N, out_dtype, accumulate",
         [

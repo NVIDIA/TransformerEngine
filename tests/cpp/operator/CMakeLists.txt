@@ -76,3 +76,7 @@ else()
       "GTEST_TOTAL_SHARDS=${NVTE_TEST_NUM_SHARDS};GTEST_SHARD_INDEX=${shard_index}")
   endforeach()
 endif()
+
+add_executable(test_tiny_amax_scale_host test_tiny_amax_scale_host.cpp)
+target_compile_options(test_tiny_amax_scale_host PRIVATE -O2 -Wall -Wextra)
+add_test(NAME test_tiny_amax_scale_host COMMAND test_tiny_amax_scale_host)
