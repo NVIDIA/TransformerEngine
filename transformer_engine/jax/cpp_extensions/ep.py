@@ -18,7 +18,7 @@ import functools
 import os
 import warnings
 from dataclasses import dataclass
-from typing import NamedTuple, Union
+from typing import NamedTuple, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -240,24 +240,53 @@ def empty_token_scale(tokens):
     return jnp.zeros(tokens.shape[:-1] + (0,), jnp.float8_e8m0fnu)
 
 
+def _normalize_ep_axes(ep_axis: Union[str, Tuple[str, ...]]) -> Tuple[str, ...]:
+    """Normalize a physical EP mesh axis or axis tuple."""
+    axes = (ep_axis,) if isinstance(ep_axis, str) else ep_axis
+    if not isinstance(axes, tuple):
+        raise ValueError(f"ep_axis must be a mesh axis name or tuple of names, got {ep_axis!r}")
+    if not axes or any(not isinstance(axis, str) or not axis for axis in axes):
+        raise ValueError(
+            f"ep_axis must be a mesh axis name or non-empty tuple of names, got {ep_axis!r}"
+        )
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"ep_axis must not contain duplicate mesh axes, got {ep_axis!r}")
+    return axes
+
+
+def _ep_axis_entry(ep_axes: Tuple[str, ...]):
+    """Return the PartitionSpec entry for normalized EP axes."""
+    return ep_axes[0] if len(ep_axes) == 1 else ep_axes
+
+
+def _resolve_ep_axes(resource=None) -> Tuple[str, ...]:
+    """Resolve the EP axes of ``resource``, falling back to the active MeshResource."""
+    resource = global_mesh_resource() if resource is None else resource
+    if resource.ep_resource is None:
+        raise ValueError("EP mesh axes must be set as MeshResource.ep_resource.")
+    return _normalize_ep_axes(resource.ep_resource)
+
+
 def _fsdp_outer_axes(resource):
     """FSDP axes of ``resource`` that count as EP outer axes, as a tuple."""
     fsdp_resource = resource.fsdp_resource
+    ep_axes = _resolve_ep_axes(resource)
     if isinstance(fsdp_resource, tuple):
-        # A dense FSDP tuple may include the EP axis, which never counts as an outer axis.
-        return tuple(axis for axis in fsdp_resource if axis != resource.ep_resource)
-    return () if fsdp_resource is None else (fsdp_resource,)
+        # A dense FSDP tuple may include EP axes, which never count as outer axes.
+        return tuple(axis for axis in fsdp_resource if axis not in ep_axes)
+    return () if fsdp_resource is None or fsdp_resource in ep_axes else (fsdp_resource,)
 
 
-def _capture_ep_resource_axes():
+def _capture_ep_resource_axes(resource=None):
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
-    resource = global_mesh_resource()
+    resource = global_mesh_resource() if resource is None else resource
+    ep_axes = _resolve_ep_axes(resource)
     outer_axes = tuple(
         dict.fromkeys(
             axis for axis in (resource.dp_resource, *_fsdp_outer_axes(resource)) if axis is not None
         )
     )
-    return resource.ep_resource, outer_axes
+    return _ep_axis_entry(ep_axes), tuple(a for a in outer_axes if a not in ep_axes)
 
 
 def _leading_axis_ok(spec, resource_axes=None, mesh=None):
@@ -273,22 +302,13 @@ def _leading_axis_ok(spec, resource_axes=None, mesh=None):
     elts = leading if isinstance(leading, tuple) else (leading,)
     elts = tuple(axis for axis in elts if axis is not None)
     # JAX canonicalizes size-one mesh axes out of partition specs.
-    if ep_axis not in elts and (mesh is None or mesh.shape.get(ep_axis) != 1):
+    if not all(
+        axis in elts or (mesh is not None and mesh.shape.get(axis) == 1)
+        for axis in _normalize_ep_axes(ep_axis)
+    ):
         return False, ep_axis, outer_axes
-    allowed = set(outer_axes) | {ep_axis}
+    allowed = set(outer_axes) | set(_normalize_ep_axes(ep_axis))
     return all(a in allowed for a in elts), ep_axis, outer_axes
-
-
-def _ep_outer_axis():
-    """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
-    resource = global_mesh_resource()
-    fsdp_axes = _fsdp_outer_axes(resource)
-    fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
-    if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
-        return resource.dp_resource
-    if fsdp_resource is not None and get_mesh_axis_size(fsdp_resource) > 1:
-        return fsdp_resource
-    return resource.dp_resource or fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
@@ -305,7 +325,7 @@ def _ep_output_spec(*trailing, resource_axes=None):
     ep_axis, outer_axes = (
         resource_axes if resource_axes is not None else _capture_ep_resource_axes()
     )
-    leading = (*outer_axes, ep_axis) if outer_axes else ep_axis
+    leading = (*outer_axes, *_normalize_ep_axes(ep_axis)) if outer_axes else ep_axis
     return PartitionSpec(leading, *trailing)
 
 
@@ -321,7 +341,7 @@ def _ep_spec_ok(spec, trailing_count, resource_axes=None):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     actual = frozenset(a for a in elts if a is not None)
-    return actual <= set((*outer_axes, ep_axis))
+    return actual <= set((*outer_axes, *_normalize_ep_axes(ep_axis)))
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────

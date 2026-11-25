@@ -25,8 +25,8 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded
-  ``((*data_parallelism_axes, ep_axis), None, None)``. The public
+* Inbound activations are 2D ``[T, H]`` or 3D ``[B, S, H]`` sharded
+  ``((outer_dp_axes..., ep_axes...), None, None)``. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP, grouped-quantize, and grouped-GEMM primitives operate at global
@@ -43,6 +43,7 @@ import math
 import warnings
 from dataclasses import replace
 from functools import partial
+from collections.abc import Mapping
 from typing import Any, Optional, Tuple, Union
 
 import flax.struct
@@ -53,6 +54,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
+from .cpp_extensions.activation import ActivationParams
 from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
@@ -80,6 +82,26 @@ __all__ = [
     "get_moe_recv_capacity_per_rank",
     "moe",
 ]
+
+
+def _resolve_moe_activation_params(activation_type, activation_params):
+    if activation_params is None:
+        activation_params = {}
+    if not isinstance(activation_params, Mapping):
+        raise TypeError("activation_params must be a mapping or None")
+    if activation_type != "situglu":
+        if activation_params:
+            raise ValueError("activation_params are only supported for activation_type='situglu'")
+        return ActivationParams()
+    unknown = activation_params.keys() - {"gate_beta", "up_beta"}
+    if unknown:
+        raise ValueError(f"Unsupported SiTU activation_params: {sorted(unknown, key=str)}")
+    return ActivationParams.create("situglu", **activation_params)
+
+
+def _fused_glu_activation_kwargs(activation_type, act_params, *, backward=False):
+    act_func = "situglu" if activation_type == "situglu" else "swiglu"
+    return {"act_func": ("d" if backward else "") + act_func, "act_params": act_params}
 
 
 @flax.struct.dataclass
@@ -141,7 +163,8 @@ class RoutingMapInfo:
     Parameters
     ----------
     routing_indices : jnp.ndarray
-        Integer expert indices with shape ``[batch, sequence, top_k]``.
+        Integer expert indices with shape ``[batch, sequence, top_k]``, or
+        ``[tokens, top_k]`` for a ``[tokens, hidden]`` input.
         Non-differentiable. Each token's ``top_k`` indices must be distinct,
         otherwise the default receive-capacity bound is invalid.
     routing_weights : jnp.ndarray
@@ -162,7 +185,10 @@ def _num_experts_per_tok(router_info: Union[RouterComputationInfo, RoutingMapInf
 
 def _moe_mesh_axes(resource: MeshResource):
     """Resolve physical MoE axes, keeping EP innermost in the batch shard."""
-    if not isinstance(resource.ep_resource, str) or not resource.ep_resource:
+    if resource.ep_resource is None:
+        raise ValueError("TE MoE requires MeshResource.ep_resource to name physical mesh axes.")
+    ep_axes = tex.ep._normalize_ep_axes(resource.ep_resource)
+    if not ep_axes:
         raise ValueError("TE MoE requires MeshResource.ep_resource to name a physical mesh axis.")
     outer_axes = tuple(
         dict.fromkeys(
@@ -171,7 +197,7 @@ def _moe_mesh_axes(resource: MeshResource):
     )
     if any(not isinstance(axis, str) or not axis for axis in outer_axes):
         raise ValueError("TE MoE DP and FSDP resources must name physical mesh axes.")
-    if resource.ep_resource in outer_axes:
+    if any(axis in outer_axes for axis in ep_axes):
         raise ValueError("TE MoE EP and outer data-parallel axes must be distinct.")
     return resource.ep_resource, outer_axes
 
@@ -213,7 +239,7 @@ _ALIGN_SIZE = 128
 _CUDNN_JAX_ALIGN_SIZE = 256
 
 
-def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
+def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="silu") -> bool:
     """Select shared cuDNN GLU/dGLU fusion or the unfused TE path."""
     from transformer_engine_jax import get_device_compute_capability
 
@@ -225,11 +251,18 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
     else:
         if capability < 100:
             reasons.append(f"fused kernels require SM100+, got SM{capability}")
+        is_situ = activation_type == "situglu"
+        if is_situ and capability not in (100, 103):
+            reasons.append(f"SiTU fusion requires SM100/SM103, got SM{capability}")
         if not reasons:
-            available, error = tex.grouped_gemm_glu_dependencies_available()
+            available, error = tex.grouped_gemm_glu_dependencies_available(
+                act_func="situglu" if is_situ else "swiglu"
+            )
             if available:
                 return True
             reasons.append(f"shared fused API is incompatible: {error}")
+    if activation_type == "situglu":
+        raise ValueError("SiTU requires cuDNN MXFP8 fusion: " + "; ".join(reasons))
     warnings.warn(
         "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
         + "; ".join(reasons)
@@ -254,8 +287,8 @@ def _cudnn_jax_fusion_rejection_reasons(
 ) -> list[str]:
     """Return reasons this call cannot use cuDNN's shared grouped GLU/dGLU JAX APIs."""
     errors = []
-    if str(activation_type).lower() != "silu":
-        errors.append("requires activation_type='silu'")
+    if activation_type != "situglu" and str(activation_type).lower() != "silu":
+        errors.append("requires activation_type='silu' or 'situglu'")
     if wi_0_bias is not None or wi_1_bias is not None:
         errors.append("does not support FC1 gate/up bias")
     hidden = x.shape[-1]
@@ -299,8 +332,14 @@ def _cudnn_jax_fusion_rejection_reasons(
                 errors.append(f"unsupported MXFP8 payload dtype {quantizer.q_dtype} for {name}")
 
     mesh = _get_mesh()
-    if mesh is not None and not mesh.empty and ep_axis in mesh.shape:
-        num_local_experts = num_experts // mesh.shape[ep_axis]
+    if (
+        mesh is not None
+        and not mesh.empty
+        and all(a in mesh.shape for a in tex.ep._normalize_ep_axes(ep_axis))
+    ):
+        num_local_experts = num_experts // math.prod(
+            mesh.shape[a] for a in tex.ep._normalize_ep_axes(ep_axis)
+        )
         if num_local_experts > 1024:
             errors.append(f"requires at most 1024 local experts, got {num_local_experts}")
 
@@ -411,7 +450,7 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
 
 def _prepare_moe_input(
     x: jnp.ndarray,
-    ep_axis: str,
+    ep_axis: Union[str, Tuple[str, ...]],
     data_parallelism_axes: Tuple[str, ...],
     *,
     caller: str,
@@ -419,9 +458,9 @@ def _prepare_moe_input(
     """Validate and constrain an MoE input to the EP communication layout.
 
     NCCL EP forms communication groups from consecutive global ranks, with
-    ``ep_axis`` as the innermost component of the compound leading mesh axis.
+    the EP axes as the innermost components of the compound leading mesh axis.
     The expected activation layout is therefore
-    ``P((*data_parallelism_axes, ep_axis), None, None)``. If ``x`` has an
+    ``P((*data_parallelism_axes, *ep_axes), None, None)``. If ``x`` has an
     incompatible known sharding, this function warns before inserting the
     reshard. The custom constraint also keeps the backward cotangent in the
     input activation dtype.
@@ -430,8 +469,8 @@ def _prepare_moe_input(
     ----------
     x : jnp.ndarray
         Rank-3 MoE input activation.
-    ep_axis : str
-        Physical mesh axis used for expert parallelism.
+    ep_axis : Union[str, Tuple[str, ...]]
+        Physical mesh axis, or ordered tuple of axes, used for expert parallelism.
     data_parallelism_axes : Tuple[str, ...]
         Physical outer data-parallel mesh axes.
     caller : str
@@ -445,11 +484,12 @@ def _prepare_moe_input(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError(f"{caller}(...) requires an active jax.sharding.Mesh.")
-    for axis in (ep_axis, *data_parallelism_axes):
+    ep_axes = tex.ep._normalize_ep_axes(ep_axis)
+    for axis in (*ep_axes, *data_parallelism_axes):
         if axis not in mesh.shape:
             raise ValueError(f"TE MoE resource axis {axis!r} is not in the active mesh.")
 
-    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
+    expected_leading: Any = (*data_parallelism_axes, *ep_axes) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
@@ -929,6 +969,7 @@ def _ffn_fwd_per_shard(
     fsdp_size: int,
     wi_fsdp_axis: Optional[int],
     wo_fsdp_axis: Optional[int],
+    act_params: ActivationParams = ActivationParams(),
 ):
     """Run the grouped FFN on one shard's EP receive buffer.
 
@@ -1009,6 +1050,7 @@ def _ffn_fwd_per_shard(
             prob,
             compute_dtype=compute_dtype,
             output_dtype=fc2_quantizer_set.x.q_dtype,
+            **_fused_glu_activation_kwargs(activation_type, act_params),
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], combined)
         if wi_0_checkpoint_name is not None:
@@ -1082,8 +1124,8 @@ def _ffn_fwd_per_shard(
     # dtype the wo GEMM / wo's quantized input consumes. For bf16 compute
     # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
     # transitions to the target precision.
-    act_fn = _convert_to_activation_function(activation_type)
     if not use_cudnn_jax_fusion:
+        act_fn = _convert_to_activation_function(activation_type)
         intermediate = act_fn(gate_proj_out) * up_proj_out
     if apply_topk_weights_early and not use_cudnn_jax_fusion:
         # Fold the per-token combine weights into the FFN intermediate;
@@ -1148,6 +1190,7 @@ def _ffn_bwd_per_shard(
     has_bias: bool,
     use_cudnn_jax_fusion: bool,
     cudnn_native_weight_layout: bool,
+    act_params: ActivationParams = ActivationParams(),
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
@@ -1195,6 +1238,7 @@ def _ffn_bwd_per_shard(
             padded_offsets,
             prob,
             output_dtype=fc1_quantizer_set.dgrad.q_dtype,
+            **_fused_glu_activation_kwargs(activation_type, act_params, backward=True),
         )
         d_recv_w_from_intermediate = (
             dprob.astype(recv_w_flat.dtype)
@@ -1358,6 +1402,7 @@ def _moe_fwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    act_params: ActivationParams = ActivationParams(),
 ):
     """Forward: [gate -> route ->] ep_dispatch -> FFN -> ep_combine.
 
@@ -1378,7 +1423,7 @@ def _moe_fwd_rule(
             raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
         if ep_axis is None:
             raise ValueError("moe(...) requires ep_axis to be set (TE EP backend).")
-        num_ep = mesh.shape[ep_axis]
+        num_ep = math.prod(mesh.shape[a] for a in tex.ep._normalize_ep_axes(ep_axis))
         if num_experts % num_ep != 0:
             raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
         num_local_experts = num_experts // num_ep
@@ -1472,7 +1517,7 @@ def _moe_fwd_rule(
             # ep must be innermost: ep_bootstrap forms NCCL EP comms from
             # consecutive global ranks (dp_color = rank // ep_size), so the
             # comm only stays within one model replica under (outer_dp, ep).
-            batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+            batch_pspec_axis = (*data_parallelism_axes, *tex.ep._normalize_ep_axes(ep_axis))
         ep3_spec = P(batch_pspec_axis, None, None)
         ep2_spec = P(batch_pspec_axis, None)
         x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
@@ -1682,6 +1727,7 @@ def _moe_fwd_rule(
                 compute_dtype=x.dtype,
                 num_local_experts=num_local_experts,
                 activation_type=activation_type,
+                act_params=act_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
                 wi_0_checkpoint_name=wi_0_checkpoint_name,
@@ -1801,6 +1847,7 @@ def _moe_bwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion,
     cudnn_native_weight_layout,
+    act_params,
     residuals,
     cotangents,
 ):
@@ -1838,7 +1885,7 @@ def _moe_bwd_rule(
         if not data_parallelism_axes:
             batch_pspec_axis: Any = ep_axis
         else:
-            batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+            batch_pspec_axis = (*data_parallelism_axes, *tex.ep._normalize_ep_axes(ep_axis))
         ep3_spec = P(batch_pspec_axis, None, None)
         ep2_spec = P(batch_pspec_axis, None)
         out_partition_spec = (batch_pspec_axis, None, None)
@@ -1893,6 +1940,7 @@ def _moe_bwd_rule(
                 *args,
                 ctx.quantizer_sets,
                 activation_type=activation_type,
+                act_params=act_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 has_bias=has_bias,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
@@ -2091,7 +2139,7 @@ def _moe_aux_loss_bwd(ctx, d_aux_loss, K, num_experts, mesh, ep2_spec):
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 28)))
 def _moe(
     x,
     router_info,
@@ -2120,6 +2168,7 @@ def _moe(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    act_params: ActivationParams = ActivationParams(),
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -2149,6 +2198,7 @@ def _moe(
         quant_before_fsdp_ag,
         use_cudnn_fusion,
         cudnn_native_weight_layout,
+        act_params,
     )
     return primal
 
@@ -2187,6 +2237,7 @@ def moe(
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
     dispatch_quantizer: Optional[Quantizer] = None,
+    activation_params: Optional[dict] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2200,6 +2251,13 @@ def moe(
 
     Parameters
     ----------
+    activation_type : str
+        Gate activation (default ``"silu"``), or ``"situglu"`` for fused MXFP8
+        SiTU-GLU on SM100/SM103. Unsupported SiTU configurations raise ``ValueError``.
+    activation_params : Optional[dict]
+        Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
+        (default 25.0). Values must be finite and positive. Other activations
+        do not accept parameters.
     router_info : Union[RouterComputationInfo, RoutingMapInfo]
         :class:`RouterComputationInfo` makes TE compute the gate and top-k
         from the given router parameters. :class:`RoutingMapInfo` supplies
@@ -2242,7 +2300,8 @@ def moe(
         ``global_shard_guard`` context; an explicit resource takes precedence.
         One of these is required. Batch sharding combines ``dp_resource`` then
         ``fsdp_resource`` (omitting unset/duplicate axes), with ``ep_resource``
-        innermost. EP must be set and distinct from the outer axes.
+        innermost. EP must be set and distinct from the outer axes; it may be
+        an ordered tuple of axes that together form one EP domain.
     quant_before_fsdp_ag : bool
         Quantize expert-weight shards before gathering their MXFP8 data and
         scales on ``mesh_resource.fsdp_resource``. Default ``False`` gathers
@@ -2257,10 +2316,14 @@ def moe(
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
         Requires cuDNN Frontend >= 1.32.0 with compatible JAX APIs.
+        SiTU additionally requires SM100/SM103 and JAX GLU/dGLU APIs exposing
+        ``situ_beta1`` and ``situ_beta2`` with Frontend >= 1.33.0.
+        Ineligible SiTU calls raise
+        ``ValueError``; there is no unfused SiTU path.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.
-        Ineligible calls warn and fall back to TE's regular grouped-GEMM
-        implementation. API signatures and GPU capability determine support.
+        Except for SiTU, ineligible calls warn and fall back to TE's regular
+        grouped-GEMM implementation. API signatures and GPU capability determine support.
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
@@ -2294,9 +2357,24 @@ def moe(
         raise TypeError("use_cudnn_fusion must be a bool")
     if dispatch_quantizer is not None and not isinstance(dispatch_quantizer, Quantizer):
         raise TypeError("dispatch_quantizer must be a Quantizer or None")
+    act_params = _resolve_moe_activation_params(activation_type, activation_params)
+    if activation_type == "situglu" and not use_cudnn_fusion:
+        raise ValueError("SiTU requires use_cudnn_fusion=True")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
+    original_shape = x.shape
+    if x.ndim not in (2, 3):
+        raise ValueError(f"moe expects rank-2 or rank-3 input, got {x.shape}")
+    if x.ndim == 2:
+        x = x.reshape(x.shape[0], 1, x.shape[1])
+        if input_axes:
+            input_axes = (input_axes[0], None, input_axes[1])
+        if isinstance(router_info, RoutingMapInfo):
+            router_info = router_info.replace(
+                routing_indices=router_info.routing_indices[:, None],
+                routing_weights=router_info.routing_weights[:, None],
+            )
     ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
 
     if isinstance(router_info, RouterComputationInfo):
@@ -2351,7 +2429,9 @@ def moe(
                 activation_type=activation_type,
                 ep_axis=ep_axis,
             )
-            use_cudnn_jax_fusion = _select_cudnn_jax_fusion(rejection_reasons)
+            use_cudnn_jax_fusion = _select_cudnn_jax_fusion(
+                rejection_reasons, activation_type=activation_type
+            )
 
         output, aux_loss, total_recv_tokens, expert_counts = _moe(
             x,
@@ -2381,10 +2461,11 @@ def moe(
             quant_before_fsdp_ag,
             use_cudnn_fusion,
             cudnn_native_weight_layout,
+            act_params,
         )
         if not has_aux_loss:
             aux_loss = None
         assert (
             output.dtype == x.dtype
         ), f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
-        return output, aux_loss, total_recv_tokens, expert_counts
+        return output.reshape(original_shape), aux_loss, total_recv_tokens, expert_counts

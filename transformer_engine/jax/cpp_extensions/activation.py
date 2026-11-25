@@ -4,6 +4,7 @@
 """JAX/TE custom ops for activation"""
 
 from typing import Sequence, Union, Callable, Optional, Tuple
+import math
 import operator
 from functools import reduce, partial
 from dataclasses import dataclass
@@ -93,12 +94,26 @@ class ClampedSwigluParams:
 
 
 @dataclass(frozen=True)
+class SiTUParams:
+    """Soft caps for the gate and up branches of SiTU-GLU."""
+
+    gate_beta: float = 4.0
+    up_beta: float = 25.0
+
+    def __post_init__(self):
+        for name in ("gate_beta", "up_beta"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive, got {value}")
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True)
 class ActivationParams:
-    """Parameters for various activation functions.
-    Currently only Clamped SwiGLU activation has parameters.
-    """
+    """Parameters for activation functions."""
 
     clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
+    situglu: SiTUParams = SiTUParams()
 
     @staticmethod
     def create(activation_type, **kwargs):
@@ -110,11 +125,13 @@ class ActivationParams:
         }
         if activation_type in CLAMPED_ACTIVATION_TYPES:
             return ActivationParams(ClampedSwigluParams(**kwargs))
+        if activation_type == "situglu":
+            return ActivationParams(situglu=SiTUParams(**kwargs))
         return ActivationParams()  # Default params for activations without parameters
 
     def __hash__(self):
         """Custom hash function to ensure dataclass is hashable for jax jit to work"""
-        return hash((self.clamped_swiglu,))
+        return hash((self.clamped_swiglu, self.situglu))
 
     def to_ffi_lowering_dict(self):
         """Convert the activation parameters to a dictionary format for FFI lowering.

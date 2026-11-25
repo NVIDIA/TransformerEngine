@@ -6,6 +6,7 @@
 
 import importlib
 import inspect
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +15,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from utils import dtype_tols
+from transformer_engine.jax.cpp_extensions.activation import ActivationParams
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.ep import (
     EpLayerConfig,
@@ -33,6 +35,65 @@ from transformer_engine.jax.moe import (
     record_ep_bootstrap_signature_for_moe,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
+
+
+@pytest.mark.parametrize("soft_caps", [None, {"gate_beta": 2.0, "up_beta": 8.0}])
+def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_caps):
+    module = importlib.import_module("transformer_engine.jax.moe")
+    adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
+    params = module._resolve_moe_activation_params("situglu", soft_caps)
+    assert isinstance(params, ActivationParams)
+    calls = []
+    scales = jnp.ones((512,), dtype=jnp.uint8)
+
+    def fused(**kwargs):
+        calls.append(kwargs)
+        return dict(
+            c_tensor=jnp.ones((1, 64)),
+            d_tensor=jnp.ones((1, 32)),
+            d_col_tensor=jnp.ones((1, 32)),
+            d_row_tensor=jnp.ones((1, 64)),
+            dprob_tensor=jnp.ones((1,)),
+            sfd_row_tensor=scales,
+            sfd_col_tensor=scales,
+        )
+
+    cudnn = SimpleNamespace(
+        grouped_gemm_glu_wrapper_sm100=fused, grouped_gemm_dglu_wrapper_sm100=fused
+    )
+    original_import = importlib.import_module
+    monkeypatch.setattr(
+        adapter.importlib,
+        "import_module",
+        lambda name: cudnn if name == "cudnn" else original_import(name),
+    )
+    adapter.grouped_gemm_glu(
+        jnp.ones((1, 32, 1)),
+        jnp.ones((1, 64, 32)),
+        scales,
+        scales,
+        jnp.asarray([1]),
+        jnp.ones((1,)),
+        compute_dtype=jnp.bfloat16,
+        output_dtype=jnp.float8_e4m3fn,
+        **module._fused_glu_activation_kwargs("situglu", params),
+    )
+    adapter.grouped_gemm_dglu(
+        jnp.ones((1, 32)),
+        jnp.ones((1, 32, 32)),
+        jnp.ones((1, 64)),
+        scales,
+        scales,
+        jnp.asarray([1]),
+        jnp.ones((1,)),
+        output_dtype=jnp.float8_e4m3fn,
+        **module._fused_glu_activation_kwargs("situglu", params, backward=True),
+    )
+    expected = soft_caps or {"gate_beta": 4.0, "up_beta": 25.0}
+    assert [call["act_func"] for call in calls] == ["situglu", "dsituglu"]
+    for call in calls:
+        assert call["situ_beta1"] == expected["gate_beta"]
+        assert call["situ_beta2"] == expected["up_beta"]
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +119,50 @@ def test_explicit_resource_overrides_global_and_is_snapshotted():
     explicit.ep_resource = "changed"
     assert _moe_mesh_axes(resolved) == ("ep", ("dp", "fsdp"))
     assert quantize is True
+
+
+def test_tuple_ep_resource():
+    resource, _ = _resolve_moe_mesh_resource(
+        MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource=("ep", "tp"))
+    )
+    assert _moe_mesh_axes(resource) == (("ep", "tp"), ("dp", "fsdp"))
+    with pytest.raises(ValueError, match="distinct"):
+        _resolve_moe_mesh_resource(MeshResource(fsdp_resource="tp", ep_resource=("ep", "tp")))
+
+
+@pytest.mark.parametrize(
+    "resource,outer_axes",
+    [
+        (
+            MeshResource(
+                dp_resource="dp", fsdp_resource=("ep", "fsdp", "tp"), ep_resource=("ep", "tp")
+            ),
+            ("dp", "fsdp"),
+        ),
+        (MeshResource(dp_resource="tp", fsdp_resource="ep", ep_resource=("ep", "tp")), ()),
+    ],
+)
+def test_ep_outer_axes_flatten_tuple_resources(resource, outer_axes):
+    """EP outer axes flatten a tuple FSDP resource and drop every axis of a tuple EP."""
+    from transformer_engine.jax.cpp_extensions import ep
+
+    with global_shard_guard(resource):
+        assert ep._capture_ep_resource_axes() == (("ep", "tp"), outer_axes)
+
+
+def test_tuple_resources_flatten_in_default_spec_and_sizes(monkeypatch):
+    """Tuple FSDP and EP resources give a flat default EP output spec and product sizes."""
+    from types import SimpleNamespace
+    from transformer_engine.jax import sharding
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    mesh = SimpleNamespace(shape={"fsdp": 2, "data": 2, "ep": 2, "tp": 2}, empty=False)
+    monkeypatch.setattr(sharding, "_get_mesh", lambda: mesh)
+    resource = MeshResource(fsdp_resource=("fsdp", "data", "ep"), ep_resource=("ep", "tp"))
+    with global_shard_guard(resource):
+        assert _default_out_partition_spec() == (("fsdp", "data", "ep", "tp"),)
+        assert sharding.ep_axis_size() == 4
+        assert sharding.get_active_resource_axis("ep_resource") == ("ep", "tp")
 
 
 def test_global_default_and_duplicate_outer_axis():
@@ -102,6 +207,23 @@ def test_ep_leading_axis_canonicalization(ep_size, expected):
     assert not ep._leading_axis_ok(P("fsdp", None, None), axes, missing_ep_mesh)[0]
 
 
+@pytest.mark.parametrize("tp_size,expected", [(1, True), (2, False)])
+def test_tuple_ep_leading_axis_canonicalization(tp_size, expected):
+    """A tuple EP axis may be absent from the spec only when its mesh size is one."""
+    from types import SimpleNamespace
+    from jax.sharding import PartitionSpec as P
+    from transformer_engine.jax.cpp_extensions import ep
+
+    mesh = SimpleNamespace(shape={"fsdp": 2, "ep": 2, "tp": tp_size})
+    axes = (("ep", "tp"), ("fsdp",))
+    assert ep._leading_axis_ok(P(("fsdp", "ep"), None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P("ep", None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P(("fsdp", "ep", "tp"), None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(("fsdp", "tp"), None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(None, None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(("fsdp", "ep"), None, None), axes)[0]
+
+
 def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     from types import SimpleNamespace
     from jax.sharding import NamedSharding, PartitionSpec as P
@@ -139,32 +261,38 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     "fsdp_resource,outer_axis",
     [("fsdp", "fsdp"), (("fsdp", "ep"), "fsdp"), (("ep", "fsdp"), "fsdp"), (("ep",), None)],
 )
-def test_ep_outer_axis_excludes_ep_from_fsdp_tuple(monkeypatch, fsdp_resource, outer_axis):
-    from types import SimpleNamespace
-    from transformer_engine.jax import sharding
-    from transformer_engine.jax.cpp_extensions import ep
+def test_default_ep_out_spec_excludes_ep_from_fsdp_tuple(fsdp_resource, outer_axis):
     from transformer_engine.jax.ep import _default_out_partition_spec
 
-    monkeypatch.setattr(sharding, "_get_mesh", lambda: SimpleNamespace(shape={"fsdp": 2, "ep": 4}))
     with global_shard_guard(MeshResource(fsdp_resource=fsdp_resource, ep_resource="ep")):
-        assert ep._ep_outer_axis() == outer_axis
         leading = (outer_axis, "ep") if outer_axis is not None else "ep"
         assert _default_out_partition_spec() == (leading,)
 
 
-def test_default_ep_out_spec_flattens_two_outer_fsdp_axes(monkeypatch):
+def test_default_ep_out_spec_flattens_two_outer_fsdp_axes():
     from types import SimpleNamespace
-    from transformer_engine.jax import sharding
     from transformer_engine.jax.cpp_extensions import ep
     from transformer_engine.jax.ep import _default_out_partition_spec
 
     mesh = SimpleNamespace(shape={"fsdp1": 2, "fsdp2": 2, "ep": 2})
-    monkeypatch.setattr(sharding, "_get_mesh", lambda: mesh)
     resource = MeshResource(fsdp_resource=("fsdp1", "fsdp2", "ep"), ep_resource="ep")
     with global_shard_guard(resource):
-        assert ep._ep_outer_axis() == ("fsdp1", "fsdp2")
         spec = _default_out_partition_spec()
     assert spec == (("fsdp1", "fsdp2", "ep"),)
+    assert ep._leading_per_shard((16, 4), spec[0], mesh) == (2, 4)
+
+
+def test_default_ep_out_spec_uses_dp_and_fsdp():
+    """The default EP out spec shards over dp and fsdp, as ep_bootstrap counts EP groups."""
+    from types import SimpleNamespace
+    from transformer_engine.jax.cpp_extensions import ep
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    mesh = SimpleNamespace(shape={"dp": 2, "fsdp": 2, "ep": 2})
+    resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")
+    with global_shard_guard(resource):
+        spec = _default_out_partition_spec()
+    assert spec == (("dp", "fsdp", "ep"),)
     assert ep._leading_per_shard((16, 4), spec[0], mesh) == (2, 4)
 
 
@@ -344,10 +472,14 @@ def test_invalid_resource(resource, quantize, error):
 
 
 def test_bool_and_resource_types():
+    from transformer_engine.jax.ep import ep_bootstrap
+
     with pytest.raises(TypeError, match="must be a bool"):
         _resolve_moe_mesh_resource(MeshResource(ep_resource="ep"), "true")
     with pytest.raises(TypeError, match="must be a MeshResource"):
         _resolve_moe_mesh_resource("ep")
+    with pytest.raises(TypeError, match="must be a MeshResource"):
+        ep_bootstrap(None, None, 2, 1, 1, 1, mesh_resource="ep")
 
 
 @pytest.mark.parametrize("quantize", [False, True])

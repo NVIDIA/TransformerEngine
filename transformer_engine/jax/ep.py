@@ -14,9 +14,10 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
+from transformer_engine.jax.cpp_extensions.ep import _normalize_ep_axes
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
+    MeshResource,
     _get_mesh,
     get_num_devices_in_mesh,
     global_mesh_resource,
@@ -85,11 +86,13 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
         def device_to_rank(d):
             return d.process_index
 
-    ep_pos = mesh.axis_names.index(ep_resource)
-    ep_size = mesh.shape[ep_resource]
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_positions = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
+    non_ep_positions = tuple(i for i in range(len(mesh.axis_names)) if i not in ep_positions)
+    ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
-    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
-    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
+    # Move EP axes last in their declared order and flatten them into one domain.
+    grid = np.transpose(ranks, non_ep_positions + ep_positions).reshape(-1, ep_size)
     loc = np.argwhere(grid == rank)
     if loc.shape[0] != 1:
         raise ValueError(
@@ -103,15 +106,17 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
 def _ep_flattened_replica_groups(mesh, ep_resource):
     """FLATTENED_ID replica groups for the EP axis, as a flat int64 array.
 
-    Each group fixes all non-ep mesh coordinates and varies ep. Returns
-    ``(flat_groups, ep_size)``.
+    Each group fixes all non-EP mesh coordinates and varies the ordered EP
+    axes. Returns ``(flat_groups, ep_size)``.
     """
     shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    ep_pos = mesh.axis_names.index(ep_resource)
-    ep_size = shape[ep_pos]
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_pos = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
+    non_ep_pos = tuple(i for i in range(len(shape)) if i not in ep_pos)
+    ep_size = int(np.prod([shape[i] for i in ep_pos]))
     world = int(np.prod(shape))
     grid = np.arange(world, dtype=np.int64).reshape(shape)
-    groups = np.moveaxis(grid, ep_pos, -1).reshape(-1, ep_size)
+    groups = np.transpose(grid, non_ep_pos + ep_pos).reshape(-1, ep_size)
     return groups.reshape(-1), ep_size
 
 
@@ -125,15 +130,15 @@ def ep_bootstrap(
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
     drop_on_overflow=False,
+    mesh_resource=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
-    Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
-    num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
-    and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
-    cp, ...) are supported and replicated across EP tensors. Auto-selects
-    between self-hosted NCCL and XLA's borrowed comm (see
-    tex.ep.use_nccl_comm_from_xla).
+    Must run inside an active JAX Mesh. ``mesh_resource`` names the EP and
+    outer DP/FSDP mesh axes, as for ``moe``; axes outside the ordered EP axes
+    form separate EP domains. The communicator is auto-selected between
+    self-hosted NCCL and XLA's borrowed comm (see
+    ``tex.ep.use_nccl_comm_from_xla``).
     At EP>1, multiple local devices require the XLA borrowed communicator path.
 
     Args:
@@ -155,7 +160,11 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it. Unused
             at EP=1.
+        mesh_resource: MeshResource naming the EP and outer DP/FSDP mesh axes.
+            ``None`` uses the active global_shard_guard.
     """
+    if mesh_resource is not None and not isinstance(mesh_resource, MeshResource):
+        raise TypeError("mesh_resource must be a MeshResource or None.")
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
@@ -164,12 +173,13 @@ def ep_bootstrap(
             f" {jnp.dtype(max_token_dtype)}."
         )
 
-    gsr = global_mesh_resource()
-    ep_resource = gsr.ep_resource
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    ep_resource = resource.ep_resource
     if ep_resource is None:
         raise ValueError(
-            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
-            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
+            "ep_bootstrap requires MeshResource.ep_resource to be set; pass"
+            " mesh_resource=MeshResource(..., ep_resource=<axis name>) or enter a"
+            " global_shard_guard before bootstrap."
         )
     mesh = _get_mesh()
     if mesh.empty:
@@ -184,11 +194,12 @@ def ep_bootstrap(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
             f" world_size ({world_size})."
         )
-    ep_size = get_mesh_axis_size(ep_resource)
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    outer_axis = _ep_outer_axis()
-    num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
+    _, outer_axes = tex.ep._capture_ep_resource_axes(resource)
+    num_ep_groups = int(np.prod([get_mesh_axis_size(a) for a in outer_axes]))
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
 
@@ -313,15 +324,10 @@ def ep_finalize():
 
 
 def _default_out_partition_spec():
-    """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
-    gsr = global_mesh_resource()
-    if gsr.ep_resource is None:
-        raise ValueError(
-            "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
-        )
-    outer = _ep_outer_axis()
-    outer_axes = (outer,) if isinstance(outer, str) else outer or ()
-    leading = (*outer_axes, gsr.ep_resource) if outer_axes else gsr.ep_resource
+    """Leading-axis default: every DP/FSDP outer axis, then EP, as counted by ``ep_bootstrap``."""
+    _, outer_axes = tex.ep._capture_ep_resource_axes()
+    leading_axes = (*outer_axes, *tex.ep._resolve_ep_axes())
+    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
 
 
