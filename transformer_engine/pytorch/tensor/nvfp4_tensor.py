@@ -27,7 +27,7 @@ from ..utils import (
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -548,15 +548,6 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
 
-    def clone(self) -> NVFP4Tensor:
-        # pylint: disable=missing-function-docstring
-        init_kwargs = {
-            name: value.detach().clone()
-            for name, value in self.get_metadata().items()
-            if isinstance(value, torch.Tensor)
-        }
-        return _IdentityFunc.apply(self, init_kwargs)
-
     def view(self, *shape: Tuple[int]) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
@@ -877,9 +868,6 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 nvfp4_use_4over6=tensor._nvfp4_use_4over6,
                 nvfp4_e4m3_max=tensor._nvfp4_e4m3_max,
             )
-
-        if func == torch.ops.aten.clone.default:
-            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

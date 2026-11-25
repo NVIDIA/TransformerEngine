@@ -20,7 +20,7 @@ from .storage.float8_blockwise_tensor_storage import (
 )
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import safe_quantized_repr
 from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -362,15 +362,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             return _FromFloat8BlockwiseFunc.apply(self, dequant_dtype)
         return _FromFloat8BlockwiseFunc.forward(None, self, dequant_dtype)
 
-    def clone(self) -> Float8BlockwiseQTensor:
-        # pylint: disable=missing-function-docstring
-        init_kwargs = {
-            name: value.detach().clone()
-            for name, value in self.get_metadata().items()
-            if isinstance(value, torch.Tensor)
-        }
-        return _IdentityFunc.apply(self, init_kwargs)
-
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
@@ -439,9 +430,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
-
-        if func == torch.ops.aten.clone.default:
-            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

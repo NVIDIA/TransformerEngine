@@ -322,9 +322,6 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
         if func == aten.detach.default:
             return args[0].detach()
 
-        if func == aten.clone.default:
-            return args[0].clone()
-
         if func in (
             aten.view.default,
             aten.split.Tensor,

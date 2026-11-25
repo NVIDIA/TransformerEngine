@@ -39,7 +39,6 @@ _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten._to_copy.default,
     torch.ops.aten._pin_memory.default,
     torch.ops.aten.split.Tensor,
-    torch.ops.aten.clone.default,
 }
 
 
@@ -525,16 +524,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def clone(self) -> Float8Tensor:
-        # pylint: disable=missing-function-docstring
-        init_kwargs = {
-            name: value.detach().clone()
-            for name, value in self.get_metadata().items()
-            if isinstance(value, torch.Tensor)
-        }
-        init_kwargs["transpose_invalid"] = self._transpose_invalid
-        return _IdentityFunc.apply(self, init_kwargs)
-
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
@@ -903,8 +892,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
-        if func == torch.ops.aten.clone.default:
-            return cls.clone(args[0])
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
