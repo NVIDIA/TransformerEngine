@@ -72,13 +72,15 @@ __global__ void grouped_nvfp4_2d_quantize_transpose(const bf16* input, uint8_t* 
   const float2 inverse2{inverse, inverse};
   const size_t scale_base = offsets[expert] / 16;
   if (row_data) {
+    uint64_t packed_values = 0;
 #pragma unroll
     for (int p = 0; p < 4; ++p) {
       const auto packed = ptx::mul_cvt_bf16_to_fp4_4x<false>(
           *reinterpret_cast<const uint64_t*>(values + 4 * p), inverse2, 0);
-      *reinterpret_cast<fp4e2m1x4*>(row_data + (global_row + block_row + lane) * (cols / 2) +
-                                    col / 2 + 2 * p) = packed;
+      packed_values |= static_cast<uint64_t>(packed.__x) << (16 * p);
     }
+    *reinterpret_cast<uint64_t*>(row_data + (global_row + block_row + lane) * (cols / 2) +
+                                 col / 2) = packed_values;
     const size_t r = local_row + block_row + lane;
     const size_t c = col / 16;
     const size_t index =
@@ -86,15 +88,17 @@ __global__ void grouped_nvfp4_2d_quantize_transpose(const bf16* input, uint8_t* 
     row_scales[scale_base + index] = scale;
   }
   if (col_data) {
+    uint64_t packed_values = 0;
 #pragma unroll
     for (int p = 0; p < 4; ++p) {
 #pragma unroll
       for (int j = 0; j < 4; ++j) values[j] = tile[block_row + 4 * p + j][block_col + lane];
       const auto packed = ptx::mul_cvt_bf16_to_fp4_4x<false>(
           *reinterpret_cast<const uint64_t*>(values), inverse2, 0);
-      *reinterpret_cast<fp4e2m1x4*>(col_data + offsets[expert] / 2 + (col + lane) * (m / 2) +
-                                    (local_row + block_row) / 2 + 2 * p) = packed;
+      packed_values |= static_cast<uint64_t>(packed.__x) << (16 * p);
     }
+    *reinterpret_cast<uint64_t*>(col_data + offsets[expert] / 2 + (col + lane) * (m / 2) +
+                                 (local_row + block_row) / 2) = packed_values;
     const size_t r = col + lane;
     const size_t c = (local_row + block_row) / 16;
     const size_t index =
