@@ -187,10 +187,10 @@ class _AttentionGraph:
         """Describe a scalar using cuDNN's four-dimensional convention."""
         return self.add(name, tensor, (1, 1, 1, 1), (1, 1, 1, 1), output=output, by_value=by_value)
 
-    def matrix(
+    def tensor(
         self, name, tensor, fmt, heads, seqlen, cu_padded=None, columnwise=False, output=False
     ):
-        """Bind storage using the same matrix descriptors as support queries."""
+        """Bind storage using the same tensor descriptors as support queries."""
         data = _raw(tensor, columnwise)
         dim = (self.graph_b, heads, seqlen, tensor.shape[-1])
         offset_name = name + "_offset" if fmt == "thd" else ""
@@ -335,7 +335,7 @@ def _prepare_inputs(attn):
     ):
         cu = p["cu_seqlens_q_padded"] if name == "q" else p["cu_seqlens_kv_padded"]
         col = attn.mxfp8 and name == "v" and not attn.backward
-        attn.matrix(name, p[name], fmt, h, s, cu, col)
+        attn.tensor(name, p[name], fmt, h, s, cu, col)
         if attn.fp8:
             scale_fmt = p.get("qkv_scale_inv_format") or fmt
             attn.scale("descale_" + name, _descale(p[name], col), name, scale_fmt, col)
@@ -517,7 +517,7 @@ def _query_graph(config, backward):
     def spec(n, dim=(1, 1, 1, 1), stride=(1, 1, 1, 1), dtype="FLOAT", **kwargs):
         attn.specs[n] = _TensorSpec(tuple(dim), tuple(stride), dtype, **kwargs)
 
-    def matrix(n, fmt, h, s, d, dtype, packed="", output=False):
+    def tensor(n, fmt, h, s, d, dtype, packed="", output=False):
         dim = (attn.graph_b, h, s, d)
         if n in ("k", "v") and layout.startswith("paged_kv_"):
             dim = (getattr(config, "num_pages_" + n), h, getattr(config, "page_size_" + n), d)
@@ -563,7 +563,7 @@ def _query_graph(config, backward):
         ("k", attn.kv_format, attn.hg, attn.skv, attn.dq, parts[1] if len(parts) > 1 else parts[0]),
         ("v", attn.kv_format, attn.hg, attn.skv, attn.dv, parts[-1]),
     ):
-        matrix(n, fmt, h, s, d, types[DType.cast(config.qkv_dtype)], part)
+        tensor(n, fmt, h, s, d, types[DType.cast(config.qkv_dtype)], part)
         if attn.fp8:
             scale_fmt = name(QKVFormat, config.qkv_scale_inv_format) or fmt
             scale("descale_" + n, n, scale_fmt, attn.mxfp8 and n == "v" and not backward)
@@ -595,7 +595,7 @@ def _query_graph(config, backward):
             pages = getattr(config, "max_pages_per_seq_" + n)
             spec("page_table_" + n, (attn.b, 1, pages, 1), (pages, pages, 1, 1), "INT32")
     ofmt = name(QKVFormat, config.o_format) or attn.q_format
-    matrix(
+    tensor(
         "o", ofmt, attn.h, attn.sq, attn.dv, types[DType.cast(config.o_dtype)], output=not backward
     )
     stats("stats", output=not backward)
@@ -603,7 +603,7 @@ def _query_graph(config, backward):
         stats("max", output=True)
     if backward:
         dofmt = name(QKVFormat, config.do_format) or ofmt
-        matrix("do", dofmt, attn.h, attn.sq, attn.dv, types[DType.cast(config.do_dtype)])
+        tensor("do", dofmt, attn.h, attn.sq, attn.dv, types[DType.cast(config.do_dtype)])
         qfmt, kvfmt = _formats(grad_layout)
         parts = grad_layout.split("_")
         for n, fmt, h, s, d, part in (
@@ -611,18 +611,18 @@ def _query_graph(config, backward):
             ("dk", kvfmt, attn.hg, attn.skv, attn.dq, parts[1] if len(parts) > 1 else parts[0]),
             ("dv", kvfmt, attn.hg, attn.skv, attn.dv, parts[-1]),
         ):
-            matrix(n, fmt, h, s, d, types[DType.cast(config.dqkv_dtype)], part, output=True)
+            tensor(n, fmt, h, s, d, types[DType.cast(config.dqkv_dtype)], part, output=True)
         if attn.fp8:
             do_scale_fmt = name(QKVFormat, config.do_scale_inv_format) or dofmt
             scale("descale_do", "do", do_scale_fmt)
             if attn.mxfp8:
-                matrix("do_f16", dofmt, attn.h, attn.sq, attn.dv, types[DType.cast(config.o_dtype)])
+                tensor("do_f16", dofmt, attn.h, attn.sq, attn.dv, types[DType.cast(config.o_dtype)])
                 for n, fmt, h, s, d, dtype in (
                     ("q_t", attn.q_format, attn.h, attn.sq, attn.dq, config.qkv_dtype),
                     ("k_t", attn.kv_format, attn.hg, attn.skv, attn.dq, config.qkv_dtype),
                     ("do_t", dofmt, attn.h, attn.sq, attn.dv, config.do_dtype),
                 ):
-                    matrix(n, fmt, h, s, d, types[DType.cast(dtype)])
+                    tensor(n, fmt, h, s, d, types[DType.cast(dtype)])
                     sfmt = (
                         do_scale_fmt
                         if n == "do_t"
@@ -772,7 +772,7 @@ def get_fused_attn_backend(config):
         for direction_config, backward in configs:
             _query_graph(direction_config, backward).entry()
         fp8 = DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
-        return FusedAttnBackend.FP8 if fp8 else FusedAttnBackend.F16_arbitrary_seqlen, ""
+        return FusedAttnBackend.FP8 if fp8 else FusedAttnBackend.F16, ""
     except (cudnn.cudnnGraphNotSupportedError, ValueError) as exc:
         return FusedAttnBackend.No_Backend, str(exc)
 
@@ -843,7 +843,7 @@ def fused_attn_fwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
-    if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+    if fused_attention_backend == FusedAttnBackend["F16"]:
         rng_elts_per_thread = _F16_RNG_ELTS_PER_THREAD
     elif fused_attention_backend == FusedAttnBackend["FP8"]:
         rng_elts_per_thread = (
@@ -900,7 +900,7 @@ def fused_attn_fwd(
         out = _allocate(out_shape, p["fake_dtype"], attn.device, p["o_quantizer"])
         if p["o_format"] == "thd":
             _raw(out).zero_()
-        attn.matrix("o", out, p["o_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"], output=True)
+        attn.tensor("o", out, p["o_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"], output=True)
         stats_shape = (
             (attn.tq, attn.h, 1) if attn.ragged_stats else (attn.graph_b, attn.h, attn.sq, 1)
         )
@@ -1076,8 +1076,8 @@ def fused_attn_bwd(
     with torch.cuda.device(p["q"].device):
         attn = _AttentionGraph(p, backward=True)
         _prepare_inputs(attn)
-        attn.matrix("o", p["o"], p["o_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"])
-        attn.matrix("do", p["d_o"], p["do_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"])
+        attn.tensor("o", p["o"], p["o_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"])
+        attn.tensor("do", p["d_o"], p["do_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"])
         attn.stats("stats", stats)
         dq, dk, dv = _allocate_gradients(attn)
         qfmt, kfmt = _formats(p["dqkv_layout"])
@@ -1088,7 +1088,7 @@ def fused_attn_bwd(
         ):
             if fmt == "thd":
                 _raw(t).zero_()
-            attn.matrix(name, t, fmt, h, s, cu, output=True)
+            attn.tensor(name, t, fmt, h, s, cu, output=True)
         dbias = torch.empty(0, device=attn.device, dtype=p["fake_dtype"])
         if p["attn_bias"] is not None:
             # cuDNN requires row-major dBias even when the bias input is a strided view.
@@ -1104,7 +1104,7 @@ def fused_attn_bwd(
             attn.scale("descale_do", _descale(p["d_o"]), "do", do_scale_fmt)
             if attn.mxfp8:
                 do_f16 = next(aux)
-                attn.matrix(
+                attn.tensor(
                     "do_f16", do_f16, p["do_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"]
                 )
                 for name, t, fmt, h, s, cu in (
@@ -1112,7 +1112,7 @@ def fused_attn_bwd(
                     ("k_t", p["k"], attn.kv_format, attn.hg, attn.skv, p["cu_seqlens_kv_padded"]),
                     ("do_t", p["d_o"], p["do_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"]),
                 ):
-                    attn.matrix(name, t, fmt, h, s, cu, columnwise=True)
+                    attn.tensor(name, t, fmt, h, s, cu, columnwise=True)
                     scale_fmt = (
                         do_scale_fmt if name == "do_t" else p.get("qkv_scale_inv_format") or fmt
                     )

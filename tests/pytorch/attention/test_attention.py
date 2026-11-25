@@ -334,7 +334,7 @@ def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
         k=k,
         v=v,
         fake_dtype=dtype,
-        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        fused_attention_backend=FusedAttnBackend.F16,
         qkv_layout="_".join([qkv_format] * 3),
         o_format=qkv_format,
         attn_mask_type="causal",
@@ -639,7 +639,7 @@ def test_fused_attn_packed_backward(dtype, kv_format, batch):
         k=k,
         v=v,
         fake_dtype=dtype,
-        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        fused_attention_backend=FusedAttnBackend.F16,
         qkv_layout=layout,
         o_format="thd",
         attn_mask_type="padding",
@@ -710,7 +710,7 @@ def test_fused_attn_ragged_dropout(dtype, batch):
         k=k,
         v=v,
         fake_dtype=dtype,
-        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        fused_attention_backend=FusedAttnBackend.F16,
         qkv_layout="thd_thd_thd",
         o_format="thd",
         attn_mask_type="padding",
@@ -931,9 +931,7 @@ def test_fused_attn_python_backward_selection(monkeypatch, is_training, requires
     backend, message = get_fused_attn_backend(config)
     backward = is_training if requires_backward is None else requires_backward
     assert queried == ([False, True] if backward else [False])
-    assert backend == (
-        FusedAttnBackend.No_Backend if backward else FusedAttnBackend.F16_arbitrary_seqlen
-    )
+    assert backend == (FusedAttnBackend.No_Backend if backward else FusedAttnBackend.F16)
     assert message == ("unsupported backward" if backward else "")
 
 
@@ -1028,7 +1026,7 @@ def test_fused_attn_python_thd_learnable_support(
         assert backend == FusedAttnBackend.No_Backend
         assert "THD learnable softmax backward" in message
     else:
-        assert backend == FusedAttnBackend.F16_arbitrary_seqlen
+        assert backend == FusedAttnBackend.F16
         assert message == ""
 
 

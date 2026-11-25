@@ -1778,7 +1778,7 @@ def get_attention_backend(
         if (
             use_fused_attention
             and has_score_mod
-            and fused_attention_backend != FusedAttnBackend.F16_arbitrary_seqlen.value
+            and fused_attention_backend != FusedAttnBackend.F16.value
         ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
@@ -1852,7 +1852,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
+            fused_attention_backend == FusedAttnBackend.F16.value
             and attention_params.requires_backward
             and (device_compute_capability < (9, 0) or core_attention_bias_requires_grad)
         ):
@@ -1866,7 +1866,7 @@ def get_attention_backend(
         # revisit if a config uses B>2.
         SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
         is_sm90_f16_thd_backward = (
-            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
+            fused_attention_backend == FusedAttnBackend.F16.value
             and attention_params.requires_backward
             and qkv_format == "thd"
             and device_compute_capability == (9, 0)

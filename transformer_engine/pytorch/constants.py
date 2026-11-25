@@ -278,7 +278,7 @@ class FusedAttnBackend(enum.IntEnum):
     """
 
     No_Backend = int(tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend)
-    F16_arbitrary_seqlen = int(tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+    F16 = int(tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
     FP8 = int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)
 
     @classmethod
@@ -316,9 +316,10 @@ class FusedAttnBackend(enum.IntEnum):
 
 # Fail fast at import time if a new enumerator is added on the C++ side
 # without being mirrored above.
-assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(
-    tex.NVTE_Fused_Attn_Backend.__members__
-), (
+assert {
+    "NVTE_F16_arbitrary_seqlen" if member is FusedAttnBackend.F16 else f"NVTE_{member.name}"
+    for member in FusedAttnBackend
+} == set(tex.NVTE_Fused_Attn_Backend.__members__), (
     "FusedAttnBackend in python is out of sync with"
     " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
     " Please make sure TE C++ and python are in sync."

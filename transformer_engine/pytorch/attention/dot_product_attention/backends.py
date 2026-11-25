@@ -2102,7 +2102,7 @@ def _fused_attn_setup_ctx(
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
     bwd_args.fused_attention_backend = (
-        ctx_attrs["fused_attention_backend"] if fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+        ctx_attrs["fused_attention_backend"] if fp8 else FusedAttnBackend["F16"]
     )
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
@@ -2618,7 +2618,7 @@ class FusedAttention(torch.nn.Module):
     Standard attention and experimental score modification share graph lifecycle helpers.
     Plans are cached per device and tensor metadata; support queries do not compile plans.
 
-    FusedAttnBackend["F16_arbitrary_seqlen"]
+    FusedAttnBackend["F16"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
        cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
@@ -2822,7 +2822,7 @@ class FusedAttention(torch.nn.Module):
         use_FAv2_bwd = (
             self.use_FAv2_bwd
             and (core_attention_bias_type == "no_bias")
-            and (fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"])
+            and (fused_attention_backend == FusedAttnBackend["F16"])
         )
 
         if fp8:
@@ -2850,7 +2850,7 @@ class FusedAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                fp8 or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+                fp8 or fused_attention_backend == FusedAttnBackend["F16"]
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"

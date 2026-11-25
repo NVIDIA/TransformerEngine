@@ -92,7 +92,7 @@ def test_fused_backend_backward_requirement(monkeypatch, is_training, requires_b
     """Pass the autograd requirement to the fused backend independently of training."""
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
-    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16_arbitrary_seqlen.value, ""))
+    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16.value, ""))
     monkeypatch.setattr(dpa_utils, "_get_fused_attn_backend", probe)
     params = dpa_utils.AttentionParams(
         device=torch.device("cuda:0"),
@@ -193,7 +193,7 @@ def test_sm12x_fused_backend_restrictions(monkeypatch, capability, case):
     monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda _device: capability)
     version = (9, 18, 0) if case == "thd_version" else (9, 27, 0)
     monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: version)
-    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16_arbitrary_seqlen.value, ""))
+    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16.value, ""))
     monkeypatch.setattr(dpa_utils, "_get_fused_attn_backend", probe)
     options = dict(
         device=torch.device("cuda:0"),

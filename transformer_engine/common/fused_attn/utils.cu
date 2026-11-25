@@ -11,7 +11,6 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "transformer_engine/fused_attn.h"
-#include "transformer_engine/utils.h"
 #include "utils.h"
 
 namespace transformer_engine {
