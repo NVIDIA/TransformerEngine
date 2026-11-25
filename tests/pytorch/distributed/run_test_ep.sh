@@ -77,9 +77,15 @@ run_pass() {
 # get_nccl_comm_ptr branch. Torch builds without the classic backend (pytorch#205374)
 # ignore TORCH_DIST_USE_NCCL2=0, so this pass would only repeat the NCCL2 coverage.
 if [ "${NVTE_TEST_EP_CLASSIC_PG:-0}" = "1" ]; then
-  if ! python3 -c 'import torch, pathlib, sys; sys.exit(not (pathlib.Path(torch.__file__).parent / "include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp").exists())'; then
+  # Exit 3 means the header is missing; any other failure is a real error, not a skip.
+  python3 -c 'import torch, pathlib, sys; sys.exit(0 if (pathlib.Path(torch.__file__).parent / "include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp").exists() else 3)'
+  probe=$?
+  if [ "$probe" -eq 3 ]; then
     echo "SKIP classic_pg: this torch build has no classic ProcessGroupNCCL"
     exit 0
+  elif [ "$probe" -ne 0 ]; then
+    echo "classic_pg: probing torch for the classic ProcessGroupNCCL failed (exit $probe)"
+    exit 1
   fi
   TORCH_DIST_USE_NCCL2=0 run_pass "classic_pg" 0
   exit $RET
