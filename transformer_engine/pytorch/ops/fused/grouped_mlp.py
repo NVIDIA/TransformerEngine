@@ -3277,6 +3277,10 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_act_hadamard_quant_kernel(cls) -> Optional[Callable]:
         """Fused grouped GEMM activation kernel that also NVFP4 with RHT."""
+        # Older FE packs columnwise RHT scales incorrectly, corrupting wgrad in either layout.
+        # Remove this guard when the overall minimum FE version reaches 1.33.0.
+        if not _cudnn_frontend_version_at_least("1.33.0"):
+            return None
         from cudnn import (  # pylint: disable=no-name-in-module,import-outside-toplevel
             grouped_gemm_glu_hadamard_quant_wrapper_sm100,
         )
