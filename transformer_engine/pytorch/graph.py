@@ -581,15 +581,23 @@ def _make_graphed_callables(
 
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "backward_pre_hooks", func)
 
-        with _none_grad_context_wrapper(inputs):
-            torch.autograd.backward(outputs_requiring_grad, grad_tensors=grad_outputs)
-            grad_inputs = tuple(input.grad for input in inputs)
+        used_parameter_ids = set()
+        with contextlib.ExitStack() as parameter_hooks:
+            for parameter in per_callable_module_params[func_idx]:
+                if parameter.requires_grad:
+                    parameter_hooks.enter_context(
+                        parameter.register_hook(
+                            lambda _grad, parameter_id=id(parameter): used_parameter_ids.add(
+                                parameter_id
+                            )
+                        )
+                    )
+            with _none_grad_context_wrapper(inputs):
+                torch.autograd.backward(outputs_requiring_grad, grad_tensors=grad_outputs)
+                grad_inputs = tuple(input.grad for input in inputs)
 
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "backward_hooks", func)
 
-        # Filter module params that get None grad from grad_inputs and remove them
-        # from static_input_surface. This is to ensure that the backward hooks
-        # registered to these params are not wrongly triggered.
         num_required_grad_sample_args = sum(
             arg.requires_grad for arg in flatten_sample_args[func_idx]
         )
@@ -597,7 +605,7 @@ def _make_graphed_callables(
         for i, arg in enumerate(static_input_surface):
             if arg.requires_grad:
                 required_grad_input_idx.append(i)
-        module_params_with_grad = []
+        used_module_params = []
         for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
             if (
                 grad_inputs[grad_inputs_idx] is None
@@ -607,19 +615,19 @@ def _make_graphed_callables(
                     raise RuntimeError(
                         "The input tensor requires grad, but the grad is None after backward pass."
                     )
-            elif (
+            elif grad_inputs_idx >= num_required_grad_sample_args and (
                 grad_inputs[grad_inputs_idx] is not None
-                and grad_inputs_idx >= num_required_grad_sample_args
+                or id(static_input_surface[inputs_idx]) in used_parameter_ids
             ):
-                module_params_with_grad.append(static_input_surface[inputs_idx])
-        if len(module_params_with_grad) != len(per_callable_module_params[func_idx]):
+                used_module_params.append(static_input_surface[inputs_idx])
+        if len(used_module_params) != len(per_callable_module_params[func_idx]):
             if warmup_iter != 0:
                 raise RuntimeError(
                     "no-grad params should only be used as inputs in the first warmup"
                     f" iteration, but found in iteration {warmup_iter}"
                 )
-            per_callable_module_params[func_idx] = tuple(module_params_with_grad)
-            static_input_surface = flatten_sample_args[func_idx] + tuple(module_params_with_grad)
+            per_callable_module_params[func_idx] = tuple(used_module_params)
+            static_input_surface = flatten_sample_args[func_idx] + tuple(used_module_params)
             per_callable_static_input_surfaces[func_idx] = static_input_surface
 
         # Run wgrad. This is essential for some TE modules when they have

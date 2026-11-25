@@ -753,6 +753,89 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+@pytest.mark.parametrize("fused", (False, True))
+@pytest.mark.parametrize("with_order", (False, True))
+@pytest.mark.parametrize("requires_grad", (False, True))
+@pytest.mark.parametrize("repeated", (False, True))
+def test_make_graphed_callables_preserves_used_parameter_edges(
+    fused: bool, with_order: bool, requires_grad: bool, repeated: bool
+) -> None:
+    """Fused None gradients retain their hooks without connecting unused parameters."""
+    reset_rng_states()
+    linear = Linear(64, 64, bias=False, params_dtype=torch.float32, fuse_wgrad_accumulation=fused)
+    with torch.no_grad():
+        linear.weight.fill_(0.125)
+    linear.weight.main_grad = torch.zeros_like(linear.weight)
+    linear.weight.grad_added_to_main_grad = False
+    num_uses = 2 if repeated else 1
+    model = torch.nn.Sequential(*([linear] * num_uses))
+    unused = torch.nn.Parameter(torch.ones_like(linear.weight))
+    unused.grad_added_to_main_grad = True
+    model.register_parameter("unused", unused)
+    model.register_parameter(
+        "frozen", torch.nn.Parameter(torch.ones_like(linear.weight), requires_grad=False)
+    )
+    sample = torch.ones(32, 64, device="cuda", requires_grad=requires_grad)
+    if with_order:
+        graphs = make_graphed_callables(
+            (model,),
+            ((sample,), (sample.detach().clone().requires_grad_(requires_grad),)),
+            num_warmup_iters=2,
+            _order=[1, -1, 1, -1],
+            _num_layers_per_chunk=[1],
+            _reuse_graph_input_output_buffers=True,
+        )
+    else:
+        graphs = (make_graphed_callables(model, (sample,), num_warmup_iters=2),)
+
+    seen = {parameter: [] for parameter in model.parameters() if parameter.requires_grad}
+    handles = []
+    for parameter in seen:
+        assert not parameter._backward_hooks
+        handles.append(
+            parameter.register_hook(
+                lambda grad, parameter=parameter: seen[parameter].append(grad is None)
+            )
+        )
+    reference_weight = linear.weight.detach().clone().requires_grad_(True)
+    try:
+        for step in range(3):
+            model.zero_grad(set_to_none=True)
+            linear.weight.main_grad.zero_()
+            reference_weight.grad = None
+            for observations in seen.values():
+                observations.clear()
+            for microbatch, graph in enumerate(graphs):
+                inputs = torch.full_like(sample, step + microbatch + 1).requires_grad_(
+                    requires_grad
+                )
+                reference_inputs = inputs.detach().clone().requires_grad_(requires_grad)
+                expected = reference_inputs
+                for _ in range(num_uses):
+                    expected = torch.nn.functional.linear(expected, reference_weight)
+                expected.sum().backward()
+                output = graph(inputs)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                assert output.requires_grad
+                output.sum().backward()
+                assert seen[linear.weight] == [fused] * (microbatch + 1)
+                assert not seen[unused]
+                assert unused.grad is None
+                assert model.frozen.grad is None
+                if requires_grad:
+                    torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=0, atol=0)
+                if fused:
+                    assert linear.weight.grad is None
+                    actual_grad = linear.weight.main_grad
+                else:
+                    actual_grad = linear.weight.grad
+                torch.testing.assert_close(actual_grad, reference_weight.grad, rtol=0, atol=0)
+    finally:
+        for handle in handles:
+            handle.remove()
+        reset_graphs(graphs)
+
+
 def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
     """Parameter grads returned from graph replay must not alias static graph buffers."""
     reset_rng_states()
