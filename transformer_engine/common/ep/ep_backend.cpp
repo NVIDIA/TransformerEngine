@@ -465,6 +465,9 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
     std::snprintf(sm_buf, sizeof(sm_buf), "%d", device_sms);
     setenv("NCCL_EP_SHUFFLE_SMS", sm_buf, /*overwrite=*/0);
     setenv("NCCL_EP_PREPROCESS_NUM_SMS", sm_buf, /*overwrite=*/0);
+    // The signaled combine pushes its last chunk on its own SMs; 64 of them saturate NVLink.
+    constexpr char kCombinePushLastChunkSms[] = "64";
+    setenv("NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS", kCombinePushLastChunkSms, /*overwrite=*/0);
   });
 
   NVTE_CHECK_NCCL(nccl_ep::create_group(&ep_group_, ep_comm, &cfg));
