@@ -1482,12 +1482,6 @@ def make_graphed_callables(
     `original PyTorch implementation <https://pytorch.org/docs/stable/generated/torch.cuda.make_graphed_callables.html>`_
     for more documentation.
 
-    Capture setup and warmup clean up temporary hooks, module call wrappers,
-    saved RNG and FP8 state, and the capture flag on failure. If cleanup also
-    raises, the capture exception remains primary and the cleanup error is chained
-    to it. Capture temporarily changes class dispatch and must be serialized.
-    Fatal CUDA errors still require restarting the process.
-
     .. warning::
 
        Arguments 'fp8_enabled', 'fp8_calibrating', 'fp8_recipe', 'fp8_group', and 'fp8_weight_caching' are deprecated.
