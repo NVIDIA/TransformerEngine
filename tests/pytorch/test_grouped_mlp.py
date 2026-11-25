@@ -215,7 +215,6 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
             for name in ("sfa_tensor", "sfb_tensor"):
                 tensor = kwargs.get(name)
                 if tensor is not None:
-                    assert tensor.ndim == 1, name
                     assert tensor.is_contiguous(), name
             for name, rank in (("c_tensor", 2), ("prob_tensor", 1), ("dprob_tensor", 1)):
                 tensor = kwargs.get(name)

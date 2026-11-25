@@ -1028,13 +1028,6 @@ def _gate_then_up_launch_kwargs(kernel) -> dict:
     }
 
 
-def _flatten_cudnn_packed_scales(kwargs: dict) -> None:
-    """Expose packed scale bytes as flat views for the natural-rank API."""
-    for name in ("sfa_tensor", "sfb_tensor"):
-        if name in kwargs:
-            kwargs[name] = kwargs[name].view(-1)
-
-
 def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
     """Whether both GLU kernels accept canonical gate/up storage in a precision.
 
@@ -1962,9 +1955,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_activation_kwargs["b_dtype"] = data_dtype
                 fc1_activation_kwargs["b_major"] = "k"
 
-        if use_natural_layouts:
-            _flatten_cudnn_packed_scales(fc1_activation_kwargs)
-
         # Launch FC1 + act kernel
         # pylint: disable-next=not-callable
         fc1_kernel_out = fc1_kernel(**fc1_activation_kwargs)
@@ -2836,8 +2826,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_dtype"] = data_dtype
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
-        if use_natural_layouts:
-            _flatten_cudnn_packed_scales(fc2_dactivation_kwargs)
         fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
 
         if use_nvfp4:
