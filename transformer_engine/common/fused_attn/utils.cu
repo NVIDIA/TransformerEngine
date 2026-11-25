@@ -325,6 +325,38 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
   }
 }
 
+// pad cumulative buffers out to the bucketed batch size
+__global__ void pad_cu_seqlens_tails(PaddedCuSeqlensArgs args, int64_t actual_b, int64_t max_b) {
+  const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid > max_b) return;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    if (args.src[i] != nullptr) {
+      args.dst[i][tid] = args.src[i][tid < actual_b ? tid : actual_b];
+    }
+  }
+}
+
+size_t padded_cu_seqlens_workspace_size(int64_t max_b) {
+  return 4 * alignTo<16>((max_b + 1) * sizeof(int32_t));
+}
+
+void pad_direct_cu_seqlens(void *ptrs[4], const bool needed[4], int64_t actual_b, int64_t max_b,
+                           void *workspace, cudaStream_t stream) {
+  const size_t stride = alignTo<16>((max_b + 1) * sizeof(int32_t));
+  PaddedCuSeqlensArgs args;
+  for (int i = 0; i < 4; ++i) {
+    if (!needed[i]) continue;
+    args.src[i] = static_cast<const int32_t *>(ptrs[i]);
+    args.dst[i] = reinterpret_cast<int32_t *>(static_cast<int8_t *>(workspace) + i * stride);
+    ptrs[i] = args.dst[i];
+  }
+  constexpr int64_t nthreads_per_block = 128;
+  const int64_t grid = (max_b + nthreads_per_block) / nthreads_per_block;
+  pad_cu_seqlens_tails<<<grid, nthreads_per_block, 0, stream>>>(args, actual_b, max_b);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 // convert cu_seqlens to actual_seqlens
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
