@@ -27,7 +27,7 @@ from transformer_engine.pytorch import (
 )
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends, run_distributed
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
