@@ -245,12 +245,12 @@ class _AttentionGraph:
         )
         return name
 
-    def scale(self, name, tensor, matrix_name, fmt, columnwise=False):
+    def scale(self, name, tensor, tensor_name, fmt, columnwise=False):
         """Bind tensor scales or reordered MXFP8 block scales."""
         if not self.mxfp8:
             return self.scalar(name, tensor)
         self.tensors[name] = tensor
-        self.specs[name] = mxfp8_scale_spec(self.specs[matrix_name].dim, fmt, columnwise)
+        self.specs[name] = mxfp8_scale_spec(self.specs[tensor_name].dim, fmt, columnwise)
         return name
 
     def options(self):
@@ -551,11 +551,11 @@ def _query_graph(config, backward):
             ragged_offset_multiplier=attn.h if attn.ragged_stats and attn.use_cu_seqlens else 1,
         )
 
-    def scale(n, matrix_name, fmt, columnwise=False):
+    def scale(n, tensor_name, fmt, columnwise=False):
         if not attn.mxfp8:
             spec(n)
         else:
-            attn.specs[n] = mxfp8_scale_spec(attn.specs[matrix_name].dim, fmt, columnwise)
+            attn.specs[n] = mxfp8_scale_spec(attn.specs[tensor_name].dim, fmt, columnwise)
 
     parts = layout.removeprefix("paged_kv_").split("_")
     for n, fmt, h, s, d, part in (

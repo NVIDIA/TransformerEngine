@@ -20,7 +20,7 @@ from .base import _JAX_GSPMD_SUPPORTED
 
 
 def reorder_scale(scale, columnwise=False):
-    """Pad and reorder each logical BHSD scale matrix for cuDNN."""
+    """Pad and reorder the logical BHSD scale tensor for cuDNN."""
     scale = scale.view(jnp.uint8)
     padded, tiled, permutation = scale_reordering(scale.shape, columnwise)
     scale = jnp.pad(scale, tuple((0, target - size) for size, target in zip(scale.shape, padded)))

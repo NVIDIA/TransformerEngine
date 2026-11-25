@@ -216,7 +216,7 @@ _SCORE_MOD_FWD_SCALAR_UID_BASE = 3000
 _SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
 
 
-def _matrix_spec(cudnn, aval, output=False):
+def _tensor_spec(cudnn, aval, output=False):
     """Translate JAX's contiguous BSHD storage into a shared logical descriptor."""
     batch, seqlen, heads, dim = aval.shape
     return attention_tensor_spec(
@@ -441,10 +441,10 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
     )
     output_shape = (*q_aval.shape[:-1], v_aval.shape[-1])
     specs = {
-        "q": _matrix_spec(cudnn, q_aval),
-        "k": _matrix_spec(cudnn, k_aval),
-        "v": _matrix_spec(cudnn, v_aval),
-        "o": _matrix_spec(cudnn, jax.ShapeDtypeStruct(output_shape, q_aval.dtype), output=True),
+        "q": _tensor_spec(cudnn, q_aval),
+        "k": _tensor_spec(cudnn, k_aval),
+        "v": _tensor_spec(cudnn, v_aval),
+        "o": _tensor_spec(cudnn, jax.ShapeDtypeStruct(output_shape, q_aval.dtype), output=True),
     }
     output_names = ["o"]
     if config.is_training:
@@ -511,15 +511,15 @@ def _build_score_mod_bwd_graph(
         )
     )
     specs = {
-        "q": _matrix_spec(cudnn, q_aval),
-        "k": _matrix_spec(cudnn, k_aval),
-        "v": _matrix_spec(cudnn, v_aval),
-        "o": _matrix_spec(cudnn, output_aval),
-        "do": _matrix_spec(cudnn, doutput_aval),
+        "q": _tensor_spec(cudnn, q_aval),
+        "k": _tensor_spec(cudnn, k_aval),
+        "v": _tensor_spec(cudnn, v_aval),
+        "o": _tensor_spec(cudnn, output_aval),
+        "do": _tensor_spec(cudnn, doutput_aval),
         "stats": TensorSpec(tuple(stats_aval.shape), _row_major_stride(stats_aval.shape), "FLOAT"),
-        "dq": _matrix_spec(cudnn, q_aval, output=True),
-        "dk": _matrix_spec(cudnn, k_aval, output=True),
-        "dv": _matrix_spec(cudnn, v_aval, output=True),
+        "dq": _tensor_spec(cudnn, q_aval, output=True),
+        "dk": _tensor_spec(cudnn, k_aval, output=True),
+        "dv": _tensor_spec(cudnn, v_aval, output=True),
     }
     built = build_attention_graph(
         cudnn,

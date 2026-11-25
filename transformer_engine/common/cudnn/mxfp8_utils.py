@@ -47,8 +47,8 @@ def scale_reordering(shape, columnwise=False):
     """Describe padding and the F8_128x4 permutation of logical BHSD scales.
 
     Return the padded BHSD shape, the tiled reshape, and its permutation. The
-    frontend applies these operations to device arrays. Each batch/head matrix
-    is reordered independently, including columnwise scales.
+    frontend applies these operations to the scale tensor independently for
+    each batch and head, including for columnwise scales.
     """
     batch, heads, rows, cols = shape
     if columnwise:

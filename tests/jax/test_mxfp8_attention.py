@@ -32,7 +32,7 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 @pytest.mark.parametrize("columnwise", (False, True))
 @pytest.mark.parametrize("dim", ((2, 3, 128, 64), (1, 4, 256, 96), (2, 1, 384, 160)))
 def test_scale_reordering_matches_graph(dim, columnwise):
-    """Preparation and cuDNN agree on padding each batch/head scale matrix."""
+    """Preparation and cuDNN agree on scale tensor padding for each batch and head."""
     batch, heads, seqlen, head_dim = dim
     scale_shape = (
         (batch, heads, seqlen // 32, head_dim)
