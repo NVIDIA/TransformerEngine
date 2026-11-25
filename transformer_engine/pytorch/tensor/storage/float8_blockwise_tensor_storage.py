@@ -263,7 +263,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 q_K = q.shape[-1]
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
-            if self._block_scaling_rowwise_scale_layout == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT):
+            if self._block_scaling_rowwise_scale_layout == int(
+                tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+            ):
                 orig_shape = q.shape
                 q = q.reshape(q_M, q_K)
                 scale_inv = scale_inv.reshape(q_M, -1)

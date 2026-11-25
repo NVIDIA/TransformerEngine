@@ -1454,7 +1454,8 @@ void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTe
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
       break;
     case kNVTEGroupedBlockScalingRowwiseScaleLayout:
-      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->block_scaling_rowwise_scale_layout);
+      *reinterpret_cast<uint8_t *>(buf) =
+          static_cast<uint8_t>(t->block_scaling_rowwise_scale_layout);
       break;
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");

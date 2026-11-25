@@ -88,9 +88,8 @@ def test_grouped_quantizer_remains_gemm_ready():
     # Block128 grouped GEMM uses per-expert block-major scales without the
     # MXFP8-style 128x4 swizzle.
     assert not grouped._with_gemm_swizzled_scales
-    assert (
-        grouped._block_scaling_rowwise_scale_layout
-        == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY)
+    assert grouped._block_scaling_rowwise_scale_layout == int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
     )
     torch.testing.assert_close(grouped.scale_inv, expected_scales, rtol=0, atol=0)
 
@@ -113,7 +112,9 @@ def test_compact_layout_is_preserved_by_tensor_rebuild(rebuild):
         rebuilt = compact.__tensor_unflatten__(inner, context, compact.shape, compact.stride())
     else:
         rebuilt = pickle.loads(pickle.dumps(compact))
-    assert rebuilt._block_scaling_rowwise_scale_layout == int(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT)
+    assert rebuilt._block_scaling_rowwise_scale_layout == int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+    )
     torch.testing.assert_close(rebuilt.dequantize(), expected, rtol=0, atol=0)
 
 
@@ -136,8 +137,12 @@ def test_storage_only_compact_dequantize_does_not_need_quantizer():
         fake_dtype=torch.bfloat16,
     )
     expected = (
-        data.view(torch.float8_e4m3fn).float().view(rows, hidden // 128, 128)
-        * scales.unsqueeze(-1)
-    ).reshape(rows, hidden).bfloat16()
+        (
+            data.view(torch.float8_e4m3fn).float().view(rows, hidden // 128, 128)
+            * scales.unsqueeze(-1)
+        )
+        .reshape(rows, hidden)
+        .bfloat16()
+    )
     assert storage._quantizer is None
     torch.testing.assert_close(storage.dequantize(), expected, rtol=0, atol=0)

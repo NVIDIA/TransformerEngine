@@ -522,11 +522,10 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   NVTE_CHECK(last_logical_dim > 0 && last_logical_dim % kTileDim == 0,
              "Block scaling grouped requant requires hidden divisible by 128.");
   const size_t blocks = last_logical_dim / kTileDim;
-  const bool compact_scale_layout =
-      input.block_scaling_rowwise_scale_layout == detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
-  NVTE_CHECK(compact_scale_layout ||
-                 input.block_scaling_rowwise_scale_layout ==
-                     detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY,
+  const bool compact_scale_layout = input.block_scaling_rowwise_scale_layout ==
+                                    detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
+  NVTE_CHECK(compact_scale_layout || input.block_scaling_rowwise_scale_layout ==
+                                         detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY,
              "Block scaling grouped requant requires compact or GEMM-ready rowwise scales.");
   if (!compact_scale_layout) {
     NVTE_CHECK(input.scale_inv.numel() == first_logical_dim * blocks,

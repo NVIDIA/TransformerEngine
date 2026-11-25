@@ -756,9 +756,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,
-    block_scaling_rowwise_scale_layout: int = int(
-        tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
-    ),
+    block_scaling_rowwise_scale_layout: int = int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY),
     data_format: Any = None,  # pylint: disable=unused-argument
 ) -> Float8BlockwiseQTensor:
     """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""

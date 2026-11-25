@@ -1072,8 +1072,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   NVTE_CHECK(is_block_scale_1d || detail::IsMXFP8Quantizers(quantizer.ptr()),
              "Grouped requantization requires MXFP8 or block128 FP8.");
   if (is_block_scale_1d && !compact_block_scaling_rowwise_scale_layout &&
-      (!need_columnwise || has_columnwise) &&
-      !return_dequantized) {
+      (!need_columnwise || has_columnwise) && !return_dequantized) {
     return py::none();
   }
   const bool build_columnwise = need_columnwise && !has_columnwise;
@@ -1239,8 +1238,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
     }
     grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
-    grouped_x.attr("_block_scaling_rowwise_scale_layout") = py::cast(
-        static_cast<int>(transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
+    grouped_x.attr("_block_scaling_rowwise_scale_layout") = py::cast(static_cast<int>(
+        transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
     return return_dequantized ? py::cast(dequantized) : py::none();
   }
 

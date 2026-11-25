@@ -1272,8 +1272,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
-  kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(
-      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
+  kwargs["block_scaling_rowwise_scale_layout"] = py::cast(
+      static_cast<int>(transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
