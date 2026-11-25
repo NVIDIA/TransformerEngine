@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "common/util/logging.h"
 #include "cudnn_utils.h"
 
 namespace transformer_engine {
@@ -27,14 +28,6 @@ namespace jax {
 namespace {
 
 namespace ffi = xla::ffi;
-
-void CheckCuda(cudaError_t status) {
-  if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
-}
-
-void CheckCudnn(cudnnStatus_t status) {
-  if (status != CUDNN_STATUS_SUCCESS) throw std::runtime_error(cudnnGetErrorString(status));
-}
 
 template <typename T>
 T Attribute(ffi::Dictionary &attrs, const char *name) {
@@ -54,7 +47,7 @@ std::shared_ptr<Graph> GetGraph(cudnnHandle_t handle, ffi::Dictionary &attrs) {
         "cuDNN frontend Python/C++ version mismatch for graph deserialization.");
   }
   int device;
-  CheckCuda(cudaGetDevice(&device));
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
   const auto key = std::to_string(device) + ":" +
                    std::to_string(Attribute<int64_t>(attrs, "graph_hash0")) + ":" +
                    std::to_string(Attribute<int64_t>(attrs, "graph_hash1")) + ":" +
@@ -100,7 +93,7 @@ ffi::Error InitializeGraph(cudaStream_t stream, ffi::RemainingArgs, ffi::Remaini
                            ffi::Dictionary attrs) {
   try {
     auto handle = nvte_get_cudnn_handle();
-    CheckCudnn(cudnnSetStream(handle, stream));
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
     GetGraph(handle, attrs);
     return ffi::Error::Success();
   } catch (const std::exception &error) {
@@ -112,7 +105,7 @@ ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::Remai
                         ffi::Dictionary attrs) {
   try {
     auto handle = nvte_get_cudnn_handle();
-    CheckCudnn(cudnnSetStream(handle, stream));
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
     auto graph = GetGraph(handle, attrs);
     auto input_uids = Attribute<ffi::Span<const int64_t>>(attrs, "input_uids");
     auto output_uids = Attribute<ffi::Span<const int64_t>>(attrs, "output_uids");
@@ -140,7 +133,7 @@ ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::Remai
       // Negative or absent fill values leave fully written outputs uninitialized.
       const int64_t fill = output_fill_values.has_value() ? output_fill_values.value()[i] : -1;
       if (fill >= 0 && buf.value()->size_bytes()) {
-        CheckCuda(
+        NVTE_CHECK_CUDA(
             cudaMemsetAsync(buf.value()->untyped_data(), fill, buf.value()->size_bytes(), stream));
       }
     }
@@ -171,7 +164,7 @@ ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::Remai
     if (workspace.has_error()) throw std::runtime_error("Missing cuDNN graph workspace.");
     auto status = graph->execute(handle, pointers, workspace.value()->untyped_data());
     if (!status.is_good()) throw std::runtime_error(status.get_message());
-    CheckCuda(cudaGetLastError());
+    NVTE_CHECK_CUDA(cudaGetLastError());
     return ffi::Error::Success();
   } catch (const std::exception &error) {
     return ffi::Error::Internal(std::string("JAX cuDNN attention: ") + error.what());

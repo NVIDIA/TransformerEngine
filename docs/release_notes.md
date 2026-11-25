@@ -6,8 +6,8 @@
 
 ## Fixed Issues
 
-- PyTorch fused-attention backend selection checks backward support when gradients are needed,
-  including in evaluation mode.
+- PyTorch cuDNN attention backend selection now validates a separate backward graph when
+  autograd requires gradients, including in evaluation mode.
 
 ## Breaking Changes in This Release
 
