@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/utils.h>
 #include "../test_common.h"

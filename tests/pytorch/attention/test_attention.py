@@ -426,16 +426,16 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
     runtime = implementation._AttentionGraph(params, backward)
     implementation._prepare_inputs(runtime)
     out = torch.empty(base_shape, device="cuda", dtype=torch.bfloat16)
-    runtime.matrix("o", out, fmt, heads, runtime.sq, cu, output=not backward)
+    runtime.tensor("o", out, fmt, heads, runtime.sq, cu, output=not backward)
     stats_shape = (batch * seqlen, heads, 1) if runtime.ragged_stats else (batch, heads, seqlen, 1)
     runtime.stats("stats", torch.empty(stats_shape, device="cuda"), output=not backward)
     if not backward:
         runtime.stats("max", torch.empty(stats_shape, device="cuda"), output=True)
     if backward:
-        runtime.matrix("do", torch.empty_like(out), fmt, heads, runtime.sq, cu)
+        runtime.tensor("do", torch.empty_like(out), fmt, heads, runtime.sq, cu)
         grads = torch.empty(packed_shape, device="cuda", dtype=torch.bfloat16).unbind(axis)
         for name, grad in zip(("dq", "dk", "dv"), grads):
-            runtime.matrix(name, grad, fmt, heads, runtime.sq, cu, output=True)
+            runtime.tensor(name, grad, fmt, heads, runtime.sq, cu, output=True)
         runtime.add("dsink", torch.empty_like(params["softmax_offset"]), output=True)
     assert query.description() == runtime.description()
 
