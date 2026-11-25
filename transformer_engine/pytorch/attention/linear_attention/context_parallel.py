@@ -53,8 +53,9 @@ def _cache_cp_metadata(entry):
 class _LinearAttentionCPDeviceMetadata:
     """Device metadata for one CP rank's local attention and state composition.
 
-    For global cu_seqlens [0, 8, 12, 24] and CP=4, rank 1 owns fragments
-    A [6, 8) and B [8, 12). Its device tensors include::
+    This describes all fragments on the rank, rather than one sequence fragment.
+    For global cu_seqlens [0, 8, 12, 24] and CP=4, rank 1 owns CP token interval
+    [6, 12), containing fragments A [6, 8) and B [8, 12). Its device tensors include::
 
         cu_seqlens:                 [0, 2, 6]
         document_indices:           [0, 1]
@@ -89,7 +90,7 @@ class _LinearAttentionCPDeviceMetadata:
 
 @dataclass
 class _LinearAttentionCPMetadata:
-    """Host and device metadata prepared for one CP rank."""
+    """Host and device metadata for all fragments owned by one CP rank."""
 
     host_metadata: LinearAttentionCPHostMetadata
     device_metadata: _LinearAttentionCPDeviceMetadata
@@ -449,6 +450,7 @@ def context_parallel_attention(
     elif cache is None or cache[0] != key:
         # Layers using the same batch can share metadata without another host round trip.
         cache = _get_shared_cp_metadata(key)
+    # TODO(klakhani): Evaluate device-side metadata preparation.
     # Build and upload metadata only when the cached entry no longer matches.
     if cache is None or cache[0] != key:
         document_cu_seqlens = (

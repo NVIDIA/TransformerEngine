@@ -12,7 +12,7 @@ from typing import Tuple
 @dataclass(frozen=True)
 class LinearAttentionFragment:
     """Metadata for a fragment: the intersection of one independent sequence
-    with one rank's token interval.
+    with a CP token interval. A fragment can cover part or all of the sequence.
 
     For example, global cu_seqlens [0, 8, 12, 24] describes sequences
     A [0, 8), B [8, 12), and C [12, 24). With CP=4, each rank owns six
@@ -41,7 +41,8 @@ class LinearAttentionFragment:
 class LinearAttentionCPHostMetadata:
     """Global sequence boundaries and local fragment metadata for one CP rank.
 
-    Packed (THD) inputs intersect sequences with contiguous rank intervals.
+    Packed (THD) inputs assign each rank one contiguous CP token interval,
+    which can contain fragments from several sequences.
     Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every sequence.
     Empty sequences have no fragments; their state is unchanged.
 
