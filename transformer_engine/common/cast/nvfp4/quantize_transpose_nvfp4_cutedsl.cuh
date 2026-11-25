@@ -111,11 +111,7 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
   // Optional Philox RNG state ({seed, offset}); required (and only used) for SR.
   DLTensorWrapper mRngState;
   if (config.use_stochastic_rounding) {
-    const NVTETensor rng_state_tensor =
-        (quant_config != nullptr) ? quant_config->rng_state : nullptr;
-    NVTE_CHECK(rng_state_tensor != nullptr,
-               "Stochastic rounding requires an RNG state tensor to be provided.");
-    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    Tensor &rng_state_te_tensor = *convertNVTETensor(quant_config->rng_state);
     mRngState = DLTensorWrapper(rng_state_te_tensor.data, false, device_index);
   }
 
@@ -205,6 +201,8 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
 
     const NVTETensor rng_state_tensor =
         (quant_config != nullptr) ? quant_config->rng_state : nullptr;
+    NVTE_CHECK(!use_stochastic_rounding || rng_state_tensor != nullptr,
+               "Stochastic rounding requires an RNG state tensor to be provided.");
     if (rng_state_tensor != nullptr) {
       Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
       NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
