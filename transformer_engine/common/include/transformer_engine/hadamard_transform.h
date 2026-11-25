@@ -96,9 +96,10 @@ void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor ou
  *  \param[in]      random_sign_mask_t  16-bit sign mask for transposed RHT.
  *  \param[in]      stream              CUDA stream used for the operation.
  */
-void nvte_group_hadamard_transform_amax_host_split(
-    const NVTETensor input, NVTETensor* outputs, const size_t* split_sections, size_t num_tensors,
-    int random_sign_mask, int random_sign_mask_t, cudaStream_t stream);
+void nvte_group_hadamard_transform_amax_host_split(const NVTETensor input, NVTETensor* outputs,
+                                                   const size_t* split_sections, size_t num_tensors,
+                                                   int random_sign_mask, int random_sign_mask_t,
+                                                   cudaStream_t stream);
 
 /*! \deprecated Use nvte_group_hadamard_transform_amax_host_split. */
 void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,

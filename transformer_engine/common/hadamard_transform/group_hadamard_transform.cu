@@ -564,9 +564,9 @@ void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
 // Although mathmatically 16 multple is enough for this function to be correct,
 // for this kernel, we required 64 multiple of 16 in dimension 0 for better performance.
 void nvte_group_hadamard_transform_amax_host_split(const NVTETensor input, NVTETensor* outputs,
-                                        const size_t* split_sections, size_t num_tensors,
-                                        int random_sign_mask, int random_sign_mask_t,
-                                        cudaStream_t stream) {
+                                                   const size_t* split_sections, size_t num_tensors,
+                                                   int random_sign_mask, int random_sign_mask_t,
+                                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_hadamard_transform_amax_host_split);
   using namespace transformer_engine;
   if (num_tensors == 0) {
@@ -585,8 +585,9 @@ void nvte_group_hadamard_transform_amax_host_split(const NVTETensor input, NVTET
 }
 
 // Grouped-tensor amax
-void nvte_group_amax_host_split(const NVTETensor input, NVTETensor* outputs, const size_t* split_sections,
-                     size_t num_tensors, cudaStream_t stream) {
+void nvte_group_amax_host_split(const NVTETensor input, NVTETensor* outputs,
+                                const size_t* split_sections, size_t num_tensors,
+                                cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_amax_host_split);
   using namespace transformer_engine;
   if (num_tensors == 0) {
@@ -637,5 +638,5 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream) {
   nvte_group_hadamard_transform_amax_host_split(input, outputs, split_sections, num_tensors,
-                                               random_sign_mask, random_sign_mask_t, stream);
+                                                random_sign_mask, random_sign_mask_t, stream);
 }

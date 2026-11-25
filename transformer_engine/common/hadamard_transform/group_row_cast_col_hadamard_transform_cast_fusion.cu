@@ -1489,12 +1489,10 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
 
 }  // namespace transformer_engine
 
-void nvte_group_hadamard_transform_cast_fusion_host_split(const NVTETensor input, NVTETensor *outputs,
-                                               const NVTETensor hadamard_matrix,
-                                               const size_t *split_sections,
-                                               const size_t num_tensors,
-                                               const NVTEQuantizationConfig quant_config,
-                                               NVTETensor quant_workspace, cudaStream_t stream) {
+void nvte_group_hadamard_transform_cast_fusion_host_split(
+    const NVTETensor input, NVTETensor *outputs, const NVTETensor hadamard_matrix,
+    const size_t *split_sections, const size_t num_tensors,
+    const NVTEQuantizationConfig quant_config, NVTETensor quant_workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_hadamard_transform_cast_fusion_host_split);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
@@ -1520,11 +1518,13 @@ void nvte_group_hadamard_transform_cast_fusion_host_split(const NVTETensor input
                                        *quant_workspace_tensor, stream);
 }
 
-void nvte_group_hadamard_transform_cast_fusion(
-    const NVTETensor input, NVTETensor *outputs, const NVTETensor hadamard_matrix,
-    const size_t *split_sections, const size_t num_tensors,
-    const NVTEQuantizationConfig quant_config, NVTETensor quant_workspace, cudaStream_t stream) {
-  nvte_group_hadamard_transform_cast_fusion_host_split(
-      input, outputs, hadamard_matrix, split_sections, num_tensors, quant_config, quant_workspace,
-      stream);
+void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor *outputs,
+                                               const NVTETensor hadamard_matrix,
+                                               const size_t *split_sections,
+                                               const size_t num_tensors,
+                                               const NVTEQuantizationConfig quant_config,
+                                               NVTETensor quant_workspace, cudaStream_t stream) {
+  nvte_group_hadamard_transform_cast_fusion_host_split(input, outputs, hadamard_matrix,
+                                                       split_sections, num_tensors, quant_config,
+                                                       quant_workspace, stream);
 }

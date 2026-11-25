@@ -1879,9 +1879,9 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   if (!quantizer.disable_second_level_scale) {
     NVTE_CHECK(quantizer.with_post_rht_amax,
                "NVFP4 split-quantize does not yet support pre-RHT amax");
-    nvte_group_hadamard_transform_amax_host_split(
-        input.data(), output_handles.data(), split_sections.data(), num_tensors, 0,
-        quantizer.rht_matrix_random_sign_mask_t, stream);
+    nvte_group_hadamard_transform_amax_host_split(input.data(), output_handles.data(),
+                                                  split_sections.data(), num_tensors, 0,
+                                                  quantizer.rht_matrix_random_sign_mask_t, stream);
   }
 
   NVTE_CHECK(quantizer.rht_matrix.defined() && quantizer.rht_matrix.numel() > 0,
@@ -1973,8 +1973,9 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
       NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
       output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
     }
-    nvte_group_amax_host_split(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-                    split_sections.data(), num_tensors, stream);
+    nvte_group_amax_host_split(input.data(),
+                               reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+                               split_sections.data(), num_tensors, stream);
     for (size_t i = 0; i < num_tensors; i++) {
       output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
     }
@@ -2057,8 +2058,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   const bool emits_gemm_swizzled_scales = grouped_rht_supported;
   std::vector<bool> needs_swizzle(num_tensors);
   for (size_t i = 0; i < num_tensors; ++i) {
-    needs_swizzle[i] = !per_tensor_rht && outputs[i].get_with_gemm_swizzled_scales() && !emits_gemm_swizzled_scales &&
-                       input_list[i].numel() != 0;
+    needs_swizzle[i] = !per_tensor_rht && outputs[i].get_with_gemm_swizzled_scales() &&
+                       !emits_gemm_swizzled_scales && input_list[i].numel() != 0;
   }
   std::vector<at::Tensor> scale_buffers;
   auto compact_outputs =
@@ -2072,8 +2073,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
       if (grouped_rht_supported) {
         // Fuse the rowwise and colwise into one when the kernel is ready
-        split_quantize_nvfp4_impl_with_rht_helper(input, output_list, split_sections,
-                                                  quantizers, stream);
+        split_quantize_nvfp4_impl_with_rht_helper(input, output_list, split_sections, quantizers,
+                                                  stream);
       } else {
         for (size_t i = 0; i < num_tensors; ++i) {
           if (input_list[i].numel() == 0) {
