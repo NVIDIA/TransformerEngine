@@ -302,7 +302,7 @@ def _get_sys_extension() -> str:
 def _cuda_runtime_major(cuda_runtime: ctypes.CDLL) -> Optional[int]:
     """Return the major version of the CUDA runtime loaded with Transformer Engine."""
 
-    runtime_version = ctypes.c_int()
+    runtime_version = ctypes.c_int(0)
     get_runtime_version = cuda_runtime.cudaRuntimeGetVersion
     get_runtime_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
     get_runtime_version.restype = ctypes.c_int

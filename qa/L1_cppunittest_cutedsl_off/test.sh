@@ -16,6 +16,17 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4
 
+# Split test_operator into up to 15 processes when every GPU has at least 80 GB. All shards share
+# one GPU and each has its own CUDA context, so 15 shards peak near 30 GB of GPU memory.
+NUM_TEST_SHARDS=1
+MIN_GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sort -n | head -n 1)
+if [ "${MIN_GPU_MEM_MIB:-0}" -ge 80000 ] 2>/dev/null; then
+    NUM_TEST_SHARDS=$(( NUM_PHYSICAL_CORES < 15 ? NUM_PHYSICAL_CORES : 15 ))
+    # An odd shard count balances the load better, since skipped cases tend to repeat every 2, 4 or 8 tests
+    NUM_TEST_SHARDS=$(( NUM_TEST_SHARDS - (1 - NUM_TEST_SHARDS % 2) ))
+    NUM_PARALLEL_JOBS=$NUM_TEST_SHARDS
+fi
+
 # If NVTE_ENABLE_CUTEDSL_BACKEND is not set to 1, we assume this also applies to qa/L0_cppunittest,
 # in which case we don't need to run this test since L0_cppunittest already covers the CUDA path.
 # Otherwise, we override NVTE_ENABLE_CUTEDSL_BACKEND to 0 to force the test to take the CUDA implementation path,
@@ -29,7 +40,12 @@ fi
 export NVTE_ENABLE_CUTEDSL_BACKEND=0
 
 cd $TE_PATH/tests/cpp
-cmake -GNinja -Bbuild .
+cmake -GNinja -Bbuild . -DNVTE_TEST_NUM_SHARDS=$NUM_TEST_SHARDS
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
 ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-on-failure --output-junit $XML_LOG_DIR/ctest_cppunittest.xml
+
+# The dSiLU table layout is read once per process, so its tests run again with the exact layout.
+export NVTE_ACTIVATION_TABLE_EXACT_DSILU=1
+build/util/test_util --gtest_filter='ActivationTableTest.*' --gtest_output=xml:$XML_LOG_DIR/gtest_cppunittest_cutedsl_off_exact_dsilu_table.xml
+build/operator/test_operator --gtest_filter='*CastMXFP8ActExact*DSiLU*XTable*' --gtest_output=xml:$XML_LOG_DIR/gtest_cppunittest_cutedsl_off_exact_dsilu_cast.xml
