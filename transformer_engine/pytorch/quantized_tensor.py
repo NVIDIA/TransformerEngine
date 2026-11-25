@@ -887,10 +887,17 @@ class QuantizedTensor(torch.Tensor):
 
     def clone(self) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
+        def _clone_value(value: Any) -> Any:
+            if isinstance(value, torch.Tensor):
+                return value.detach().clone()
+            if isinstance(value, QuantizedTensorStorage):
+                return type(value)(**{k: _clone_value(v) for k, v in value.get_metadata().items()})
+            return value
+
         init_kwargs = {
-            name: value.detach().clone()
+            name: _clone_value(value)
             for name, value in self.get_metadata().items()
-            if isinstance(value, torch.Tensor)
+            if isinstance(value, (torch.Tensor, QuantizedTensorStorage))
         }
         return _IdentityFunc.apply(self, init_kwargs)
 

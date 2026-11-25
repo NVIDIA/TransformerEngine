@@ -1072,7 +1072,9 @@ class TestQuantizedTensor:
             x.grad is not None and x.grad.norm().item() > 0
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
-    @pytest.mark.parametrize("kind", ["float8", "mxfp8", "nvfp4", "blockwise", "hybrid"])
+    @pytest.mark.parametrize(
+        "kind", ["float8", "mxfp8", "nvfp4", "blockwise", "hybrid", "hybrid_internal"]
+    )
     @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
     def test_clone_isolates_buffers(self, kind: str, use_torch_clone: bool) -> None:
         """Cloning copies data, scale, and amax buffers independently."""
@@ -1094,24 +1096,13 @@ class TestQuantizedTensor:
             }
 
         def make(value: int) -> QuantizedTensor:
-            if kind == "hybrid":
-                row = Float8BlockQuantizer(
-                    te.DType.kFloat8E4M3, rowwise=True, columnwise=False
+            if kind in ("hybrid", "hybrid_internal"):
+                row_q = Float8BlockQuantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+                col_q = NVFP4Quantizer(with_random_sign_mask=False, rowwise=False, columnwise=True)
+                row_q.internal = col_q.internal = kind == "hybrid_internal"
+                tensor = te.HybridQuantizer(
+                    rowwise_quantizer=row_q, columnwise_quantizer=col_q
                 ).make_empty(shape, dtype=torch.float32, device=device)
-                col = NVFP4Quantizer(
-                    with_random_sign_mask=False, rowwise=False, columnwise=True
-                ).make_empty(shape, dtype=torch.float32, device=device)
-                tensor = te.HybridQuantizedTensor(
-                    shape=shape,
-                    dtype=torch.float32,
-                    device=device,
-                    rowwise_storage=row,
-                    columnwise_storage=col,
-                    quantizer=te.HybridQuantizer(
-                        rowwise_quantizer=row._quantizer,
-                        columnwise_quantizer=col._quantizer,
-                    ),
-                )
             else:
                 quantizers = {
                     "float8": lambda: Float8Quantizer(
@@ -1136,7 +1127,14 @@ class TestQuantizedTensor:
         copied = clone_fn(original)
         assert type(copied) is type(original)
 
-        copied.copy_(make(2))
+        other = make(2)
+        if kind == "hybrid_internal":
+            assert copied.rowwise_sub_storage is not original.rowwise_sub_storage
+            assert copied.columnwise_sub_storage is not original.columnwise_sub_storage
+            copied.rowwise_sub_storage.copy_from_storage(other.rowwise_sub_storage)
+            copied.columnwise_sub_storage.copy_from_storage(other.columnwise_sub_storage)
+        else:
+            copied.copy_(other)
         orig_bufs = owned_buffers(original)
         copied_bufs = owned_buffers(copied)
         for name, orig_buf in orig_bufs.items():
