@@ -15,7 +15,7 @@ define each comparison and ratio.
 
 | Dimension | Configuration |
 | --- | --- |
-| Inputs | BF16 packed THD; 32 query / 8 key-value heads; head dimension 128; no dropout or gaps |
+| Inputs | BF16 packed THD; 32 query / 8 key-value heads; head dimension 128; no dropout or padding between sequences |
 | Workload | `B*S=524288` tokens; uniform sequences, with batch size adjusted to keep tokens fixed |
 | Causal sweep | Nine shapes: `1x512k` through `256x2k`, halving sequence length each step; `k=1024` |
 | Sliding-window attention (SWA) | First five shapes, through `16x32k`; causal window `(1024,0)` |
@@ -53,19 +53,19 @@ communication types, and GPUs.
 
 Inferences:
 
-1. At a fixed total token count, causal attention latency generally falls as
-   sequences get shorter.
+1. At a fixed total token count, causal attention latency falls as sequences get
+   shorter, consistent with the trend for global (full-sequence) attention.
 2. Several P2P and all-gather curves flatten at short sequences, especially
    at CP4 and CP8. One possible explanation is that communication costs
    become more visible as attention work shrinks.
-3. For a few cases, it was observed that A2A communication type on H100 performed better than P2P and AllGather on B200. This indicates potential optimization opportunities.
+3. For a few cases, it was observed that A2A communication type on H100 performed better than P2P and all-gather on B200. This indicates potential optimization opportunities.
 
 ![Causal endpoint sweep with Fused and Flash in separate rows](results/context_parallel/images/cp_causal_endpoint_sweep_by_backend_review_v2.webp)
 
-*Figure 1. Absolute causal attention latency. Sequence length decreases left to right;
+*Figure 1. Causal attention latency. Sequence length decreases left to right;
 both axes are logarithmic. Color identifies hardware, line style identifies
 communication. The Flash Attention row changes both GPU and implementation: H100 FA3
-versus B200 FA4. Colors are local to each figure's legend.*
+versus B200 FA4.*
 
 ## Choosing Backend
 
@@ -87,7 +87,7 @@ Inferences:
 2. Similar trend is observed for P2P and AG where Flash is better for larger sequences across CP sizes but Fused catches up and eventually beats Flash for smaller sequences.
 3. The catch-up and reversal trend is more pronounced for AG communication type and B200 GPUs.
 
-For P2P and AllGather, the crossover where Fused becomes faster moves toward
+For P2P and all-gather, the crossover where Fused becomes faster moves toward
 longer sequences as CP size increases. On B200, this crossover appears
 already at CP2 and at longer sequences than on H100. The crossover depends
 on GPU, CP size, and communication type (Figure 2).
@@ -114,17 +114,18 @@ Inferences:
    and key/value head counts after tensor parallelism. The benchmark's
    32-query/8-KV-head configuration caps this path at CP8.
 2. If A2A isn't applicable, then Fused attention is more appealing for shorter sequences and large CP sizes.
-3. While choosing b/w P2P and AllGather, there are more nuances:
+3. While choosing b/w P2P and all-gather, there are more nuances:
    The following comparisons are within the indicated backend:
 
    - For larger sequences, with FlashAttention:
 
-     - CP = 2, AllGather is faster for a couple long sequence length configs but P2P quickly takes over for both H100 and B200.
-     - CP = 4/8, AllGather is faster than P2P on H100 and vice-versa on B200 (64K–512K sequences).
-   - Within Fused Attention at CP2, P2P is faster than AllGather on H100, while AllGather is faster on B200.
+     - CP = 2, all-gather is faster for a couple long sequence length configs but P2P quickly takes over for both H100 and B200.
+     - At CP4/8, all-gather is slightly faster than P2P on H100, while P2P is slightly
+       faster on B200 for 64K–512K sequences; the two methods are mostly comparable.
+   - Within Fused Attention at CP2, P2P is faster than all-gather on H100, while all-gather is faster on B200.
    - For the sequence-length ranges where Fused Attention wins (for the given GPU, CP size, and communication type; see Figure 2):
 
-     - CP = 4/8, AllGather is faster than P2P on both H100 and B200.
+     - CP = 4/8, all-gather is faster than P2P on both H100 and B200.
 
 ![H100 context-parallel attention latency relative to the fastest communication type](results/context_parallel/images/cp_communication_dotplot_h100_review_v4.webp)
 
@@ -156,11 +157,13 @@ milliseconds when reading latency.*
 
 Inferences:
 
-1. With A2A as the communication type, the workload scales quite well from CP2 to CP8.
-2. At SWA CP2, all-gather is lower for H100 FA3 and both B200 backends; H100
-   Fused instead favors A2A.
-3. At CP4/CP8, A2A is lower in all four scopes.
-4. But since A2A isn't universally applicable, AllGather then remains the only valid option.
+1. With A2A as the communication type, the workload scales almost linearly from
+   CP2 to CP8. All-gather also provides a speedup from CP2 to CP8, but generally
+   not as much as A2A.
+2. If users have only two GPUs, all-gather wins for SWA in all measured cases
+   except H100 Fused.
+3. With four or eight GPUs, A2A is the clear choice for SWA when applicable.
+4. Since A2A is not always applicable, all-gather remains a viable solution.
 
 ## Summary of CP attention backend and comm type selection
 
@@ -169,23 +172,25 @@ Inferences:
    configuration caps this path at CP8.
 2. For causal attention, shortlist A2A with Flash Attention when eligible,
    then compare backend and communication type jointly at the target GPU,
-   shape, and CP size (Figures 2–3). With P2P/AllGather, Fused Attention's crossover
-   moves toward longer sequences as CP increases and appears already at
-   CP2 on B200; use the communication-type-specific range in Figure 2.
-3. When A2A is unavailable, compare P2P and AllGather within each backend
-   (Figure 3). Within Fused at CP2, H100 favors P2P and B200 favors AllGather.
-   At CP4/CP8, AllGather is lower in the sampled Fused-winning ranges;
-   Flash's ordering depends on GPU, sequence length, and CP size.
-4. For the benchmarked SWA workloads, CP2 favors AllGather except for H100
-   Fused, which favors A2A. CP4/CP8 favor A2A for both backends on both GPUs;
-   when A2A is ineligible, AllGather remains the supported option (Figure 4).
+   shape, and CP size (Figures 2–3). Full/non-causal attention should follow
+   the same trend, although it was not benchmarked here.
+3. With P2P and all-gather, Fused Attention tends to become more competitive as
+   input sequences get shorter or CP size increases. Both reduce the local
+   query length and the size of P2P blocks, though all-gather can still use KV
+   spans up to the full input sequence length. This may help explain the trend;
+   the benchmarks do not isolate kernel efficiency.
+4. For SWA with A2A, the window size rather than the full sequence length bounds
+   the attention work per query. A2A scales close to linearly from CP2 to CP8.
+   All-gather generally scales less strongly: it has an advantage at CP2 but
+   loses it at CP4 and CP8. H100 Fused is the CP2 exception, where A2A is
+   already faster.
 
 ## Run one benchmark
 
 This runs the `64x8k` BF16 THD training case with FusedAttention, CP8 and A2A:
 
 ```bash
-NVTE_CP_BENCH_ONLY=1 NVTE_NVTX_ENABLED=0 \
+NVTE_CP_BENCH_ONLY=1 \
 torchrun --standalone --nproc-per-node=8 \
   tests/pytorch/attention/run_attention_with_cp.py \
   dtype=bf16 model=uniform_64x8k qkv_format=thd \
@@ -193,7 +198,12 @@ torchrun --standalone --nproc-per-node=8 \
   thd_seqlen_pattern=max benchmark=50 log_level=WARNING
 ```
 
-`CP_BENCH_RESULT` reports per-iteration rank maxima and their mean. Input
-construction, synchronization before timing, and result reduction are excluded.
+With `benchmark=50`, rank 0 automatically prints one `CP_BENCH_RESULT` line to
+stdout. No extra environment variable is needed. To collect the result, capture
+stdout and parse the JSON after the `CP_BENCH_RESULT ` prefix.
+`iteration_rank_max_ms` contains the slowest rank's time for each measured
+iteration, and `latency_ms` is the mean of those times.
+
+Input construction, synchronization before timing, and result reduction are excluded.
 Aliases are in `tests/pytorch/attention/benchmark_cp.py`; benchmark mode here
 supports FP16/BF16.
