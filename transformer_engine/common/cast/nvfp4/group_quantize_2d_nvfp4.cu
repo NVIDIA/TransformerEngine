@@ -111,6 +111,8 @@ __global__ void grouped_nvfp4_2d_quantize_transpose(const bf16* input, uint8_t* 
 void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTensor* output,
                        const QuantizationConfig* config, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
+  NVTE_CHECK(input->logical_shape.ndim == 2 && output->logical_shape.ndim == 2,
+             "Grouped NVFP4 2D requires matrix inputs and outputs.");
   NVTE_CHECK(input->dtype() == DType::kBFloat16, "Grouped NVFP4 2D requires BF16 input.");
   NVTE_CHECK(input->num_tensors == output->num_tensors, "Grouped tensor counts must match.");
   NVTE_CHECK(output->all_same_last_dim() || output->all_same_shape(),
@@ -123,6 +125,8 @@ void group_quantize_2d(const GroupedTensor* input, const Tensor* noop, GroupedTe
   const size_t count = input->num_tensors;
   NVTE_CHECK(cols > 0 && cols % 128 == 0 && capacity % 128 == 0,
              "Grouped NVFP4 2D requires 128-aligned capacity and hidden dimension.");
+  NVTE_CHECK((capacity == 0 || input->data.dptr) && input->data.numel() >= capacity * cols,
+             "Invalid grouped NVFP4 input buffer.");
   NVTE_CHECK(output->logical_shape.data[0] == capacity && output->logical_shape.data[1] == cols,
              "Grouped NVFP4 2D input/output capacities must match.");
   if (count == 0) return;

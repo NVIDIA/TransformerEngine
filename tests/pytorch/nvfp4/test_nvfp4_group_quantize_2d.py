@@ -149,6 +149,29 @@ def test_grouped_2d_large_capacity_grid():
     _check(x, [128, 0], result, (True, True), False)
 
 
+@pytest.mark.parametrize("value", [0.0, 1.0, -1.0, 2.0**-12, 2.0**12])
+def test_grouped_2d_constant_blocks(value):
+    x = torch.full((384, 128), value, device="cuda", dtype=torch.bfloat16)
+    metadata = torch.tensor([128, 256], device="cuda", dtype=torch.int64)
+    result = tex.group_quantize(x, _quantizer((True, True), False), 2, metadata)
+    _check(x, [128, 256], result, (True, True), False)
+
+
+@pytest.mark.parametrize("shape", [(128, 64), (128, 192), (64, 128)])
+def test_grouped_2d_rejects_unaligned_shape(shape):
+    x = torch.zeros(shape, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="128-aligned"):
+        tex.group_quantize(x, _quantizer((True, True), False), 1, None)
+
+
+@pytest.mark.parametrize("device,dtype", [("cpu", torch.int64), ("cuda", torch.int32)])
+def test_grouped_2d_rejects_invalid_metadata(device, dtype):
+    x = torch.zeros(256, 128, device="cuda", dtype=torch.bfloat16)
+    metadata = torch.tensor([128, 128], device=device, dtype=dtype)
+    with pytest.raises(RuntimeError, match="int64 CUDA first_dims"):
+        tex.group_quantize(x, _quantizer((True, True), False), 2, metadata)
+
+
 @pytest.mark.parametrize(
     "option",
     [
