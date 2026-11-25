@@ -104,7 +104,7 @@ class Float8BlockQuantizer(Quantizer):
                 "fp8_dtype": self.dtype,
                 "quantizer": self,
                 "is_2D_scaled": self.block_scaling_dim == 2,
-                "rowwise_scale_layout": self.rowwise_scale_layout_value,
+                "block_scaling_rowwise_scale_layout": self.rowwise_scale_layout_value,
                 "fake_dtype": fake_dtype,
             },
         }
@@ -507,8 +507,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
-                self._block_scaling_rowwise_scale_layout,
                 None,  # data_format
+                self._block_scaling_rowwise_scale_layout,
             ),
         )
 
@@ -524,10 +524,10 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        data_format: Any = None,
         block_scaling_rowwise_scale_layout: int = int(
             tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
         ),
-        data_format: Any = None,
     ) -> Float8BlockwiseQTensor:
         """This classmethod is kept for backward compatibility only.
         ``__reduce_ex__`` used to point at this classmethod, but bound
@@ -551,8 +551,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             dtype,
             quantizer,
             is_2D_scaled,
-            block_scaling_rowwise_scale_layout,
             data_format,
+            block_scaling_rowwise_scale_layout,
         )
 
     def _get_data(self) -> Float8BlockwiseQTensor:
@@ -756,8 +756,8 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,
-    block_scaling_rowwise_scale_layout: int = int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY),
     data_format: Any = None,  # pylint: disable=unused-argument
+    block_scaling_rowwise_scale_layout: int = int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY),
 ) -> Float8BlockwiseQTensor:
     """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from inner buffers so the wrapper subclass stays

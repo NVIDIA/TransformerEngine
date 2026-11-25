@@ -10,7 +10,12 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.dynamo.tensor_spec import TensorSpec
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+    Float8BlockwiseQTensor,
+    _make_float8_blockwise_tensor_in_reduce_ex,
+)
 from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
     Float8BlockwiseQTensorStorage,
 )
@@ -146,3 +151,68 @@ def test_storage_only_compact_dequantize_does_not_need_quantizer():
     )
     assert storage._quantizer is None
     torch.testing.assert_close(storage.dequantize(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_compact_layout_is_preserved_by_tensor_spec(internal):
+    quantizer = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT, False)
+    quantizer.internal = internal
+    tensor = TensorSpec(
+        shape=(128, 384),
+        dtype=torch.bfloat16,
+        quantizer=quantizer,
+        device=torch.device("cuda"),
+    ).create_tensor()
+    assert isinstance(
+        tensor, Float8BlockwiseQTensorStorage if internal else Float8BlockwiseQTensor
+    )
+    assert tensor._rowwise_scale_inv.shape == (128, 3)
+    assert tensor._block_scaling_rowwise_scale_layout == int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+    )
+
+
+def test_legacy_pickle_payload_defaults_to_gemm_ready_layout():
+    quantizer = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY, False)
+    rows, hidden = 128, 384
+    data = torch.zeros(rows, hidden, dtype=torch.uint8, device="cuda")
+    scales = torch.ones(hidden // 128, rows, dtype=torch.float32, device="cuda")
+    # Before block_scaling_rowwise_scale_layout was added, data_format was the
+    # last positional argument in the reduction payload.
+    legacy_args = (
+        torch.Size((rows, hidden)),
+        data,
+        scales,
+        None,
+        None,
+        te.DType.kFloat8E4M3,
+        torch.bfloat16,
+        quantizer,
+        False,
+        None,
+    )
+    tensor = _make_float8_blockwise_tensor_in_reduce_ex(*legacy_args)
+    assert tensor._block_scaling_rowwise_scale_layout == int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+    )
+    torch.testing.assert_close(tensor.dequantize(), torch.zeros_like(data, dtype=torch.bfloat16))
+
+
+def test_legacy_pickle_reconstruction_classmethod():
+    quantizer = make_quantizer(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY, False)
+    rows, hidden = 128, 384
+    tensor = Float8BlockwiseQTensor._make_in_reduce_ex(
+        torch.Size((rows, hidden)),
+        torch.zeros(rows, hidden, dtype=torch.uint8, device="cuda"),
+        torch.ones(hidden // 128, rows, dtype=torch.float32, device="cuda"),
+        None,
+        None,
+        te.DType.kFloat8E4M3,
+        torch.bfloat16,
+        quantizer,
+        False,
+        None,
+    )
+    assert tensor._block_scaling_rowwise_scale_layout == int(
+        tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+    )
