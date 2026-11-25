@@ -163,9 +163,7 @@ def test_compact_layout_is_preserved_by_tensor_spec(internal):
         quantizer=quantizer,
         device=torch.device("cuda"),
     ).create_tensor()
-    assert isinstance(
-        tensor, Float8BlockwiseQTensorStorage if internal else Float8BlockwiseQTensor
-    )
+    assert isinstance(tensor, Float8BlockwiseQTensorStorage if internal else Float8BlockwiseQTensor)
     assert tensor._rowwise_scale_inv.shape == (128, 3)
     assert tensor._block_scaling_rowwise_scale_layout == int(
         tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
