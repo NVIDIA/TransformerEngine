@@ -250,9 +250,9 @@ class Float8TensorStorage(QuantizedTensorStorage):
         view_shape = _columnwise_shape_for(out_shape)
         if not view_shape or not transpose.shape or transpose.shape[0] == view_shape[0]:
             if allow_copy:
-                return transpose.reshape(*view_shape)
+                return transpose.reshape(view_shape)
             try:
-                return transpose.view(*view_shape)
+                return transpose.view(view_shape)
             except RuntimeError:
                 pass
 
