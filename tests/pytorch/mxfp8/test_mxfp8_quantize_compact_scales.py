@@ -68,8 +68,8 @@ def _check_quantized(out, ref, guards, shape):
     if out._rowwise_data is not None:
         torch.testing.assert_close(out._rowwise_data, ref._rowwise_data, rtol=0, atol=0)
         torch.testing.assert_close(
-            out._rowwise_scale_inv[:, : cols // 32],
-            ref._rowwise_scale_inv[:rows, : cols // 32],
+            out._rowwise_scale_inv[:, : (cols + 31) // 32],
+            ref._rowwise_scale_inv[:rows, : (cols + 31) // 32],
             rtol=0,
             atol=0,
         )
@@ -77,7 +77,7 @@ def _check_quantized(out, ref, guards, shape):
         torch.testing.assert_close(out._columnwise_data, ref._columnwise_data, rtol=0, atol=0)
         torch.testing.assert_close(
             out._columnwise_scale_inv[:, :cols],
-            ref._columnwise_scale_inv[: rows // 32, :cols],
+            ref._columnwise_scale_inv[: (rows + 31) // 32, :cols],
             rtol=0,
             atol=0,
         )
@@ -87,15 +87,29 @@ def _check_quantized(out, ref, guards, shape):
 @pytest.mark.parametrize(
     "shape",
     # Row and column counts that are not multiples of the kernels' 64- and 128-element
-    # tiles, rows of fewer than four scales, and one scale per row or column block.
-    [(32, 256), (96, 128), (64, 64), (512, 96), (160, 224), (32, 32)],
+    # tiles, with canonical inner-dimension padding and compact outer dimensions.
+    [
+        (32, 256),
+        (96, 128),
+        (64, 64),
+        (512, 96),
+        (160, 224),
+        (32, 32),
+        (1, 16),
+        (33, 48),
+        (65, 144),
+        (64, 256),
+        (96, 384),
+        (64, 2048),
+        (64, 4096),
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
 @pytest.mark.parametrize("with_2d_quantization", [False, True])
-@pytest.mark.parametrize("scale_offset", [0, 4], ids=["aligned", "unaligned"])
+@pytest.mark.parametrize("scale_offset", [0, 1, 4], ids=["aligned", "unaligned1", "unaligned4"])
 def test_quantize_into_compact_scales(shape, dtype, usage, with_2d_quantization, scale_offset):
-    """Compact unswizzled scales hold the same values as TE's padded scales.
+    """Scales without outer padding hold the same values as TE's fully padded scales.
 
     Quantization must not write past either end of a compact scale buffer, which may be one
     of several planes packed into a larger allocation.
@@ -109,54 +123,14 @@ def test_quantize_into_compact_scales(shape, dtype, usage, with_2d_quantization,
     ref = _make_quantizer(rowwise, columnwise, with_2d_quantization)(src)
     out, guards = _make_output(
         shape,
-        {"rowwise": (rows, cols // 32), "columnwise": (rows // 32, cols)},
+        {
+            "rowwise": (rows, (cols + 127) // 128 * 4),
+            "columnwise": ((rows + 31) // 32, (cols + 127) // 128 * 128),
+        },
         rowwise,
         columnwise,
         with_2d_quantization,
         scale_offset,
-    )
-    out.quantize_(src)
-    _check_quantized(out, ref, guards, shape)
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize(
-    "shape",
-    # Reach the register-resident rowwise and bidimensional kernels and the staged ones.
-    [(64, 128), (64, 256), (96, 384)],
-    ids=lambda shape: f"{shape[0]}x{shape[1]}",
-)
-@pytest.mark.parametrize(
-    "dtype", [torch.float32, torch.bfloat16, torch.float16], ids=lambda dtype: str(dtype)[6:]
-)
-@pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
-@pytest.mark.parametrize(
-    "extra",
-    # Scale entries per row beyond one per block, as (rowwise, columnwise).
-    [(0, 1), (4, 0), (4, 16), (1, 1)],
-    ids=lambda extra: f"extra{extra[0]}x{extra[1]}",
-)
-def test_quantize_into_pitched_scales(shape, dtype, usage, extra):
-    """Unswizzled scale rows may hold more entries than blocks, as in a padded view.
-
-    Whichever kernel runs, the leading entries hold the same values as TE's padded scales.
-    """
-    rows, cols = shape
-    rowwise = usage in ("rowwise", "both")
-    columnwise = usage in ("columnwise", "both")
-    torch.manual_seed(1234)
-    src = (8 * torch.randn(shape, device="cuda")).to(dtype)
-
-    ref = _make_quantizer(rowwise, columnwise, False)(src)
-    out, guards = _make_output(
-        shape,
-        {
-            "rowwise": (rows, cols // 32 + extra[0]),
-            "columnwise": (rows // 32, cols + extra[1]),
-        },
-        rowwise,
-        columnwise,
-        with_2d_quantization=False,
     )
     out.quantize_(src)
     _check_quantized(out, ref, guards, shape)
@@ -175,5 +149,5 @@ def test_quantize_rejects_undersized_scales(usage):
         not rowwise,
         with_2d_quantization=False,
     )
-    with pytest.raises(RuntimeError, match="scale_inv must have at least shape"):
+    with pytest.raises(RuntimeError, match="scale_inv must have at least"):
         out.quantize_(torch.randn(shape, device="cuda"))

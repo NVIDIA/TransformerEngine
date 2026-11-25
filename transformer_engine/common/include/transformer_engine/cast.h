@@ -50,6 +50,12 @@ extern "C" {
  *  To cast the input tensor to the MXFP8, the scaling_mode.delayed_scaling parameter
  *  of the output tensor should be set to 0.
  *
+ *  For an input flattened to [rows, cols], unswizzled MXFP8 scales must be 2D.
+ *  Rowwise scales require at least rows rows and exactly ceil(cols / 128) * 4 columns.
+ *  Columnwise scales require at least ceil(rows / 32) rows and exactly
+ *  ceil(cols / 128) * 128 columns. Outer-dimension padding is optional; inner-dimension
+ *  padding must match these canonical widths, with no additional columns.
+ *
  *  2) NVTE_DELAYED_TENSOR_SCALING that quantize the entire tensor
  *  using a single scaling factor. The absolute maximum value of the tensor should
  *  be precalculated either online (current scaling) or based on a tensor history
