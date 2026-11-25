@@ -832,3 +832,38 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
+
+
+@pytest.mark.parametrize("attn_mask_type", ["causal", "no_mask"])
+def test_cp_with_flash_attention_thd_p2p_4gpus(cp_pool, attn_mask_type):
+    """Check the THD P2P ring with 4 ranks.
+
+    With causal masking, ranks 1 and 2 run both lower- and upper-triangle steps,
+    exercising the cached Q half and paired K/V half reads in the same forward pass.
+    """
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "p2p"
+    config.attn_mask_type = "padding_causal" if attn_mask_type == "causal" else "padding"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(4),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FlashAttention",
+        cp_comm_type="p2p",
+        fa_pad_between_seqs=False,
+        attn_mask_type=attn_mask_type,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
