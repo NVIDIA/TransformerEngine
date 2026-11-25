@@ -30,7 +30,7 @@ class LinearAttentionFragment:
     tokens of the whole sequence, not just this fragment.
     """
 
-    document: int
+    seq_id: int
     start: int
     end: int
     first_rank: int
@@ -93,7 +93,7 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
     slots = len(cu_seqlens) - 1 if dense else 1
     fragments, initial_state_owners, empty = [], [], []
     communicates = False
-    for doc, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
+    for seq_id, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
         if dense:
             length = end - start
             if length != cu_seqlens[1]:
@@ -114,10 +114,10 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
         initial_state_owners.append(first_rank)
         communicates |= first_rank != last_rank
         if start == end and first_rank == cp_rank:
-            empty.append(doc)
+            empty.append(seq_id)
         if fragment_start < fragment_end:
             fragments.append(
-                LinearAttentionFragment(doc, fragment_start, fragment_end, first_rank, last_rank)
+                LinearAttentionFragment(seq_id, fragment_start, fragment_end, first_rank, last_rank)
             )
     cu = [0]
     # Descriptor rows are (sequence, first_summary, count, stride). Each selects
@@ -128,12 +128,12 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
     terminal_fragment_indices = []
     for index, frag in enumerate(fragments):
         cu.append(cu[-1] + frag.end - frag.start)
-        slot = frag.document if dense else 0
+        slot = frag.seq_id if dense else 0
         forward_desc.append(
-            (frag.document, frag.first_rank * slots + slot, cp_rank - frag.first_rank, slots)
+            (frag.seq_id, frag.first_rank * slots + slot, cp_rank - frag.first_rank, slots)
         )
         backward_desc.append(
-            (frag.document, frag.last_rank * slots + slot, frag.last_rank - cp_rank, -slots)
+            (frag.seq_id, frag.last_rank * slots + slot, frag.last_rank - cp_rank, -slots)
         )
         if cp_rank < frag.last_rank:
             outgoing_fragment_indices.append(index)

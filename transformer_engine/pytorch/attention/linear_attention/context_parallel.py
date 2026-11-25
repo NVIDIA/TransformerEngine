@@ -58,12 +58,12 @@ class _LinearAttentionCPDeviceMetadata:
     [6, 12), containing fragments A [6, 8) and B [8, 12). Its device tensors include::
 
         cu_seqlens:                 [0, 2, 6]
-        document_indices:           [0, 1]
+        seq_ids:                    [0, 1]
         forward_descriptors:        [[0, 0, 1, 1], [1, 1, 0, 1]]
         incoming_fragment_indices:  [0]
         incoming_cu_seqlens:        [0, 2]
         initial_state_fragments:    [1]
-        initial_state_documents:    [1]
+        initial_state_seq_ids:      [1]
 
     Fragment 0 receives memory from rank 0; fragment 1 starts sequence B
     on this rank and maps to global sequence state 1.
@@ -75,14 +75,14 @@ class _LinearAttentionCPDeviceMetadata:
     # Zero variants set descriptor column 0 to -1 for an implicit zero memory.
     forward_zero_descriptors: torch.Tensor
     backward_zero_descriptors: torch.Tensor
-    document_indices: torch.Tensor  # Global sequence ID for each local fragment.
+    seq_ids: torch.Tensor  # Global sequence ID for each local fragment.
     outgoing_fragment_indices: torch.Tensor  # Sequence continues on a later rank.
     incoming_fragment_indices: torch.Tensor  # Sequence starts on an earlier rank.
     terminal_fragment_indices: torch.Tensor  # Sequence ends on this rank.
     # Paired fragment/sequence indices for sequences starting on this rank.
     initial_state_fragments: torch.Tensor
-    initial_state_documents: torch.Tensor
-    empty_documents: torch.Tensor  # Global IDs of empty sequences owned by this rank.
+    initial_state_seq_ids: torch.Tensor
+    empty_seq_ids: torch.Tensor  # Global IDs of empty sequences owned by this rank.
     # Cumulative lengths within the selected spans passed to cuDNN summary calls.
     outgoing_cu_seqlens: torch.Tensor
     incoming_cu_seqlens: torch.Tensor
@@ -130,12 +130,12 @@ def _build_linear_attention_cp_device_metadata(host_metadata, device):
         backward_descriptors,
         forward_zero_descriptors,
         backward_zero_descriptors,
-        indices([f.document for f in host_metadata.fragments]),
+        indices([f.seq_id for f in host_metadata.fragments]),
         indices(host_metadata.outgoing_fragment_indices),
         indices(host_metadata.incoming_fragment_indices),
         indices(host_metadata.terminal_fragment_indices),
         indices(first),
-        indices([host_metadata.fragments[i].document for i in first]),
+        indices([host_metadata.fragments[i].seq_id for i in first]),
         indices(host_metadata.empty_owned),
         cumulative(host_metadata.outgoing_fragment_indices),
         cumulative(host_metadata.incoming_fragment_indices),
@@ -175,7 +175,7 @@ def _slot_indices(metadata, indices):
     """Dense slots are sequence IDs; packed partitions have only one edge slot."""
     if metadata.host_metadata.slots == 1:
         return torch.zeros_like(indices)
-    return metadata.device_metadata.document_indices.index_select(0, indices)
+    return metadata.device_metadata.seq_ids.index_select(0, indices)
 
 
 def _local_attention(
@@ -287,16 +287,14 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         if output_final_state:
             terminal.index_copy_(
                 0,
-                device_metadata.document_indices.index_select(
-                    0, device_metadata.terminal_fragment_indices
-                ),
+                device_metadata.seq_ids.index_select(0, device_metadata.terminal_fragment_indices),
                 states.detach().index_select(0, device_metadata.terminal_fragment_indices),
             )
             if initial_state is not None:
                 terminal.index_copy_(
                     0,
-                    device_metadata.empty_documents,
-                    initial_state_buffer.index_select(0, device_metadata.empty_documents),
+                    device_metadata.empty_seq_ids,
+                    initial_state_buffer.index_select(0, device_metadata.empty_seq_ids),
                 )
             dist.all_reduce(terminal, group=group)
         if track_grad:
@@ -379,14 +377,14 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             initial_state_grad = final_state_grad.new_zeros(shape)
             initial_state_grad.index_add_(
                 0,
-                device_metadata.initial_state_documents,
+                device_metadata.initial_state_seq_ids,
                 grads[-1].index_select(0, device_metadata.initial_state_fragments),
             )
             if ctx.output_final_state:
                 initial_state_grad.index_copy_(
                     0,
-                    device_metadata.empty_documents,
-                    final_state_grad.index_select(0, device_metadata.empty_documents),
+                    device_metadata.empty_seq_ids,
+                    final_state_grad.index_select(0, device_metadata.empty_seq_ids),
                 )
             # Each sequence's initial-state gradient belongs to its first rank. Do not
             # replicate it here: if initial_state came from a previous CP call,
@@ -453,15 +451,15 @@ def context_parallel_attention(
     # TODO(klakhani): Evaluate device-side metadata preparation.
     # Build and upload metadata only when the cached entry no longer matches.
     if cache is None or cache[0] != key:
-        document_cu_seqlens = (
+        global_cu_seqlens = (
             tuple(cu_seqlens.tolist())
             if cu_seqlens is not None
             else tuple(i * length * cp_size for i in range(batch + 1))
         )
-        if dense and len(document_cu_seqlens) != batch + 1:
+        if dense and len(global_cu_seqlens) != batch + 1:
             raise ValueError("Dense cu_seqlens must describe the full batch.")
         host_metadata = build_linear_attention_cp_host_metadata(
-            document_cu_seqlens, cp_size=cp_size, cp_rank=cp_rank, dense=dense
+            global_cu_seqlens, cp_size=cp_size, cp_rank=cp_rank, dense=dense
         )
         device_metadata = _build_linear_attention_cp_device_metadata(host_metadata, q.device)
         metadata = _LinearAttentionCPMetadata(host_metadata, device_metadata)

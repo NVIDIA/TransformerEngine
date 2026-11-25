@@ -34,9 +34,9 @@ def _reference(inputs, cu, scale, norm):
     outputs, states = [], []
     if norm:
         q, k = F.normalize(q.double(), dim=-1), F.normalize(k.double(), dim=-1)
-    for doc, (start, end) in enumerate(zip(cu, cu[1:])):
+    for seq_id, (start, end) in enumerate(zip(cu, cu[1:])):
         if start == end:
-            states.append(initial[doc].double())
+            states.append(initial[seq_id].double())
             continue
         out, state = _gdn_reference(
             q[start:end].unsqueeze(0),
@@ -45,7 +45,7 @@ def _reference(inputs, cu, scale, norm):
             g[start:end].unsqueeze(0),
             beta[start:end].unsqueeze(0),
             scale=scale,
-            initial_state=initial[doc : doc + 1],
+            initial_state=initial[seq_id : seq_id + 1],
             cu_seqlens=torch.tensor([0, end - start], device=q.device, dtype=torch.int32),
         )
         outputs.append(out[0])
