@@ -191,6 +191,33 @@ def test_canonical_glu_feature_detection(monkeypatch, missing, precision) -> Non
     assert grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision) == (missing is None)
 
 
+@pytest.mark.parametrize("missing", (None, "forward", "backward"))
+def test_canonical_glu_ue5m3_feature_detection(monkeypatch, missing):
+    """Existing canonical NVFP4 capability alone does not qualify UE5M3."""
+    fake_cudnn = types.ModuleType("cudnn")
+    for direction, name in (
+        ("forward", "grouped_gemm_glu_wrapper_sm100"),
+        ("backward", "grouped_gemm_dglu_wrapper_sm100"),
+    ):
+        wrapper = types.SimpleNamespace(
+            supports_canonical_layouts=True,
+            supports_glu_layouts=("interleaved_32", "gate_then_up"),
+            supports_gate_then_up_precisions=("nvfp4",),
+            supports_gate_then_up_archs=((10, 0), (10, 3), (10, 7)),
+        )
+        if direction != missing:
+            wrapper.supports_gate_then_up_sf_fp8_dtype_overrides = ("e5m3",)
+        setattr(fake_cudnn, name, wrapper)
+    monkeypatch.setitem(sys.modules, "cudnn", fake_cudnn)
+    monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: (10, 7))
+    assert grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4")
+    assert grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4", "e5m3") == (
+        missing is None
+    )
+    monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: (10, 0))
+    assert not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4", "e5m3")
+
+
 @pytest.fixture
 def traced_cudnn_grouped_glu_wrappers(monkeypatch):
     """Trace real cuDNN grouped GLU wrappers while preserving their execution."""
@@ -231,6 +258,7 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
         calls.append(
             {
                 "kind": "fwd",
+                "sf_fp8_dtype_override": kwargs.get("sf_fp8_dtype_override"),
                 "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
                 "a_dtype": kwargs["a_tensor"].dtype,
                 "b_dtype": _weight_dtype(kwargs),
@@ -263,6 +291,7 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
         calls.append(
             {
                 "kind": "bwd",
+                "sf_fp8_dtype_override": kwargs.get("sf_fp8_dtype_override"),
                 "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
                 "a_dtype": kwargs["a_tensor"].dtype,
                 "b_dtype": _weight_dtype(kwargs),
@@ -323,6 +352,7 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
             calls.append(
                 {
                     "kind": "fwd_hadamard_quant",
+                    "sf_fp8_dtype_override": kwargs.get("sf_fp8_dtype_override"),
                     "act_func": kwargs["act_func"],
                     **({"glu_layout": kwargs["glu_layout"]} if "glu_layout" in kwargs else {}),
                 }
@@ -350,6 +380,7 @@ def maybe_skip_quantization(
     dims: Optional[Iterable[int] | int] = None,
     device: Optional[torch.device | str] = None,
     dtype: Optional[torch.dtype] = None,
+    cudnn_only: bool = False,
 ) -> None:
     """Skip test case if a quantization scheme is not supported"""
 
@@ -366,8 +397,16 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_mxfp8)
     if quantization in nvfp4_variant_names and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
-    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and not fp8_ue5m3_available:
-        pytest.skip(reason_for_no_fp8_ue5m3)
+    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3"):
+        if cudnn_only:
+            # Strict FE-fusion tests never execute a UE5M3 cuBLAS GEMM. Keep
+            # cuBLAS's separate version prerequisite for the other tests.
+            if tuple(map(int, torch.version.cuda.split(".")[:2])) < (13, 4):
+                pytest.skip("UE5M3 requires CUDA 13.4+")
+            if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4", "e5m3"):
+                pytest.skip("UE5M3 cuDNN fusion requires SM107 and compatible FE kernels")
+        elif not fp8_ue5m3_available:
+            pytest.skip(reason_for_no_fp8_ue5m3)
 
     # Check dims
     if dims is not None:
@@ -1288,7 +1327,7 @@ class TestGroupedMLPFusedOp:
             monkeypatch.setattr(
                 grouped_mlp_module,
                 "_cudnn_frontend_supports_gate_then_up",
-                lambda precision: capability and precision == custom_precision,
+                lambda precision, *_: capability and precision == custom_precision,
             )
             custom = CustomRecipe(
                 qfactory=lambda role: (
@@ -1319,6 +1358,8 @@ class TestGroupedMLPFusedOp:
             ("mxfp8", True, True),
             ("nvfp4_rht", False, False),
             ("nvfp4_rht", True, False),
+            ("nvfp4_rht_ue5m3", False, False),
+            ("nvfp4_rht_ue5m3", True, False),
         ),
     )
     def test_glu_layout_training(
@@ -1331,7 +1372,13 @@ class TestGroupedMLPFusedOp:
         traced_cudnn_grouped_glu_wrappers,
     ):
         """Both GLU layouts execute fused training; canonical parameters retain storage order."""
-        precision = {None: "bf16", "mxfp8": "mxfp8", "nvfp4_rht": "nvfp4"}[quantization]
+        precision = (
+            "bf16"
+            if quantization is None
+            else "nvfp4" if quantization.startswith("nvfp4") else quantization
+        )
+        sf_override = "e5m3" if quantization == "nvfp4_rht_ue5m3" else None
+        maybe_skip_quantization(quantization, cudnn_only=True)
         fused_cls = (
             grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
             if quantization is None
@@ -1340,7 +1387,7 @@ class TestGroupedMLPFusedOp:
         if not fused_cls.is_supported():
             pytest.skip("The requested fused grouped GLU precision is unavailable")
         if glu_interleave_size is None and not (
-            grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision)
+            grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision, sf_override)
         ):
             pytest.skip("Canonical fused GLU requires device-specific cuDNN GLU layout support")
         self.test_grouped_mlp(
@@ -1360,6 +1407,8 @@ class TestGroupedMLPFusedOp:
         calls = traced_cudnn_grouped_glu_wrappers
         assert any(call["kind"].startswith("fwd") for call in calls)
         assert any(call["kind"] == "bwd" for call in calls)
+        if sf_override is not None:
+            assert all(call["sf_fp8_dtype_override"] == sf_override for call in calls)
         if glu_interleave_size is None:
             assert all(call["glu_layout"] == "gate_then_up" for call in calls)
         else:
@@ -1368,7 +1417,9 @@ class TestGroupedMLPFusedOp:
     @pytest.mark.parametrize(
         "missing_capability", (None, "gate_then_up", "natural_rank", "architecture")
     )
-    @pytest.mark.parametrize("quantization", ("nvfp4_rht", "nvfp4_rht_e4m3_input_unit_scale"))
+    @pytest.mark.parametrize(
+        "quantization", ("nvfp4_rht", "nvfp4_rht_e4m3_input_unit_scale", "nvfp4_rht_ue5m3")
+    )
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     def test_canonical_glu_rht_training(
         self,
@@ -1381,14 +1432,14 @@ class TestGroupedMLPFusedOp:
         """RHT training produces correct outputs and gradients across wrapper capabilities."""
         import cudnn
 
-        maybe_skip_quantization(quantization)
+        maybe_skip_quantization(quantization, cudnn_only=True)
         if not GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped GLU is unavailable")
         if glu_interleave_size is None and not (
             grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4")
         ):
             pytest.skip("Canonical NVFP4 GLU is unavailable")
-        fused_quant = quantization == "nvfp4_rht_e4m3_input_unit_scale"
+        fused_quant = quantization in ("nvfp4_rht_e4m3_input_unit_scale", "nvfp4_rht_ue5m3")
         # Columnwise RHT scale packing for wgrad was fixed in cuDNN FE 1.33.0:
         # https://github.com/NVIDIA/cudnn-frontend/pull/2484
         if fused_quant and not grouped_mlp_module._cudnn_frontend_version_at_least("1.33.0"):
@@ -1478,6 +1529,77 @@ class TestGroupedMLPFusedOp:
         assert any(call["kind"] == expected_forward for call in calls)
         assert any(call["kind"] == "bwd" for call in calls)
 
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    def test_canonical_glu_ue5m3_second_level_scaling(
+        self, monkeypatch, glu_interleave_size, traced_cudnn_grouped_glu_wrappers
+    ):
+        """A standard UE5M3 recipe keeps second-level scaling and uses separate RHT."""
+        from transformer_engine.common.recipe import Format, NVFP4BlockScaling
+
+        maybe_skip_quantization("nvfp4_rht_ue5m3", cudnn_only=True)
+        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4", "e5m3"):
+            pytest.skip("Canonical UE5M3 GLU is unavailable")
+        original_make_recipe = make_recipe
+
+        def standard_recipe(name, **kwargs):
+            if name == "nvfp4_rht_ue5m3":
+                return NVFP4BlockScaling(
+                    fp8_format=Format.UE5M3,
+                    disable_stochastic_rounding=True,
+                    disable_2d_quantization=True,
+                    **kwargs,
+                )
+            return original_make_recipe(name, **kwargs)
+
+        monkeypatch.setattr(sys.modules[__name__], "make_recipe", standard_recipe)
+        self.test_grouped_mlp(
+            enable_fusion=True,
+            bias=False,
+            hidden_size=128,
+            group_size=4,
+            quantization="nvfp4_rht_ue5m3",
+            single_grouped_weight=False,
+            activation="scaled_swiglu",
+            strict_fusion=True,
+            glu_interleave_size=glu_interleave_size,
+        )
+        calls = traced_cudnn_grouped_glu_wrappers
+        assert any(call["kind"] == "fwd" for call in calls)
+        assert any(call["kind"] == "bwd" for call in calls)
+        assert not any(call["kind"] in ("fwd_hadamard", "fwd_hadamard_quant") for call in calls)
+        assert all(call["sf_fp8_dtype_override"] == "e5m3" for call in calls)
+
+    def test_canonical_glu_ue5m3_old_rht_quant_fallback(
+        self, monkeypatch, traced_cudnn_grouped_glu_wrappers
+    ):
+        """Old FE RHT+quant capabilities must not imply canonical UE5M3 support."""
+        import cudnn
+
+        maybe_skip_quantization("nvfp4_rht_ue5m3", cudnn_only=True)
+        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4", "e5m3"):
+            pytest.skip("Canonical UE5M3 GLU is unavailable")
+        monkeypatch.delattr(
+            cudnn.grouped_gemm_glu_hadamard_quant_wrapper_sm100,
+            "supports_gate_then_up_sf_fp8_dtype_overrides",
+            raising=False,
+        )
+        _clear_grouped_glu_kernel_caches()
+        self.test_grouped_mlp(
+            enable_fusion=True,
+            bias=False,
+            hidden_size=128,
+            group_size=4,
+            quantization="nvfp4_rht_ue5m3",
+            single_grouped_weight=False,
+            activation="scaled_swiglu",
+            strict_fusion=True,
+            glu_interleave_size=None,
+        )
+        calls = traced_cudnn_grouped_glu_wrappers
+        assert any(call["kind"] == "fwd" for call in calls)
+        assert any(call["kind"] == "bwd" for call in calls)
+        assert not any(call["kind"] in ("fwd_hadamard", "fwd_hadamard_quant") for call in calls)
+
     @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     def test_interleaved_glu_legacy_tensor_api(
         self, monkeypatch, quantization, traced_cudnn_grouped_glu_wrappers
@@ -1531,12 +1653,14 @@ class TestGroupedMLPFusedOp:
 
     @pytest.mark.parametrize(
         "quantization,single_grouped_weight",
-        (("mxfp8", False), ("mxfp8", True), ("nvfp4_rht", False)),
+        (("mxfp8", False), ("mxfp8", True), ("nvfp4_rht", False), ("nvfp4_rht_ue5m3", False)),
     )
     def test_canonical_glu_graph_training(self, quantization, single_grouped_weight):
         """Captured canonical training replays with fresh inputs and correct main gradients."""
-        precision = "nvfp4" if quantization == "nvfp4_rht" else quantization
-        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision):
+        maybe_skip_quantization(quantization, cudnn_only=True)
+        precision = "nvfp4" if quantization.startswith("nvfp4") else quantization
+        sf_override = "e5m3" if quantization == "nvfp4_rht_ue5m3" else None
+        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision, sf_override):
             pytest.skip(f"Canonical {precision} GLU is unavailable")
         self.test_grouped_mlp_cuda_graph_safe(
             quantization=quantization,
@@ -1545,6 +1669,7 @@ class TestGroupedMLPFusedOp:
             activation="scaled_swiglu",
             glu_interleave_size=None,
             token_padding=0,
+            cudnn_only=True,
         )
 
     def test_fusion_requires_supported_grad_output_format(self, monkeypatch) -> None:
@@ -1655,7 +1780,13 @@ class TestGroupedMLPFusedOp:
         single_grouped_bias = bias and single_grouped_weight
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(
+            quantization,
+            dims=in_shape,
+            device=device,
+            dtype=dtype,
+            cudnn_only=strict_fusion is True,
+        )
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
         # Unquantized packed weights run through the BF16 fused grouped MLP.
@@ -2038,9 +2169,14 @@ class TestGroupedMLPFusedOp:
                                 glu_interleave_size is None
                                 and fc2.in_features % 128 == 0
                                 and activation == "scaled_swiglu"
-                                and quantization in ("nvfp4_rht", "nvfp4_rht_e4m3_input_unit_scale")
+                                and quantization
+                                in (
+                                    "nvfp4_rht",
+                                    "nvfp4_rht_e4m3_input_unit_scale",
+                                    "nvfp4_rht_ue5m3",
+                                )
                                 and grouped_mlp_module._cudnn_frontend_supports_gate_then_up(
-                                    "nvfp4"
+                                    "nvfp4", "e5m3" if quantization == "nvfp4_rht_ue5m3" else None
                                 )
                             )
                         )
@@ -3718,10 +3854,11 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
         token_padding: int = 2048,
+        cudnn_only: bool = False,
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable."""
 
-        maybe_skip_quantization(quantization, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype, cudnn_only=cudnn_only)
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
@@ -3801,7 +3938,11 @@ class TestGroupedMLPFusedOp:
                 reference_scaled_act,
                 reference_fc2,
             )
-        reference_module.load_state_dict(module.state_dict())
+        # Both modules already have the same recipe. Copy parameters directly:
+        # CustomRecipe factories may be local functions and are not pickleable.
+        with torch.no_grad():
+            for actual, reference in zip(module.parameters(), reference_module.parameters()):
+                reference.copy_(actual)
 
         def _init_main_grads(
             fc1: torch.nn.Module,
@@ -3962,6 +4103,9 @@ class TestGroupedMLPFusedOp:
                 static_split_sizes,
             )
         expected_out.backward(expected_dy)
+
+        if cudnn_only:
+            _assert_fused(reference_module)
 
         tols = dtype_tols(dtype)
         # The padded tail is outside every expert and its outputs/gradients are

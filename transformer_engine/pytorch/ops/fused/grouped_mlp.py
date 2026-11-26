@@ -1003,7 +1003,7 @@ def is_glu_activation(activation_op) -> bool:
     return isinstance(activation_op, (ScaledSwiGLU, ScaledSiTUGLU, ScaledClampedQGeGLU))
 
 
-def _cudnn_kernel_supports_gate_then_up(kernel, precision: str) -> bool:
+def _cudnn_kernel_supports_gate_then_up(kernel, precision: str, sf_fp8_dtype_override=None) -> bool:
     """Require natural tensor layouts and explicit gate/up channel-order support."""
     tensor_layout_capability = (
         "supports_bf16_canonical_layouts" if precision == "bf16" else "supports_canonical_layouts"
@@ -1014,6 +1014,15 @@ def _cudnn_kernel_supports_gate_then_up(kernel, precision: str) -> bool:
         and precision in getattr(kernel, "supports_gate_then_up_precisions", ())
         and get_device_compute_capability()
         in getattr(kernel, "supports_gate_then_up_archs", ((10, 0), (10, 3)))
+        and (
+            sf_fp8_dtype_override is None
+            or (
+                precision == "nvfp4"
+                and get_device_compute_capability() == (10, 7)
+                and sf_fp8_dtype_override
+                in getattr(kernel, "supports_gate_then_up_sf_fp8_dtype_overrides", ())
+            )
+        )
     )
 
 
@@ -1033,7 +1042,9 @@ def _gate_then_up_launch_kwargs(kernel) -> dict:
     }
 
 
-def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
+def _cudnn_frontend_supports_gate_then_up(
+    precision: str = "mxfp8", sf_fp8_dtype_override=None
+) -> bool:
     """Whether both GLU kernels accept canonical gate/up storage in a precision.
 
     ``supports_canonical_layouts`` describes tensor ranks and strides, not GLU
@@ -1050,7 +1061,7 @@ def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
     except ImportError:
         return False
     return all(
-        _cudnn_kernel_supports_gate_then_up(kernel, precision)
+        _cudnn_kernel_supports_gate_then_up(kernel, precision, sf_fp8_dtype_override)
         for kernel in (grouped_gemm_glu_wrapper_sm100, grouped_gemm_dglu_wrapper_sm100)
     )
 
@@ -1191,14 +1202,26 @@ def fuse_grouped_mlp_ops(
                     isinstance(window[1], ScaledSwiGLU) and window[1].glu_interleave_size is None
                 )
                 if recipe.custom():
-                    use_nvfp4 = isinstance(window[0].get_quantizer("forward", 0), NVFP4Quantizer)
+                    input_quantizer = window[0].get_quantizer("forward", 0)
+                    use_nvfp4 = isinstance(input_quantizer, NVFP4Quantizer)
+                    sf_override = _nvfp4_sf_dtype_override(input_quantizer) if use_nvfp4 else None
+                    grad_quantizer = window[2].get_quantizer("backward", 0)
+                    grad_sf_override = (
+                        _nvfp4_sf_dtype_override(grad_quantizer)
+                        if isinstance(grad_quantizer, NVFP4Quantizer)
+                        else None
+                    )
                 else:
                     use_nvfp4 = recipe.nvfp4()
+                    sf_override = (
+                        "e5m3" if use_nvfp4 and recipe.fp8_format == RecipeFormat.UE5M3 else None
+                    )
+                    grad_sf_override = sf_override
                 precision = "nvfp4" if use_nvfp4 else "mxfp8"
                 allow_gate_then_up = (
                     gate_then_up
-                    and (not recipe.nvfp4() or recipe.fp8_format != RecipeFormat.UE5M3)
-                    and _cudnn_frontend_supports_gate_then_up(precision)
+                    and _cudnn_frontend_supports_gate_then_up(precision, sf_override)
+                    and _cudnn_frontend_supports_gate_then_up(precision, grad_sf_override)
                 )
                 validate_grouped_mlp_dims(
                     window[0], window[1], window[2], allow_gate_then_up=allow_gate_then_up
@@ -1665,6 +1688,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Select FC1 fusion without changing the quantization recipe.
         kernel_impl = "gemm_act"
         fc1_kernel = self.grouped_gemm_activation_kernel()
+        sf_override = _nvfp4_sf_dtype_override(fc1_input_quantizer) if use_nvfp4 else None
+        if self._gate_then_up and not _cudnn_kernel_supports_gate_then_up(
+            fc1_kernel, "nvfp4" if use_nvfp4 else "mxfp8", sf_override
+        ):
+            raise RuntimeError("cuDNN FE does not support gate_then_up with these scale factors.")
         if (
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
@@ -1674,16 +1702,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 rht_kernel = self.grouped_gemm_act_hadamard_quant_kernel()
                 supports_weight_layout = rht_kernel is not None and (
                     not self._gate_then_up
-                    or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
+                    or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4", sf_override)
                 )
                 if (
                     supports_weight_layout
                     and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
                     and fc1_bias_packed is None
                     and self._cudnn_act_func == "swiglu"
+                    and sf_override == _nvfp4_sf_dtype_override(fc2_input_quantizer)
                 ):
                     kernel_impl, fc1_kernel = "gemm_act_rht_quant", rht_kernel
-            elif fc2_input_quantizer.with_post_rht_amax:
+            elif fc2_input_quantizer.with_post_rht_amax and sf_override is None:
+                # This wrapper has no scale-format override; UE5M3 uses separate RHT/quant.
                 rht_kernel = self.grouped_gemm_act_hadamard_kernel()
                 supports_weight_layout = rht_kernel is not None and (
                     not self._gate_then_up
@@ -2707,6 +2737,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = use_dense_single_group
         fc2_sf_dtype_override = _nvfp4_sf_dtype_override(fc2_grad_output_quantizer)
+        if self._gate_then_up and not _cudnn_kernel_supports_gate_then_up(
+            dactivation_kernel, "nvfp4" if use_nvfp4 else "mxfp8", fc2_sf_dtype_override
+        ):
+            raise RuntimeError("cuDNN FE does not support gate_then_up with these gradient scales.")
         if fc2_sf_dtype_override is not None:
             fc2_dactivation_kwargs["sf_fp8_dtype_override"] = fc2_sf_dtype_override
         if self._cudnn_dact_func is not None:

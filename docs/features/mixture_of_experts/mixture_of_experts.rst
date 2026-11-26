@@ -459,8 +459,15 @@ explicitly advertise support for this layout on that architecture; a version
 number alone is not sufficient. TE uses each kernel's architecture-specific
 preferred tile when available. When the installed cuDNN Frontend lacks the
 required capabilities, TE uses separate operations. Custom recipes must
-explicitly enable grouped MLP fusion and use compatible quantizers. UE5M3
-scales and deterministic block-scaled fusion on SM107 remain unsupported.
+explicitly enable grouped MLP fusion and use compatible quantizers.
+NVFP4 with UE5M3 scales is additionally supported on SM107 when the GLU and
+dGLU wrappers advertise ``supports_gate_then_up_sf_fp8_dtype_overrides=("e5m3",)``.
+The RHT+quant wrapper must advertise that capability separately. With
+second-level activation scaling enabled, UE5M3 uses ordinary GLU followed
+by separate RHT and quantization: the RHT+amax wrapper has no UE5M3 override.
+TE does not disable second-level scaling to select a fusion. Deterministic
+block-scaled fusion on SM107 remains unsupported. The cuBLAS UE5M3 version
+requirement still applies to paths that use cuBLAS rather than these FE kernels.
 
 FC1 can fuse GEMM with SwiGLU; MXFP8 also fuses quantization. Depending on the
 recipe, NVFP4 can additionally fuse a randomized Hadamard transform (RHT) with
