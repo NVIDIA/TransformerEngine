@@ -293,6 +293,17 @@ __global__ void HadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor
       }
       // Ensure all threads have finished their computation before new data over-writes the shared
       // memory.
+      if constexpr (kReturnPreRhtAmax || kReturnIdentityAmax || kReturnTransposedAmax) {
+        asm volatile(
+#if defined(__CUDACC_VER_MAJOR__) && \
+    (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4))
+            "fence.proxy.async::generic.release.sync_restrict::shared::cluster::read.cluster;"
+#else
+            "fence.proxy.async.shared::cta;"
+#endif
+            ::
+                : "memory");
+      }
       __syncthreads();
       // Ensure generic shared-memory accesses are visible before the next TMA write.
       ptx::fence_proxy_async_shared_cta();
