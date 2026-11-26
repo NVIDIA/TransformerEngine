@@ -453,10 +453,14 @@ does not convert an existing checkpoint: the training framework must keep model
 parameters and optimizer state consistent when switching layouts.
 
 The uninterleaved fused path supports BF16, MXFP8 with E8M0 scales, and NVFP4
-with E4M3 scales on SM100 and SM103. It requires an FFN dimension divisible by
-128. When the installed cuDNN Frontend lacks support for this layout, TE uses
-separate operations. Custom recipes must explicitly enable grouped MLP fusion
-and use compatible quantizers.
+with E4M3 scales on SM100, SM103, and SM107. It requires an FFN dimension
+divisible by 128. SM107 additionally requires cuDNN Frontend kernels that
+explicitly advertise support for this layout on that architecture; a version
+number alone is not sufficient. TE uses each kernel's architecture-specific
+preferred tile when available. When the installed cuDNN Frontend lacks the
+required capabilities, TE uses separate operations. Custom recipes must
+explicitly enable grouped MLP fusion and use compatible quantizers. UE5M3
+scales and deterministic block-scaled fusion on SM107 remain unsupported.
 
 FC1 can fuse GEMM with SwiGLU; MXFP8 also fuses quantization. Depending on the
 recipe, NVFP4 can additionally fuse a randomized Hadamard transform (RHT) with

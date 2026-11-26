@@ -1012,12 +1012,17 @@ def _cudnn_kernel_supports_gate_then_up(kernel, precision: str) -> bool:
         getattr(kernel, tensor_layout_capability, False)
         and "gate_then_up" in getattr(kernel, "supports_glu_layouts", ())
         and precision in getattr(kernel, "supports_gate_then_up_precisions", ())
+        and get_device_compute_capability()
+        in getattr(kernel, "supports_gate_then_up_archs", ((10, 0), (10, 3)))
     )
 
 
 def _gate_then_up_launch_kwargs(kernel) -> dict:
     """Use the selected kernel's preferred or supported gate/up tile."""
-    tile = getattr(kernel, "preferred_gate_then_up_mma_tiler", None)
+    tile = getattr(kernel, "preferred_gate_then_up_mma_tiler_by_arch", {}).get(
+        get_device_compute_capability(),
+        getattr(kernel, "preferred_gate_then_up_mma_tiler", None),
+    )
     if tile is None:
         tilers = getattr(kernel, "supports_gate_then_up_mma_tilers", ((128, 256),))
         tile = (128, 256) if (128, 256) in tilers else tilers[0]
@@ -1035,7 +1040,7 @@ def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
     channel order. New gate/up fusion requires both capabilities; legacy
     interleave32 callers retain their existing tensor-layout compatibility.
     """
-    if get_device_compute_capability() not in ((10, 0), (10, 3)):
+    if get_device_compute_capability() not in ((10, 0), (10, 3), (10, 7)):
         return False
     try:
         from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
@@ -3800,9 +3805,8 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        # Blackwell only: the BF16 kernels have no Rubin (SM 10.7) variant.
         device_arch = get_device_compute_capability()
-        if not (device_arch[0] == 10 and device_arch[1] < 7):
+        if device_arch not in ((10, 0), (10, 3), (10, 7)):
             return False
         # Canonical layouts and device-only offsets need cuDNN frontend PR #1602.
         if not _cudnn_frontend_version_at_least(_BF16_MIN_CUDNN_FRONTEND_VERSION):
@@ -3815,6 +3819,10 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
                 cls.grouped_gemm_wgrad_kernel(),
             )
         except ImportError:
+            return False
+        if device_arch == (10, 7) and not all(
+            _cudnn_kernel_supports_gate_then_up(kernel, "bf16") for kernel in kernels[1:3]
+        ):
             return False
         return all(getattr(k, "supports_bf16_canonical_layouts", False) for k in kernels)
 

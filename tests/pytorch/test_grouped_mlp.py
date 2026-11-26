@@ -185,6 +185,22 @@ def test_canonical_glu_feature_detection(monkeypatch, missing, precision) -> Non
     assert not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("unsupported")
     monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: (10, 7))
     assert not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision)
+    # An old FE must still fall back on Rubin, even if Blackwell is supported.
+    for name in ("grouped_gemm_glu_wrapper_sm100", "grouped_gemm_dglu_wrapper_sm100"):
+        getattr(fake_cudnn, name).supports_gate_then_up_archs = ((10, 0), (10, 3), (10, 7))
+    assert grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision) == (missing is None)
+
+
+@pytest.mark.parametrize("cc,expected", [((10, 0), (128, 256)), ((10, 7), (256, 256))])
+def test_canonical_glu_arch_specific_launch(monkeypatch, cc, expected) -> None:
+    wrapper = types.SimpleNamespace(
+        supports_gate_then_up_mma_tilers=((128, 256),),
+        preferred_gate_then_up_mma_tiler_by_arch={(10, 0): (128, 256), (10, 7): (256, 256)},
+    )
+    monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: cc)
+    kwargs = grouped_mlp_module._gate_then_up_launch_kwargs(wrapper)
+    assert kwargs["mma_tiler_mn"] == expected
+    assert kwargs["cluster_shape_mn"] == ((1, 1) if cc == (10, 0) else (2, 1))
 
 
 @pytest.fixture
@@ -1338,7 +1354,7 @@ class TestGroupedMLPFusedOp:
         if glu_interleave_size is None and not (
             grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision)
         ):
-            pytest.skip("Canonical fused GLU requires SM100/103 and cuDNN GLU layout support")
+            pytest.skip("Canonical fused GLU requires device-specific cuDNN GLU layout support")
         self.test_grouped_mlp(
             enable_fusion=True,
             bias=precision != "nvfp4",
@@ -1377,7 +1393,7 @@ class TestGroupedMLPFusedOp:
 
         precision = "mxfp8" if quantization == "mxfp8" else "nvfp4"
         if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision):
-            pytest.skip("Canonical GLU requires SM100/103 and cuDNN layout support")
+            pytest.skip("Canonical GLU requires device-specific cuDNN layout support")
         wrapper = cudnn.grouped_gemm_glu_wrapper_sm100
         if preferred_tile is None:
             monkeypatch.delattr(wrapper, "preferred_gate_then_up_mma_tiler", raising=False)
@@ -1415,7 +1431,9 @@ class TestGroupedMLPFusedOp:
         else:
             assert all("mma_tiler_mn" not in call for call in forwards)
 
-    @pytest.mark.parametrize("missing_capability", (None, "gate_then_up", "natural_rank"))
+    @pytest.mark.parametrize(
+        "missing_capability", (None, "gate_then_up", "natural_rank", "architecture")
+    )
     @pytest.mark.parametrize("quantization", ("nvfp4_rht", "nvfp4_rht_e4m3_input_unit_scale"))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     def test_canonical_glu_rht_training(
@@ -1457,6 +1475,8 @@ class TestGroupedMLPFusedOp:
             monkeypatch.setattr(kernel, "supports_glu_layouts", ("interleaved_32",), raising=False)
         elif missing_capability == "natural_rank":
             monkeypatch.setattr(kernel, "supports_canonical_layouts", False, raising=False)
+        elif missing_capability == "architecture":
+            monkeypatch.setattr(kernel, "supports_gate_then_up_archs", (), raising=False)
         _clear_grouped_glu_kernel_caches()
 
         self.test_grouped_mlp(
@@ -1474,6 +1494,9 @@ class TestGroupedMLPFusedOp:
         if glu_interleave_size is None and missing_capability is not None:
             forbidden_kind = "fwd_hadamard_quant" if fused_quant else "fwd_hadamard"
             assert not any(call["kind"] == forbidden_kind for call in calls)
+        else:
+            expected_kind = "fwd_hadamard_quant" if fused_quant else "fwd_hadamard"
+            assert any(call["kind"] == expected_kind for call in calls)
         # RHT may run in the GLU kernel or in the subsequent quantizer.
         forwards = [call for call in calls if call["kind"].startswith("fwd")]
         assert forwards
@@ -2113,7 +2136,7 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
-        # Unquantized BF16 must fuse on Blackwell (including FC1 bias and FC2
+        # Unquantized BF16 must fuse on supported devices (including FC1 bias and FC2
         # scale_bias), so these cases cannot pass on the unfused path. Custom GeGLU
         # constants have no BF16 kernel and decline.
         bf16_fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLUBf16
@@ -5283,17 +5306,20 @@ class TestGroupedMLPBf16FusedOp:
             pytest.skip("BF16 fused grouped MLP is not supported on this system")
 
     @pytest.mark.parametrize(
-        "arch,version_ok,has_flag,expected",
+        "arch,version_ok,has_flag,has_rubin,expected",
         (
-            ((10, 0), True, True, True),
-            ((10, 3), True, True, True),
-            ((10, 7), True, True, False),  # Rubin
-            ((10, 0), False, True, False),  # cuDNN frontend older than 1.32.0
-            ((10, 0), True, False, False),  # develop build reporting 1.32.0 before PR #1602
+            ((10, 0), True, True, False, True),
+            ((10, 3), True, True, False, True),
+            ((10, 7), True, True, False, False),  # Older FE on Rubin
+            ((10, 7), True, True, True, True),
+            ((10, 0), False, True, False, False),  # cuDNN frontend older than 1.32.0
+            ((10, 0), True, False, False, False),  # develop before PR #1602
         ),
     )
-    def test_is_supported(self, monkeypatch, arch, version_ok, has_flag, expected) -> None:
-        """Support needs Blackwell, cuDNN frontend >= 1.32.0, and the canonical-layout flag."""
+    def test_is_supported(
+        self, monkeypatch, arch, version_ok, has_flag, has_rubin, expected
+    ) -> None:
+        """Rubin additionally requires an explicit FE capability, not just a version."""
         fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
         monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: arch)
         monkeypatch.setattr(
@@ -5309,6 +5335,10 @@ class TestGroupedMLPBf16FusedOp:
 
         if has_flag:
             wrapper.supports_bf16_canonical_layouts = True
+        if has_rubin:
+            wrapper.supports_gate_then_up_archs = ((10, 7),)
+            wrapper.supports_gate_then_up_precisions = ("bf16",)
+            wrapper.supports_glu_layouts = ("gate_then_up",)
         for getter in (
             "grouped_gemm_kernel",
             "grouped_gemm_activation_kernel",
