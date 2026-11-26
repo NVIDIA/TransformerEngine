@@ -21,7 +21,7 @@ from ..utils import ceil_div, devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -330,23 +330,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def clone(self) -> MXFP8Tensor:
-        # pylint: disable=missing-function-docstring
-        # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)
-        rowwise_data = (
-            self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
-        )
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
-
     def view(self, *shape: Tuple[int]) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
@@ -608,9 +591,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
                 device=tensor.device,
             )
-
-        if func == torch.ops.aten.clone.default:
-            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
