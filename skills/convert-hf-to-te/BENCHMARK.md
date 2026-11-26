@@ -10,11 +10,11 @@ Recommended for publication based on the completed evaluation evidence in this r
 
 - Skill: `convert-hf-to-te`
 - Validation status: `passed`
-- Evaluation date: 2026-11-25
+- Evaluation date: 2026-11-26
 - Evaluator version: `1.6.10`
 - Agents: Claude Code (`aws/anthropic/bedrock-claude-opus-5-5`), Codex (`openai/openai/gpt-6.1-sol`)
-- Tasks: 5 evaluation tasks (4 positive, 1 negative)
-- Dataset digest: `sha256:ccb38af4f6811591262f8f59e921b0fd34c9376acc585696029b28aa0bbcceb0` (skill-evaluator-dataset-snapshot/1)
+- Tasks: 6 evaluation tasks (5 positive, 1 negative)
+- Dataset digest: `sha256:b956789e60d2f41f23acc718ddcf99f42a96405ca2a6a86f54ac6ab0efae1aa3` (skill-evaluator-dataset-snapshot/1)
 - Attempts per task: 1
 - Environment: `k8s-sandbox`
 - Tier 2 evidence: required for publication
@@ -50,12 +50,12 @@ The three-tier evaluation checks whether the skill:
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 81.4% — baseline ran, but no comparable score was available; uplift unavailable | 84.7% — baseline ran, but no comparable score was available; uplift unavailable |
-| Security | 80.0% → 80.0% (±0.0 points) | 60.0% → 70.0% (+10.0 points) |
-| Correctness | 100.0% → 88.0% (-12.0 points) | 100.0% → 100.0% (±0.0 points) |
-| Discoverability | 81.5% — baseline ran, but no comparable score was available; uplift unavailable | 87.5% — baseline ran, but no comparable score was available; uplift unavailable |
-| Effectiveness | 96.0% → 75.3% (-20.7 points) | 84.5% → 100.0% (+15.5 points) |
-| Efficiency | 82.1% — baseline ran, but no comparable score was available; uplift unavailable | 65.8% — baseline ran, but no comparable score was available; uplift unavailable |
+| Overall | 84.0% — baseline ran, but no comparable score was available; uplift unavailable | 77.6% — baseline ran, but no comparable score was available; uplift unavailable |
+| Security | 75.0% → 75.0% (±0.0 points) | 66.7% → 58.3% (-8.4 points) |
+| Correctness | 100.0% → 86.7% (-13.3 points) | 100.0% → 96.7% (-3.3 points) |
+| Discoverability | 83.0% — baseline ran, but no comparable score was available; uplift unavailable | 84.0% — baseline ran, but no comparable score was available; uplift unavailable |
+| Effectiveness | 98.3% → 98.3% (±0.0 points) | 93.5% → 88.3% (-5.2 points) |
+| Efficiency | 76.8% — baseline ran, but no comparable score was available; uplift unavailable | 60.4% — baseline ran, but no comparable score was available; uplift unavailable |
 
 **How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is derived from those displayed scores and shown in percentage points.
 
@@ -70,9 +70,9 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 88.9% → 88.8% (-0.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 87.2% → 85.9% (-1.3 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| codex | Efficiency | Token-only comparison | 75.8% → 80.9% (+5.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| codex | Efficiency | Token-only comparison | 75.5% → 75.7% (+0.2 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 
 ## Token Usage
 
@@ -80,19 +80,21 @@ Actual Tier 3 execution usage is reported for every observed agent/case pair and
 
 | Agent | Dataset case | With skill | Without skill | Delta | Change | Coverage |
 |---|---|---:|---:|---:|---:|---|
-| claude-code | All cases | 2,044,896 | 1,751,656 | +293,240 | +16.74% | skill 5/5; base 5/5 |
-| claude-code | convert-hf-to-te-001 | 458,405 | 565,868 | -107,463 | -18.99% | skill 1/1; base 1/1 |
-| claude-code | convert-hf-to-te-002 | 36,548 | 35,911 | +637 | +1.77% | skill 1/1; base 1/1 |
-| claude-code | convert-hf-to-te-003 | 71,422 | 106,498 | -35,076 | -32.94% | skill 1/1; base 1/1 |
-| claude-code | convert-hf-to-te-004 | 1,185,787 | 833,768 | +352,019 | +42.22% | skill 1/1; base 1/1 |
-| claude-code | convert-hf-to-te-006 | 292,734 | 209,611 | +83,123 | +39.66% | skill 1/1; base 1/1 |
-| codex | All cases | 1,460,608 | 1,719,756 | -259,148 | -15.07% | skill 5/5; base 5/5 |
-| codex | convert-hf-to-te-001 | 333,040 | 399,003 | -65,963 | -16.53% | skill 1/1; base 1/1 |
-| codex | convert-hf-to-te-002 | 26,656 | 26,899 | -243 | -0.90% | skill 1/1; base 1/1 |
-| codex | convert-hf-to-te-003 | 46,603 | 43,434 | +3,169 | +7.30% | skill 1/1; base 1/1 |
-| codex | convert-hf-to-te-004 | 555,542 | 736,110 | -180,568 | -24.53% | skill 1/1; base 1/1 |
-| codex | convert-hf-to-te-006 | 498,767 | 514,310 | -15,543 | -3.02% | skill 1/1; base 1/1 |
-| ALL AGENTS | Dataset aggregate | 3,505,504 | 3,471,412 | +34,092 | +0.98% | skill 10/10; base 10/10 |
+| claude-code | All cases | 3,130,236 | 2,705,716 | +424,520 | +15.69% | skill 6/6; base 6/6 |
+| claude-code | convert-hf-to-te-001 | 678,576 | 510,920 | +167,656 | +32.81% | skill 1/1; base 1/1 |
+| claude-code | convert-hf-to-te-002 | 35,886 | 36,154 | -268 | -0.74% | skill 1/1; base 1/1 |
+| claude-code | convert-hf-to-te-003 | 77,132 | 142,222 | -65,090 | -45.77% | skill 1/1; base 1/1 |
+| claude-code | convert-hf-to-te-004 | 382,962 | 681,200 | -298,238 | -43.78% | skill 1/1; base 1/1 |
+| claude-code | convert-hf-to-te-006 | 435,647 | 315,074 | +120,573 | +38.27% | skill 1/1; base 1/1 |
+| claude-code | convert-hf-to-te-007 | 1,520,033 | 1,020,146 | +499,887 | +49.00% | skill 1/1; base 1/1 |
+| codex | All cases | 2,073,128 | 2,555,807 | -482,679 | -18.89% | skill 6/6; base 6/6 |
+| codex | convert-hf-to-te-001 | 296,247 | 192,921 | +103,326 | +53.56% | skill 1/1; base 1/1 |
+| codex | convert-hf-to-te-002 | 30,840 | 26,499 | +4,341 | +16.38% | skill 1/1; base 1/1 |
+| codex | convert-hf-to-te-003 | 54,150 | 38,479 | +15,671 | +40.73% | skill 1/1; base 1/1 |
+| codex | convert-hf-to-te-004 | 649,640 | 756,717 | -107,077 | -14.15% | skill 1/1; base 1/1 |
+| codex | convert-hf-to-te-006 | 308,970 | 989,618 | -680,648 | -68.78% | skill 1/1; base 1/1 |
+| codex | convert-hf-to-te-007 | 733,281 | 551,573 | +181,708 | +32.94% | skill 1/1; base 1/1 |
+| ALL AGENTS | Dataset aggregate | 5,203,364 | 5,261,523 | -58,159 | -1.11% | skill 12/12; base 12/12 |
 
 Prompt tokens include cached reads, so total tokens are `prompt + completion` (cached is not added twice). The Efficiency score uses `(prompt - cached) + completion`. Change is `100 * (with - without) / without`; negative means fewer tokens. N/A comparisons include their reason in the coverage column; coverage is never estimated.
 
@@ -102,7 +104,7 @@ Prompt tokens include cached reads, so total tokens are `prompt + completion` (c
 |---|---|---|---|
 | Tier 1 | Static validation | **PASSED WITH OBSERVATIONS** | 11 validator(s); 10 finding(s) |
 | Tier 2 | Semantic deduplication | **PASSED** | 2 validator(s); 0 finding(s) |
-| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 5 task(s) |
+| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 6 task(s) |
 
 ## Findings and Observations
 
@@ -111,7 +113,7 @@ Prompt tokens include cached reads, so total tokens are `prompt + completion` (c
 
 - **MEDIUM** SCHEMA/body_recommended_section: Missing recommended section: '## Instructions' (`skills/convert-hf-to-te/SKILL.md`)
 - **MEDIUM** SCHEMA/body_recommended_section: Missing recommended section: '## Examples' (`skills/convert-hf-to-te/SKILL.md`)
-- **MEDIUM** SECURITY/Skill Enumeration (AS3): Agent Snooping: skills/bionemo-recipes-acceleration/SKILL.md (`SKILL.md:204`)
+- **MEDIUM** SECURITY/Skill Enumeration (AS3): Agent Snooping: skills/bionemo-recipes-acceleration/SKILL.md (`SKILL.md:226`)
 - **LOW** QUALITY/quality_correctness: No examples provided (`skills/convert-hf-to-te/SKILL.md`)
 - **LOW** QUALITY/quality_discoverability: Description very long (245 chars, recommend 50-150) (`skills/convert-hf-to-te/SKILL.md`)
 - 5 additional finding(s) are available in the full evaluation artifacts.

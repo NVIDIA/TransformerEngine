@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to convert Hugging Face PyTorch models (dense or mixture-of-experts) to use NVIDIA Transformer Engine modules for training, including choosing replacement granularity and fusions, mapping checkpoint weights, and validating numerical parity and performance against the original model. <br>
+Developers and engineers use this skill to convert Hugging Face PyTorch models (dense or mixture-of-experts) to use NVIDIA Transformer Engine modules for training, including choosing replacement granularity and fusions, mapping checkpoint weights, and validating numerical parity, FP8 training and performance against the original model. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -28,10 +28,15 @@ Mitigation: Review and scan skill before deployment. <br>
 - [Transformer Engine documentation](https://docs.nvidia.com/deeplearning/transformer-engine/index.html) <br>
 - [Transformer Engine PyTorch API](https://docs.nvidia.com/deeplearning/transformer-engine/api/pytorch.html) <br>
 - [Transformer Engine operation fuser guide](https://docs.nvidia.com/deeplearning/transformer-engine/examples/op_fuser/op_fuser.html) <br>
+- [FP8 primer: FP8 autocasting](https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html#FP8-autocasting) <br>
+- [Llama FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_llama/tutorial_accelerate_hf_llama_with_te.html#How-to-run-the-model-in-FP8-precision) <br>
+- [Mixtral MXFP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_mixtral/tutorial_accelerate_hf_mixtral_with_te.html#%5BImprovement-3%5D-Precision-Optimization-and-Fused-MLP-%28Precision%3A-MXFP8%29) <br>
+- [Gemma FP8 inference tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_gemma/tutorial_generation_gemma_with_te.html#Calibrating-FP8-scaling-factors-for-correctness) <br>
 - [te_llama.py example](https://github.com/NVIDIA/TransformerEngine/blob/db1aff638b070cb9d08a0dc91629ff1457ead413/docs/examples/te_llama/te_llama.py) <br>
 - [te_gemma.py example](https://github.com/NVIDIA/TransformerEngine/blob/db1aff638b070cb9d08a0dc91629ff1457ead413/docs/examples/te_gemma/te_gemma.py) <br>
 - [te_mixtral.py example](https://github.com/NVIDIA/TransformerEngine/blob/db1aff638b070cb9d08a0dc91629ff1457ead413/docs/examples/te_mixtral/te_mixtral.py) <br>
 - [Mixtral HF-to-TE weight mapping](https://github.com/NVIDIA/TransformerEngine/blob/db1aff638b070cb9d08a0dc91629ff1457ead413/docs/examples/te_mixtral/hf_to_te_weights.py) <br>
+- [Evaluation cases (EVAL.md)](evals/EVAL.md) <br>
 
 
 ## Skill Output: <br>
@@ -47,7 +52,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Evaluation Tasks: <br>
-5 evaluation tasks (4 positive, 1 negative), 1 attempt per task, each run with and without the skill in its own isolated sandbox pod (`k8s-sandbox` environment); evaluator version `1.6.10`, evaluated 2026-11-25. <br>
+6 evaluation tasks (5 positive, 1 negative), 1 attempt per task, each run with and without the skill in its own isolated sandbox pod (`k8s-sandbox` environment); evaluator version `1.6.10`, evaluated 2026-11-26. <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
@@ -79,12 +84,12 @@ Recommended for publication based on the completed evaluation evidence in this r
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 81.4% — baseline ran, but no comparable score was available; uplift unavailable | 84.7% — baseline ran, but no comparable score was available; uplift unavailable |
-| Security | 80.0% → 80.0% (±0.0 points) | 60.0% → 70.0% (+10.0 points) |
-| Correctness | 100.0% → 88.0% (-12.0 points) | 100.0% → 100.0% (±0.0 points) |
-| Discoverability | 81.5% — baseline ran, but no comparable score was available; uplift unavailable | 87.5% — baseline ran, but no comparable score was available; uplift unavailable |
-| Effectiveness | 96.0% → 75.3% (-20.7 points) | 84.5% → 100.0% (+15.5 points) |
-| Efficiency | 82.1% — baseline ran, but no comparable score was available; uplift unavailable | 65.8% — baseline ran, but no comparable score was available; uplift unavailable |
+| Overall | 84.0% — baseline ran, but no comparable score was available; uplift unavailable | 77.6% — baseline ran, but no comparable score was available; uplift unavailable |
+| Security | 75.0% → 75.0% (±0.0 points) | 66.7% → 58.3% (-8.4 points) |
+| Correctness | 100.0% → 86.7% (-13.3 points) | 100.0% → 96.7% (-3.3 points) |
+| Discoverability | 83.0% — baseline ran, but no comparable score was available; uplift unavailable | 84.0% — baseline ran, but no comparable score was available; uplift unavailable |
+| Effectiveness | 98.3% → 98.3% (±0.0 points) | 93.5% → 88.3% (-5.2 points) |
+| Efficiency | 76.8% — baseline ran, but no comparable score was available; uplift unavailable | 60.4% — baseline ran, but no comparable score was available; uplift unavailable |
 
 **How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is derived from those displayed scores and shown in percentage points.
 
@@ -99,9 +104,9 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 88.9% → 88.8% (-0.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 87.2% → 85.9% (-1.3 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| codex | Efficiency | Token-only comparison | 75.8% → 80.9% (+5.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| codex | Efficiency | Token-only comparison | 75.5% → 75.7% (+0.2 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 
 ### Tier Status
 
@@ -109,7 +114,7 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 |---|---|---|---|
 | Tier 1 | Static validation | **PASSED WITH OBSERVATIONS** | 11 validator(s); 10 finding(s) |
 | Tier 2 | Semantic deduplication | **PASSED** | 2 validator(s); 0 finding(s) |
-| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 5 task(s) |
+| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 6 task(s) |
 
 ## Skill Version(s): <br>
 0.4.0 (source: frontmatter) <br>
