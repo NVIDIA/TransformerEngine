@@ -23,7 +23,7 @@ pip3 install wheel || error_exit "Failed to install wheel"
 cd $TE_PATH
 pip3 uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-torch || error_exit "Failed to uninstall transformer-engine transformer-engine-cu12 transformer-engine-torch"
 
-VERSION=`cat $TE_PATH/build_tools/VERSION.txt`
+VERSION=$(NVTE_RELEASE_BUILD=1 python3 -c "from build_tools.te_version import te_version; print(te_version())") || error_exit "Failed to get the Transformer Engine version"
 WHL_BASE="transformer_engine-${VERSION}"
 
 # Core wheel.
