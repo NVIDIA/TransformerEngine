@@ -20,7 +20,7 @@ from .storage.float8_blockwise_tensor_storage import (
 )
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import safe_quantized_repr
 from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -361,22 +361,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if torch.is_grad_enabled():
             return _FromFloat8BlockwiseFunc.apply(self, dequant_dtype)
         return _FromFloat8BlockwiseFunc.forward(None, self, dequant_dtype)
-
-    def clone(self) -> Float8BlockwiseQTensor:
-        # pylint: disable=missing-function-docstring
-        rowwise_data = None
-        if self._rowwise_data is not None:
-            rowwise_data = self._rowwise_data.detach().clone()
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
