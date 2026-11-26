@@ -117,7 +117,8 @@ def test_current_device(model, module):
             config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}"
         )
         cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
-        num_tokens = cu_seqlens_q[-1]
+        num_tokens_q = cu_seqlens_q[-1]
+        num_tokens_kv = cu_seqlens_kv[-1]
         args = [
             torch.randn(
                 num_tokens,
@@ -127,14 +128,16 @@ def test_current_device(model, module):
                 device=f"cuda:{tensor_device}",
                 requires_grad=True,
             )
-            for _ in range(3)
+            for num_tokens in (num_tokens_q, num_tokens_kv, num_tokens_kv)
         ]
         kwargs["cu_seqlens_q"] = cu_seqlens_q
         kwargs["cu_seqlens_kv"] = cu_seqlens_kv
         kwargs["max_seqlen_q"] = config.max_seqlen_q
         kwargs["max_seqlen_kv"] = config.max_seqlen_kv
         bwd_args = [
-            torch.randn(num_tokens, config.hidden_size, dtype=dtype, device=f"cuda:{tensor_device}")
+            torch.randn(
+                num_tokens_q, config.hidden_size, dtype=dtype, device=f"cuda:{tensor_device}"
+            )
         ]
     elif module == "Linear":
         model = Linear(
