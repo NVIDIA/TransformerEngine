@@ -186,7 +186,11 @@ TE backend. In a manual loop, wrap the model forward in `with te.autocast(enable
 and call `loss.backward()` after leaving the context. Keep the baseline parameter and loss dtypes.
 Compare loss and a gradient or update for a replaced weight against the matched BF16 run using
 recipe-specific tolerances. Report the FP8 check as pending if the target is unavailable.
-[TE training example](https://github.com/NVIDIA/TransformerEngine/blob/27486e03cfc1fa41f6932dcecdc47c71c47eac3e/README.rst#L75-L98)
+
+- Manual PyTorch forward and backward with TE autocast. [FP8 primer](https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html#FP8-autocasting)
+- Configure Accelerate's TE backend for FP8 fine-tuning. [Llama FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_llama/tutorial_accelerate_hf_llama_with_te.html#How-to-run-the-model-in-FP8-precision)
+- Use MXFP8 for the fused expert MLP on Blackwell. [Mixtral MXFP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_mixtral/tutorial_accelerate_hf_mixtral_with_te.html#%5BImprovement-3%5D-Precision-Optimization-and-Fused-MLP-%28Precision%3A-MXFP8%29)
+- Calibrate FP8 scales for token generation. [Gemma FP8 inference tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/te_gemma/tutorial_generation_gemma_with_te.html#Calibrating-FP8-scaling-factors-for-correctness)
 
 Before recommending a speedup, warm up and synchronize end-to-end runs of optimized HF and TE.
 Compare them first in BF16 with matched effective tokens, batching and GPU topology. Measure a
