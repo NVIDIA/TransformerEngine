@@ -583,6 +583,10 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
+      // 2D quantization replicates each 16x16 block scale into the 1x16
+      // scale layout consumed by GEMM. The 1D scaling enum describes that storage
+      // format; nvfp4_2d_quantization selects how the scales are computed.
+      // Both quantization algorithms therefore use this scaling-mode branch.
       if (!output_tensor->row_scaled_nvfp4) {
         NVTE_CHECK(quant_config_cpp.nvfp4_2d_quantization,
                    "Per-tensor amax with 1D grouped NVFP4 quantization is not implemented.");
