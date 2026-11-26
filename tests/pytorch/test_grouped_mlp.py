@@ -1452,10 +1452,13 @@ class TestGroupedMLPFusedOp:
         kernel = getattr(cudnn, name, None)
         if kernel is None:
             pytest.skip(f"{name} is unavailable")
+        sf_override = "e5m3" if quantization == "nvfp4_rht_ue5m3" else None
         if glu_interleave_size is None and not (
-            grouped_mlp_module._cudnn_kernel_supports_gate_then_up(kernel, "nvfp4")
+            grouped_mlp_module._cudnn_kernel_supports_gate_then_up(kernel, "nvfp4", sf_override)
         ):
-            pytest.skip(f"{name} does not advertise canonical NVFP4")
+            pytest.skip(
+                f"{name} does not advertise canonical NVFP4 with the requested scale format"
+            )
         if missing_capability == "gate_then_up":
             monkeypatch.setattr(kernel, "supports_glu_layouts", ("interleaved_32",), raising=False)
         elif missing_capability == "natural_rank":
