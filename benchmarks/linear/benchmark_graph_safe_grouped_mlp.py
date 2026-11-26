@@ -249,16 +249,22 @@ def canonical_fc1_tile_override(tile_m):
     kernel = cudnn.grouped_gemm_glu_wrapper_sm100
     missing = object()
     preference = getattr(kernel, "preferred_gate_then_up_mma_tiler", missing)
-    if tile_m is not None:
-        kernel.preferred_gate_then_up_mma_tiler = (tile_m, 256)
+    arch_preferences = getattr(kernel, "preferred_gate_then_up_mma_tiler_by_arch", missing)
     try:
+        kernel.preferred_gate_then_up_mma_tiler = (tile_m, 256)
+        if arch_preferences is not missing:
+            # The explicit benchmark override must take precedence over the GPU hint.
+            temporary_preferences = dict(arch_preferences)
+            temporary_preferences.pop(torch.cuda.get_device_capability(), None)
+            kernel.preferred_gate_then_up_mma_tiler_by_arch = temporary_preferences
         yield
     finally:
         if preference is missing:
-            if tile_m is not None:
-                del kernel.preferred_gate_then_up_mma_tiler
+            del kernel.preferred_gate_then_up_mma_tiler
         else:
             kernel.preferred_gate_then_up_mma_tiler = preference
+        if arch_preferences is not missing:
+            kernel.preferred_gate_then_up_mma_tiler_by_arch = arch_preferences
 
 
 @contextmanager

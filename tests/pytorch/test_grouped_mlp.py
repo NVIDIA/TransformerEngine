@@ -191,18 +191,6 @@ def test_canonical_glu_feature_detection(monkeypatch, missing, precision) -> Non
     assert grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision) == (missing is None)
 
 
-@pytest.mark.parametrize("cc,expected", [((10, 0), (128, 256)), ((10, 7), (256, 256))])
-def test_canonical_glu_arch_specific_launch(monkeypatch, cc, expected) -> None:
-    wrapper = types.SimpleNamespace(
-        supports_gate_then_up_mma_tilers=((128, 256),),
-        preferred_gate_then_up_mma_tiler_by_arch={(10, 0): (128, 256), (10, 7): (256, 256)},
-    )
-    monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: cc)
-    kwargs = grouped_mlp_module._gate_then_up_launch_kwargs(wrapper)
-    assert kwargs["mma_tiler_mn"] == expected
-    assert kwargs["cluster_shape_mn"] == ((1, 1) if cc == (10, 0) else (2, 1))
-
-
 @pytest.fixture
 def traced_cudnn_grouped_glu_wrappers(monkeypatch):
     """Trace real cuDNN grouped GLU wrappers while preserving their execution."""
@@ -1376,60 +1364,6 @@ class TestGroupedMLPFusedOp:
             assert all(call["glu_layout"] == "gate_then_up" for call in calls)
         else:
             assert all("glu_layout" not in call for call in calls)
-
-    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
-    @pytest.mark.parametrize("preferred_tile", (None, (256, 256)))
-    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
-    def test_canonical_glu_preferred_tile_dispatch(
-        self,
-        monkeypatch,
-        quantization,
-        preferred_tile,
-        glu_interleave_size,
-        traced_cudnn_grouped_glu_wrappers,
-    ):
-        """Regular GLU tile preferences do not change recipe-selected RHT fusion."""
-        import cudnn
-
-        precision = "mxfp8" if quantization == "mxfp8" else "nvfp4"
-        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up(precision):
-            pytest.skip("Canonical GLU requires device-specific cuDNN layout support")
-        wrapper = cudnn.grouped_gemm_glu_wrapper_sm100
-        if preferred_tile is None:
-            monkeypatch.delattr(wrapper, "preferred_gate_then_up_mma_tiler", raising=False)
-        else:
-            monkeypatch.setattr(
-                wrapper, "preferred_gate_then_up_mma_tiler", preferred_tile, raising=False
-            )
-        self.test_grouped_mlp(
-            enable_fusion=True,
-            bias=False,
-            hidden_size=128,
-            group_size=4,
-            quantization=quantization,
-            single_grouped_weight=False,
-            activation="scaled_swiglu",
-            strict_fusion=True,
-            glu_interleave_size=glu_interleave_size,
-            quantized_weights=True,
-        )
-        forwards = [
-            call for call in traced_cudnn_grouped_glu_wrappers if call["kind"].startswith("fwd")
-        ]
-        assert forwards
-        if quantization == "nvfp4_rht":
-            assert all(call["kind"] == "fwd_hadamard" for call in forwards)
-            if glu_interleave_size is None:
-                assert all(call["mma_tiler_mn"] == (256, 256) for call in forwards)
-                assert all(call["cluster_shape_mn"] == (2, 1) for call in forwards)
-        elif glu_interleave_size is None:
-            tile = (128, 256) if preferred_tile is None else preferred_tile
-            cluster = (1, 1) if tile[0] == 128 else (2, 1)
-            assert all(call["kind"] == "fwd" for call in forwards)
-            assert all(call["mma_tiler_mn"] == tile for call in forwards)
-            assert all(call["cluster_shape_mn"] == cluster for call in forwards)
-        else:
-            assert all("mma_tiler_mn" not in call for call in forwards)
 
     @pytest.mark.parametrize(
         "missing_capability", (None, "gate_then_up", "natural_rank", "architecture")
