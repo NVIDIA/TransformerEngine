@@ -1,0 +1,78 @@
+{
+  "skill_name": "transformer-engine-debug-attention",
+  "evals": [
+    {
+      "id": "transformer-engine-debug-attention-001",
+      "files": [],
+      "prompt": "The last message we captured for decoder training on maple reported unfused attention in auto mode. cuDNN and FlashAttention were installed, and the encoder had finished using fused attention. The decoder said fused was disabled for this call and FlashAttention supported its Q/K head width of 192 and V head width of 128 in forward only. Why did it fall back, and do we know whether the decoder finished?",
+      "expected_output": "Explain the decoder's observed choice and the execution status supported by the report.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Explains that the installed fused backend was disabled for this call and that forward-only support for these head widths excluded FlashAttention for training.",
+        "Identifies unfused selection for the decoder. Distinguishes the encoder's completed operation from evidence of decoder execution.",
+        "Explicitly leaves decoder completion unknown, as the report ends at selection. No new run is needed to answer what this report establishes."
+      ]
+    },
+    {
+      "id": "transformer-engine-debug-attention-002",
+      "files": [],
+      "prompt": "Forward agrees in our two-key attention test, but the gradient checker flags both K and V. The query sees both keys and the softmax scale is 0.125. The training step sent [1, -2] back through the two output coordinates. Our checker differentiates their sum. The one-key smoke test still passes. Is this enough to file a backend bug? What comparison would settle it?",
+      "expected_output": "Assess the existing comparison and propose a matched backward check with a meaningful interpretation of either result.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Recognizes that differentiating the two-coordinate sum supplies [1, 1], while the captured training call supplied [1, -2]. The reported K/V differences therefore do not establish a backend error.",
+        "Proposes comparing the same two-key call and inputs, mask and scale against an independent reference using [1, -2] in both backward computations. The one-key smoke test changes the attention problem.",
+        "Would compare dQ, dK and dV individually. Explains that agreement would resolve the apparent mismatch for this case; persistent discrepancy in a particular gradient would localize a real difference worth investigating. Does not guess which gradient will disagree."
+      ]
+    },
+    {
+      "id": "transformer-engine-debug-attention-003",
+      "files": [],
+      "prompt": "Can I sign off packed FusedAttention training on birch/A? CI is green with 3 passed and 1 skipped. The packed gradient test passed in auto mode using unfused attention, with a maximum gradient error of 0.004 against a limit of 0.01. The fused training variant was skipped on birch/A, although fused inference passed there and fused training passed on cedar/A. Do we still owe a run?",
+      "expected_output": "A scoped release disposition and the outstanding check, if any.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Leaves birch/A packed fused training unverified because the targeted case skipped. Green suite status alone cannot establish that the targeted path executed.",
+        "Credits the birch/A fallback's gradient check and recognizes what the fused inference and cedar/A training results each cover.",
+        "Identifies the missing evidence as the original packed training case on birch/A actually using FusedAttention and passing the backward gradient comparison."
+      ]
+    },
+    {
+      "id": "transformer-engine-debug-attention-004",
+      "files": [],
+      "prompt": "In our four-rank training job, rank 0 times out in exchange 17 waiting for rank 2. Before the timeout, rank 2 reported 11 local token rows and a final packed offset of 12, then exited while preparing its inputs. There is no padding in these batches. What should I investigate first, and what would you expect to see in one rerun that tests it?",
+      "expected_output": "Identify the first supported failure, connect it to the peer wait, and propose a new controlled check with an expected result.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Localizes the earliest supported failure to rank 2's input preparation. In this unpadded case the final offset 12 does not match the 11 local rows.",
+        "Explains the peer timeout as consistent with rank 2 exiting before exchange. Does not assign the original failure to transport or an attention kernel on this evidence.",
+        "Proposes a fresh comparison and states the predicted observation. For example, replay the captured local preparation on identical rows with the original and consistent offsets, or hold the topology and transport fixed and correct only the local metadata. Predicts rejection for the original or progress past input preparation for the corrected case, without promising end-to-end success. Accept equivalent discriminating experiments."
+      ]
+    },
+    {
+      "id": "transformer-engine-debug-attention-006",
+      "files": [],
+      "prompt": "Our packed attention layer passes in eager mode. After CUDA Graph capture, batch A still matches; on batch B one channel reads 4 instead of 6. Both batches have five token rows in two segments and the same shape, but their segment boundaries differ. Capturing B first gives 6, and the loader prints the expected boundaries either way. Both captures selected FusedAttention. Should I switch backends? What would you check next?",
+      "expected_output": "A bounded replay diagnosis and a test that separates caller-side staging or readout from a discrepancy in the captured computation.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Uses the difference between A-then-B and B-first to identify an order-dependent replay symptom. Treats stale input or metadata as plausible; the loader print does not identify what the captured call read. Does not claim the precise cause or that a backend switch fixes it.",
+        "Specifies a matched test on the existing graph that distinguishes the candidate causes. For example, hold Q/K/V and backend fixed and vary the segment boundaries in the original captured storage, verifying its contents before replay. Credit an equivalent direct test of which payload and metadata replay consumed.",
+        "Explains how the proposed observation would separate caller-side stale state or readout from a discrepancy that still needs investigation in the captured path. A replay comparison should use the matching eager input and observe each result before later replay can overwrite it. Accept immediate comparison, separate snapshots, or equivalent evidence. No precise root cause or successful fix follows from the values 4 and 6 alone."
+      ]
+    },
+    {
+      "id": "transformer-engine-debug-attention-007",
+      "files": [],
+      "prompt": "Fused forward finished on image A with loaded cuDNN runtime R0, then our packed training job reported an unsupported backward plan. On A the packed case passed with unfused attention, and a dense smoke test passed with the newer runtime R1. On the same device, image B passed the original packed case on fused forward and backward, with a largest output or gradient error of 0.004 against a limit of 0.01. B loaded R1 and changed the adapter/frontend build. Can I close this for B? Would backporting just the runtime fix A, and how could we tell?",
+      "expected_output": "Verify the exact image B result, recover the stage reached on A, and isolate the runtime-only backport question.",
+      "expected_skill": "transformer-engine-debug-attention",
+      "assertions": [
+        "Credits the original packed case on B because the intended route completed both phases and passed the numerical checks. Limits that verification to the reported case and target.",
+        "Locates A's observed fused failure at backward plan construction after forward. A's unfused run changes the backend and its dense smoke changes the workload.",
+        "Separates B's verified recovery from its cause: both the runtime and adapter/frontend changed. The supplied evidence does not establish that the runtime alone would fix A.",
+        "Proposes the actual runtime-only backport experiment (or equivalent matched comparison), holding A's adapter/frontend, device, original packed case, and fused route fixed and checking which runtime was loaded. States what would support or undermine sufficiency: planning, execution and passing the original gradient checks versus failure under those same conditions."
+      ]
+    }
+  ]
+}
