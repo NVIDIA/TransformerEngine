@@ -54,7 +54,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_QKV,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
-from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.distributed import get_distributed_world_size, _check_checkpoint_rng
 from transformer_engine.pytorch.attention.custom_ops import (
     convert_bshd_to_thd,
     convert_thd_to_bshd,
@@ -1046,6 +1046,9 @@ class FlashAttention(torch.nn.Module):
         load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """flash-attn fprop"""
+
+        if self.training and self.attention_dropout > 0:
+            _check_checkpoint_rng()
 
         assert all(
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
@@ -2724,6 +2727,10 @@ class FusedAttention(torch.nn.Module):
         load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """fused attention fprop"""
+
+        if self.training and self.attention_dropout > 0:
+            _check_checkpoint_rng()
+
         assert (
             fused_attention_backend != FusedAttnBackend["No_Backend"]
         ), "No fused attention backend supports this input combination!"

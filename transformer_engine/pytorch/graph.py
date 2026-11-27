@@ -85,9 +85,11 @@ def _none_grad_context_wrapper(inputs):
     for input_tensor in inputs:
         original_input_grads.append(input_tensor.grad)
         input_tensor.grad = None
-    yield
-    for input_tensor, original_grad in zip(inputs, original_input_grads):
-        input_tensor.grad = original_grad
+    try:
+        yield
+    finally:
+        for input_tensor, original_grad in zip(inputs, original_input_grads):
+            input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
@@ -103,10 +105,12 @@ def _graph_context_wrapper(*args, **kwargs):
     gc_is_enabled = gc.isenabled()
     if gc_is_enabled:
         gc.disable()
-    with torch.cuda.graph(*args, **kwargs):
-        yield
-    if gc_is_enabled:
-        gc.enable()
+    try:
+        with torch.cuda.graph(*args, **kwargs):
+            yield
+    finally:
+        if gc_is_enabled:
+            gc.enable()
 
 
 def _canonicalize_capture_time_hooks(
@@ -1717,34 +1721,36 @@ def make_graphed_callables(
     ]
     original_rng_states = [state.get_state() for state in generators]
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        cache_quantized_params=cache_quantized_params,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        _num_layers_per_chunk=_num_layers_per_chunk,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        clone_param_grads_on_return=clone_param_grads_on_return,
-        pre_warmup_hook=pre_warmup_hook,
-        post_warmup_hook=post_warmup_hook,
-        capture_time_hooks=capture_time_hooks,
-    )
+    try:
+        graphed_callables = _make_graphed_callables(
+            forward_funcs,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            cache_quantized_params=cache_quantized_params,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
+            pre_warmup_hook=pre_warmup_hook,
+            post_warmup_hook=post_warmup_hook,
+            capture_time_hooks=capture_time_hooks,
+        )
+    finally:
+        # Ensures warmup does not affect numerics for ops such as dropout.
+        for gen, state in zip(generators, original_rng_states):
+            gen.set_state(state)
 
-    # Ensures warmup does not affect numerics for ops such as dropout.
-    for gen, state in zip(generators, original_rng_states):
-        gen.set_state(state)
+        # Remove FP8 wrapper.
+        for module_cls, old_call in old_call_funcs.items():
+            module_cls.__call__ = old_call
 
-    # Remove FP8 wrapper.
-    for module_cls, old_call in old_call_funcs.items():
-        module_cls.__call__ = old_call
+        # Restore FP8 state.
+        restore_fp8_tensors(modules, saved_fp8_tensors)
 
-    # Restore FP8 state.
-    restore_fp8_tensors(modules, saved_fp8_tensors)
+        set_capture_end()
 
-    set_capture_end()
     return graphed_callables
