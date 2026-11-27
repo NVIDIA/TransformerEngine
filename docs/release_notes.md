@@ -6,7 +6,8 @@
 
 ## Fixed Issues
 
-- 
+- PyTorch cuDNN attention backend selection now validates a separate backward graph when
+  autograd requires gradients, including in evaluation mode.
 
 ## Breaking Changes in This Release
 

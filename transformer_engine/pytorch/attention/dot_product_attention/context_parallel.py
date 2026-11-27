@@ -8,6 +8,8 @@ from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
+
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
@@ -18,7 +20,6 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
-    FusedAttnBackend,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
@@ -29,6 +30,7 @@ from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.constants import (
     CPLoadBalancingStrategy,
     dist_group_type,
+    FusedAttnBackend,
 )
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
@@ -1783,7 +1785,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
             q_f16 = q
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16"]
             if return_max_logit:
                 max_logit_per_step = [
                     torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(2)
@@ -1840,7 +1842,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_device_compute_capability() != (12, 0)
+                capability = get_device_compute_capability()
+                softmax_lse_in_packed_format = uses_ragged_attention_graph(
+                    10 * capability[0] + capability[1]
+                )
             else:
                 softmax_lse_in_packed_format = (
                     fa_utils.v2_6_0_plus or use_flash_attn_3 or use_flash_attn_4
@@ -2633,7 +2638,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ]
             p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16"]
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         dout = dout.view(*ctx.orig_o_shape)
@@ -3444,7 +3449,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = S_quantizer
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
-            fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attn_backend = FusedAttnBackend["F16"]
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
@@ -4252,7 +4257,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             softmax_lse_per_step[i],
                             rng_states[i],
                         ]
-                        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                        fused_attn_backend = FusedAttnBackend["F16"]
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
                         do_format = ctx.o_format
@@ -4738,7 +4743,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         else:
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16"]
 
         # q, k, v:
         # FP8DS/FP8CS: torch.uint8
@@ -5106,7 +5111,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16"]
         dout = dout.view(*ctx.orig_o_shape)
 
         # dout:
