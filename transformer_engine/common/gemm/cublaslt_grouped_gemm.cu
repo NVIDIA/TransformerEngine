@@ -280,7 +280,7 @@ inline size_t validate_grouped_gemm_inputs(
   if (ref != nullptr) {
     const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
     const bool ref_is_fp4 = is_fp4_dtype(ref->dtype());
-    const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
+    const bool ref_is_mxfp8 = transformer_engine::is_mxfp8_scaling(ref->scaling_mode);
     const bool ref_is_nvfp4 = transformer_engine::is_nvfp_scaling(ref->scaling_mode);
     const bool ref_is_fp8_block = transformer_engine::is_fp8_block_scaling(ref->scaling_mode);
     for (const auto *tensor : inputs) {
@@ -289,7 +289,7 @@ inline size_t validate_grouped_gemm_inputs(
                  "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
       NVTE_CHECK(is_fp4_dtype(tensor->dtype()) == ref_is_fp4,
                  "Grouped GEMM: A and B must both be NVFP4 or both be non-NVFP4.");
-      NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
+      NVTE_CHECK(transformer_engine::is_mxfp8_scaling(tensor->scaling_mode) == ref_is_mxfp8,
                  "Grouped GEMM: A and B must both use MXFP8 scaling or both not.");
       NVTE_CHECK(transformer_engine::is_nvfp_scaling(tensor->scaling_mode) == ref_is_nvfp4,
                  "Grouped GEMM: A and B must both use NVFP4 scaling or both not.");
@@ -700,7 +700,7 @@ inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(const NVTETen
   const transformer_engine::Tensor *t0 = transformer_engine::convertNVTETensorCheck(tensor_list[0]);
   info.scaling_mode = t0->scaling_mode;
   info.with_gemm_swizzled_scales = t0->with_gemm_swizzled_scales;
-  const bool mxfp8 = transformer_engine::is_mxfp_scaling(info.scaling_mode);
+  const bool mxfp8 = transformer_engine::is_mxfp8_scaling(info.scaling_mode);
   const bool nvfp4 = transformer_engine::is_nvfp_scaling(info.scaling_mode);
   const bool fp8_block = transformer_engine::is_fp8_block_scaling(info.scaling_mode);
   NVTE_CHECK(info.scaling_mode == NVTE_DELAYED_TENSOR_SCALING || mxfp8 || nvfp4 || fp8_block,
@@ -779,7 +779,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   }
 
   const auto sm = t->scaling_mode;
-  const bool mxfp8 = is_mxfp_scaling(sm);
+  const bool mxfp8 = is_mxfp8_scaling(sm);
   const bool nvfp4 = is_nvfp_scaling(sm);
   const bool fp8_block = is_fp8_block_scaling(sm);
 
@@ -1134,7 +1134,7 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
   cublasLtMatmulDescOpaque_t matmulDesc;
   init_matmul_desc(matmulDesc, op_A, op_B, config.use_fp8, config.use_split_accumulator,
                    config.use_per_group_alpha_beta);
-  if (transformer_engine::is_mxfp_scaling(A_sel.scaling_mode)) {
+  if (transformer_engine::is_mxfp8_scaling(A_sel.scaling_mode)) {
     set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                              setup_workspace.b_scale_inv_ptrs);
   } else if (transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
@@ -1832,7 +1832,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
              "Grouped GEMM: A and B must both be NVFP4 or both be non-NVFP4.");
   validate_grouped_gemm_scaling_modes(A_list_info.scaling_mode, inputB->scaling_mode, sm,
                                       "nvte_grouped_gemm_with_discrete_inputA");
-  if (transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode) ||
+  if (transformer_engine::is_mxfp8_scaling(A_list_info.scaling_mode) ||
       transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode)) {
     NVTE_CHECK(A_list_info.with_gemm_swizzled_scales,
                "Grouped GEMM: A scales must be swizzled for GEMM (MXFP8/NVFP4).");
@@ -1855,7 +1855,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   const DType rep_dtype = A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype;
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
-  const bool mxfp8 = transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode);
+  const bool mxfp8 = transformer_engine::is_mxfp8_scaling(A_list_info.scaling_mode);
   const bool nvfp4 = transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode);
   const bool fp8_block = transformer_engine::is_fp8_block_scaling(A_list_info.scaling_mode);
   // FP8 block scaling on Hopper requires TN layout (matches select_grouped_operand logic for B).

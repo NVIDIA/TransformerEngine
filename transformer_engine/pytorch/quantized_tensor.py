@@ -972,6 +972,8 @@ class QuantizedTensor(torch.Tensor):
                 isinstance(dst, QuantizedTensor)
                 and isinstance(src, QuantizedTensor)
                 and type(dst._quantizer) is type(src._quantizer)
+                and getattr(dst, "_with_gemm_swizzled_scales", False)
+                == getattr(src, "_with_gemm_swizzled_scales", False)
                 and set(src.get_usages().keys()) == set(dst.get_usages().keys())
                 and all(
                     src.get_usages()[usage] == dst.get_usages()[usage]

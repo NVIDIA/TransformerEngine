@@ -16,6 +16,7 @@
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
 #include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
+#include "../mxfp4/dequantize_mxfp4.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
@@ -41,6 +42,10 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
       NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
       fp8::dequantize(input, output, stream);
+      break;
+    }
+    case NVTE_MXFP4_1D_SCALING: {
+      mxfp4::dequantize(input, output, stream);
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {

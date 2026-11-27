@@ -236,6 +236,31 @@ def mxfp8_fwd_high_precision_bwd_factory(
     return mxfp8_factory(role)
 
 
+def mxfp4_weight_mxfp8_activation_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: MXFP4 weights, MXFP8 activations and gradients.
+
+    Per-GEMM format consumption:
+        * fprop: ``weight.row(MXFP4) x input.row(MXFP8)``
+        * dgrad: ``weight.col(MXFP4) x grad_output.row(MXFP8)``
+        * wgrad: ``input.col(MXFP8) x grad_output.col(MXFP8)``
+
+    Dispatch logic:
+        * ``linear`` / ``grouped_linear`` ``weight`` -> MXFP4 (E2M1, block-32,
+          E8M0 scales), both directions quantized from the high-precision weight
+        * everything else -> MXFP8
+
+    MXFP4 x MXFP8 GEMMs require Blackwell and weight dimensions divisible by 128.
+    """
+    from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type == "weight":
+        return MXFP4Quantizer()
+    return mxfp8_factory(role)
+
+
 def nvfp4_row_scaled_fwd_mxfp8_bwd_factory(
     role: Optional[QuantizerRole],
 ):

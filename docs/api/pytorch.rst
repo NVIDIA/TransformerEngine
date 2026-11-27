@@ -97,6 +97,8 @@ Recipe availability
 
 .. autoapifunction:: transformer_engine.pytorch.is_mxfp8_available
 
+.. autoapifunction:: transformer_engine.pytorch.is_mxfp4_available
+
 .. autoapifunction:: transformer_engine.pytorch.is_fp8_block_scaling_available
 
 .. autoapifunction:: transformer_engine.pytorch.is_nvfp4_available

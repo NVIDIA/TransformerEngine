@@ -1184,7 +1184,7 @@ inline void launch_columnwise_chunk_swizzle(const SwizzleTensorDescriptor& tenso
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;
-  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
+  NVTE_CHECK(is_mxfp_scaling(scaling_mode) || is_nvfp4_scaling(scaling_mode),
              "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
 
   const bool has_rowwise_scale_inv = input->scale_inv.has_data();
@@ -1207,6 +1207,7 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
                  to_string(input->dtype()), ").");
       break;
+    case NVTE_MXFP4_1D_SCALING:
     case NVTE_NVFP4_1D_SCALING:
       NVTE_CHECK(is_fp4_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP4, got ",
                  to_string(input->dtype()), ").");
@@ -1224,7 +1225,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   // padding, while the output always has the full GEMM layout.
   int m{0}, k{0};
   switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING: {
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING: {
       if (has_rowwise_scale_inv) {
         NVTE_CHECK(output->scale_inv.shape.size() == 2,
                    "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
@@ -1291,7 +1293,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   // Choose swizzle implementation
   bool rowwise_swizzle{false}, columnwise_swizzle{false};
   switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING: {
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING: {
       rowwise_swizzle = has_rowwise_scale_inv;
       columnwise_swizzle = has_columnwise_scale_inv;
       break;
@@ -1316,7 +1319,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     int original_M{0}, original_K{0};
     void *input_scale_inv_ptr{nullptr}, *output_scale_inv_ptr{nullptr};
     switch (scaling_mode) {
-      case NVTE_MXFP8_1D_SCALING: {
+      case NVTE_MXFP8_1D_SCALING:
+      case NVTE_MXFP4_1D_SCALING: {
         original_M = input->flat_first_dim();
         original_K = DIVUP(input->flat_last_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
         input_scale_inv_ptr = input->scale_inv.dptr;
@@ -1653,9 +1657,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     auto scaling_mode = input[i]->scaling_mode;
     auto is_fp8 = is_fp8_dtype(input[i]->dtype());
     auto is_fp4 = is_fp4_dtype(input[i]->dtype());
-    NVTE_CHECK(
-        (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
-        "Not implemented scaling mode " + to_string(scaling_mode) + ".");
+    NVTE_CHECK((is_fp8 && is_mxfp8_scaling(scaling_mode)) ||
+                   (is_fp4 && is_mxfp4_scaling(scaling_mode)) ||
+                   (is_fp4 && is_nvfp4_scaling(scaling_mode)),
+               "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     NVTE_CHECK(!input[i]->with_gemm_swizzled_scales,
                "Expected input tensors with scales in compact format.");
     NVTE_CHECK(output[i]->with_gemm_swizzled_scales,
@@ -1796,7 +1801,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
 void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
   const auto& scaling_mode = output->scaling_mode;
-  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
+  NVTE_CHECK(is_mxfp_scaling(scaling_mode) || is_nvfp4_scaling(scaling_mode),
              "Output tensor has invalid scaling mode (", to_string(output->scaling_mode), ").");
 
   CheckInputTensor(*input, "scaling_factor_input");
@@ -1835,8 +1840,11 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
   bool rowwise{false};
 
   switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING: {
-      NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING: {
+      NVTE_CHECK(is_mxfp4_scaling(scaling_mode) ? is_fp4_dtype(input->dtype())
+                                                : is_fp8_dtype(input->dtype()),
+                 "Input tensor has invalid dtype (expected FP8 or FP4, got ",
                  to_string(input->dtype()), ").");
       if (has_rowwise_scale_inv) {
         NVTE_CHECK(output->scale_inv.shape.size() == 2,
@@ -1976,9 +1984,10 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     NVTE_CHECK(scaling_mode == first_scaling_mode,
                "All tensors should have the same scaling mode in multi-tensor unswizzle.");
-    NVTE_CHECK(
-        (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
-        "Not implemented scaling mode " + to_string(scaling_mode) + ".");
+    NVTE_CHECK((is_fp8 && is_mxfp8_scaling(scaling_mode)) ||
+                   (is_fp4 && is_mxfp4_scaling(scaling_mode)) ||
+                   (is_fp4 && is_nvfp4_scaling(scaling_mode)),
+               "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     NVTE_CHECK(input[i]->with_gemm_swizzled_scales,
                "Expected input tensors with scales in GEMM swizzled format.");
     NVTE_CHECK(!output[i]->with_gemm_swizzled_scales,

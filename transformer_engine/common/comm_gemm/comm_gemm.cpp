@@ -294,7 +294,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                    cudaStream_t main_stream) {
   const bool tensor_scaling =
       is_tensor_scaling(a->scaling_mode) && is_tensor_scaling(b->scaling_mode);
-  const bool mxfp8 = is_mxfp_scaling(a->scaling_mode) && is_mxfp_scaling(b->scaling_mode);
+  const bool mxfp8 = is_mxfp8_scaling(a->scaling_mode) && is_mxfp8_scaling(b->scaling_mode);
   const bool nvfp4 = is_nvfp_scaling(a->scaling_mode) && is_nvfp_scaling(b->scaling_mode);
 
   NVTE_CHECK(tensor_scaling || mxfp8 || nvfp4,
@@ -349,7 +349,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       return {view, new_trans};
     };
 
-    if (is_mxfp_scaling(t->scaling_mode)) {
+    if (is_mxfp8_scaling(t->scaling_mode)) {
       if (is_a) {
         if (current_trans) {
           NVTE_CHECK(t->has_data(), "MXFP8 transposed input A is missing row-wise data");
@@ -438,7 +438,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
   const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
   auto get_input_scale_mode = [&](const Tensor& t) {
 #if CUBLASMP_VERSION >= 801
-    if (is_mxfp_scaling(t.scaling_mode)) {
+    if (is_mxfp8_scaling(t.scaling_mode)) {
       return CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
     }
 #endif
@@ -451,7 +451,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 #endif
     return scale_mode;
   };
-  if (is_fp8_dtype(a_used.dtype()) || is_mxfp_scaling(a_used.scaling_mode) ||
+  if (is_fp8_dtype(a_used.dtype()) || is_mxfp8_scaling(a_used.scaling_mode) ||
       is_nvfp_scaling(a_used.scaling_mode)) {
     const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(a_used);
     NVTE_CHECK(a_used.scale_inv.dptr, "Scaling must be set for input A");
@@ -462,7 +462,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
         &a_used.scale_inv.dptr, sizeof(void*)));
   }
-  if (is_fp8_dtype(b_used.dtype()) || is_mxfp_scaling(b_used.scaling_mode) ||
+  if (is_fp8_dtype(b_used.dtype()) || is_mxfp8_scaling(b_used.scaling_mode) ||
       is_nvfp_scaling(b_used.scaling_mode)) {
     const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(b_used);
     NVTE_CHECK(b_used.scale_inv.dptr, "Scaling must be set for input B");

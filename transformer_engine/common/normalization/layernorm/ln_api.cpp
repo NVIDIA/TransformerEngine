@@ -27,6 +27,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
   // Check for unsupported configurations
+  NVTE_CHECK(!is_mxfp4_scaling(z->scaling_mode),
+             "Fused LayerNorm with MXFP4 output is not supported.");
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
       !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
