@@ -2078,6 +2078,27 @@ def test_permutation_mask_map_fp8(
     )
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("te_dtype", [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_permutation_mask_map_fp8_zero_out_tokens(te_dtype, recipe):
+    """Quantized non-empty input whose routing map routes no token (num_out_tokens == 0)."""
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+
+    _test_permutation_mask_map_fp8(
+        te_dtype=te_dtype,
+        num_tokens=256,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        recipe=recipe,
+    )
+
+
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
