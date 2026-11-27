@@ -1654,17 +1654,43 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
 @pytest.mark.parametrize(
     "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8")]
 )
-def test_split_quantize_bulk_data_and_scale_storage(quantization):
-    quantizers = [make_quantizer(quantization) for _ in range(2)]
-    for quantizer in quantizers:
-        quantizer.set_usage(rowwise=True, columnwise=True)
-    x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
-    outputs = tex.split_quantize(x, [128, 128], quantizers)
-    allocations = set()
-    for orientation in ("rowwise", "columnwise"):
-        for field in ("data", "scale_inv"):
-            buffers = [getattr(output, f"_{orientation}_{field}") for output in outputs]
-            ptr = buffers[0].untyped_storage().data_ptr()
-            assert buffers[1].untyped_storage().data_ptr() == ptr
-            assert ptr not in allocations
-            allocations.add(ptr)
+@pytest.mark.parametrize("threshold", [None, 128 * 128, 128 * 128 + 1])
+def test_split_quantize_bulk_data_and_scale_storage(quantization, threshold, monkeypatch):
+    # The smaller expert is eligible at equality and remains on GPU just above it.
+    module = te.GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
+    module.min_offloaded_tensor_size = threshold
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
+    )
+    split_quantize = tex.split_quantize
+    scales = []
+
+    def check_split(*args, **kwargs):
+        outputs = split_quantize(*args, **kwargs)
+        bulk = threshold == 128 * 128
+        assert kwargs["disable_bulk_allocation"] == (not bulk)
+        allocations = set()
+        for orientation in ("rowwise", "columnwise"):
+            for field in ("data", "scale_inv"):
+                tensors = [getattr(out, f"_{orientation}_{field}") for out in outputs]
+                pointers = {t.untyped_storage().data_ptr() for t in tensors}
+                assert len(pointers) == (1 if bulk else 2)
+                assert allocations.isdisjoint(pointers)
+                allocations.update(pointers)
+                if field == "scale_inv":
+                    scales.extend(tensors)
+        return outputs
+
+    monkeypatch.setattr(tex, "split_quantize", check_split)
+    recipe = transformer_engine.common.recipe
+    fp8_recipe = (
+        recipe.Float8BlockScaling()
+        if quantization == "fp8_blockwise"
+        else recipe.MXFP8BlockScaling()
+    )
+    x = torch.randn(384, 128, dtype=torch.bfloat16, device="cuda")
+    with te.autocast(enabled=True, recipe=fp8_recipe):
+        module(x, [128, 256])
+    assert scales
+    if threshold is not None:
+        assert all(getattr(scale, "_TE_do_not_offload", False) for scale in scales)
