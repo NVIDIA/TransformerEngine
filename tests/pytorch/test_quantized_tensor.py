@@ -1654,11 +1654,10 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
 @pytest.mark.parametrize(
     "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8")]
 )
-@pytest.mark.parametrize("threshold", [None, 128 * 128, 128 * 128 + 1])
-def test_split_quantize_bulk_data_and_scale_storage(quantization, threshold, monkeypatch):
-    # The smaller expert is eligible at equality and remains on GPU just above it.
+@pytest.mark.parametrize("bulk", [False, True])
+def test_split_quantize_bulk_data_and_scale_storage(quantization, bulk, monkeypatch):
     module = te.GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
-    module.min_offloaded_tensor_size = threshold
+    module.bulk_offload_fp8_inputs = bulk
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
     )
@@ -1667,7 +1666,6 @@ def test_split_quantize_bulk_data_and_scale_storage(quantization, threshold, mon
 
     def check_split(*args, **kwargs):
         outputs = split_quantize(*args, **kwargs)
-        bulk = threshold == 128 * 128
         assert kwargs["disable_bulk_allocation"] == (not bulk)
         allocations = set()
         for orientation in ("rowwise", "columnwise"):
@@ -1688,9 +1686,8 @@ def test_split_quantize_bulk_data_and_scale_storage(quantization, threshold, mon
         if quantization == "fp8_blockwise"
         else recipe.MXFP8BlockScaling()
     )
-    x = torch.randn(384, 128, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
     with te.autocast(enabled=True, recipe=fp8_recipe):
-        module(x, [128, 256])
+        module(x, [128, 128])
     assert scales
-    if threshold is not None:
-        assert all(getattr(scale, "_TE_do_not_offload", False) for scale in scales)
+    assert all(getattr(scale, "_TE_do_not_offload", False) == bulk for scale in scales)

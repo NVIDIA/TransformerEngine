@@ -239,7 +239,7 @@ class GroupedLinearFwdArgs:
     wgrad_store: Optional[Any]
     cpu_offloading: bool
     is_grad_enabled: bool
-    min_offloaded_tensor_size: Optional[int] = None
+    bulk_offload_fp8_inputs: bool = False
 
 
 @dataclass(slots=True)
@@ -377,13 +377,8 @@ def _grouped_linear_forward_impl(
     inp_view = inp.reshape(-1, in_features)
     offload_fp8_data = (
         cpu_offloading
-        and args.min_offloaded_tensor_size is not None
+        and args.bulk_offload_fp8_inputs
         and type(input_quantizers[0]) in (Float8BlockQuantizer, MXFP8Quantizer)
-    )
-    # A retained nonempty expert view would pin the other experts' data.
-    disable_bulk = cpu_offloading and (
-        not offload_fp8_data
-        or any(0 < rows * in_features < args.min_offloaded_tensor_size for rows in m_splits)
     )
     inputmats, _ = _split_quantization._split_quantize(
         inp_view,
@@ -391,7 +386,7 @@ def _grouped_linear_forward_impl(
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=disable_bulk,
+        disable_bulk_allocation=cpu_offloading and not offload_fp8_data,
     )
 
     if cpu_offloading:
@@ -1773,9 +1768,8 @@ class GroupedLinear(TransformerEngineBaseModule):
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
-    # An external offload manager can supply its per-tensor threshold (in elements)
-    # to allow split FP8 bulk allocation when all nonempty expert data can move.
-    min_offloaded_tensor_size: Optional[int] = None
+    # External offload managers can move the expert data together and keep FP8 scales on device.
+    bulk_offload_fp8_inputs: bool = False
 
     def __init__(
         self,
@@ -2561,7 +2555,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 wgrad_store=self.wgrad_store,
                 cpu_offloading=cpu_offloading,
                 is_grad_enabled=is_grad_enabled,
-                min_offloaded_tensor_size=self.min_offloaded_tensor_size,
+                bulk_offload_fp8_inputs=self.bulk_offload_fp8_inputs,
             )
 
             out, new_workspaces = _grouped_linear_eager(
