@@ -56,7 +56,8 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = default (32, clamped to device SM count). */
+  /*! SMs for NCCL EP dispatch/combine kernels where no per-direction count below is set.
+   *  0 = default (32, clamped to device SM count). */
   int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
@@ -72,6 +73,21 @@ typedef struct {
   /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
    *  and continues; 0 (default) traps. Not supported in eager mode. */
   int drop_on_overflow;
+  /* SMs of the NCCL EP dispatch and combine kernels per pass direction, for every EP op of the
+   * group. 0 (default) inherits: a forward count from num_comm_sms, a backward count from the
+   * forward count of the same kind. Each ep_gemm.h call runs its GEMM on the SMs its NCCL EP call
+   * leaves. */
+  /*! Forward dispatch: nvte_ep_dispatch(_v2), nvte_ep_prepare_and_dispatch,
+   *  nvte_ep_dispatch_gemm_fwd. */
+  int dispatch_fwd_num_sms;
+  /*! Forward combine: nvte_ep_combine(_v2), nvte_ep_combine_gemm_fwd. */
+  int combine_fwd_num_sms;
+  /*! Backward dispatch, which carries the combine's gradient: nvte_ep_combine_bwd(_v2),
+   *  nvte_ep_combine_gemm_bwd. */
+  int dispatch_bwd_num_sms;
+  /*! Backward combine, which carries the dispatch's gradient: nvte_ep_dispatch_bwd(_v2),
+   *  nvte_ep_dispatch_gemm_bwd. */
+  int combine_bwd_num_sms;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size,
@@ -222,7 +238,7 @@ void nvte_ep_dispatch_v2(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor 
  *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights.
  *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
  *  \param[out]    recv_tokens_per_expert [num_local_experts] int32/int64 counts.
- *  \param[out]    total_recv_tokens_per_rank Optional [1] int32/int64 scalar recv total. May be null.
+ *  \param[out]    total_recv_tokens_per_rank [1] int32/int64 scalar recv total, or null.
  *  \param[in]     layer_cfg              Per-call layer configuration (struct_size set).
  *  \param[in]     stream                 CUDA stream.
  */

@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 import copy
 import itertools
+import os
 from typing import Any, Optional, TypeAlias
 
 import torch
@@ -51,7 +52,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[str, int]
+_FusionParams: TypeAlias = tuple[str, int, tuple]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -701,9 +702,19 @@ class OperationFuser:
         # backward boundary in the key, but pay construction cost only once for
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
+        # Runtime settings that fusions may fall back on are part of the key.
+        runtime_policy = (
+            torch.are_deterministic_algorithms_enabled(),
+            os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"),
+            torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled() else None,
+            tuple(
+                op.need_backward_dw() for op in self._basic_ops if hasattr(op, "need_backward_dw")
+            ),
+        )
         fusion_params: _FusionParams = (
             str(recipe) if recipe is not None else "",
             first_op_requiring_backward,
+            runtime_policy,
         )
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:

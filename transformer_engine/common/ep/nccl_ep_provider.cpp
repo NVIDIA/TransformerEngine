@@ -216,6 +216,12 @@ void* open_nccl_ep_library() {
   return nullptr;  // Unreachable.
 }
 
+// Set once in library_handle to the loaded runtime's NCCL_EP_VERSION_CODE.
+int& runtime_version_storage() {
+  static int version = 0;
+  return version;
+}
+
 void* library_handle() {
   // Deliberately keep libnccl_ep loaded until process exit. EPBackend owns
   // objects whose implementation lives in this library.
@@ -230,6 +236,7 @@ void* library_handle() {
       NVTE_CHECK(runtime_version / 10000 == NCCL_EP_MAJOR,
                  "Incompatible NCCL EP library major version ", runtime_version / 10000,
                  "; expected ", NCCL_EP_MAJOR);
+      runtime_version_storage() = runtime_version;
       const std::filesystem::path library_path =
           shared_library_path(reinterpret_cast<const void*>(get_version));
       NVTE_CHECK(!library_path.empty(), "Could not determine the NCCL EP library path");
@@ -248,6 +255,11 @@ void* library_handle() {
 void initialize() { (void)library_handle(); }
 
 void* get_symbol(const char* symbol) { return load_symbol(library_handle(), symbol); }
+
+int runtime_version() {
+  (void)library_handle();
+  return runtime_version_storage();
+}
 
 namespace {
 
