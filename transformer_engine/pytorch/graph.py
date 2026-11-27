@@ -1688,29 +1688,28 @@ def make_graphed_callables(
     # Resolve inherited calls before any class is patched.
     classes = dict.fromkeys(type(module) for module in modules)
     original_calls = {cls: cls.__call__ for cls in classes}
-    # Close explicitly so a cleanup failure cannot replace the capture error.
-    cleanup = contextlib.ExitStack()
 
-    def wrap_autocast(block_cls, original_call):
-        # Wrap the original call function of the module class.
-        def call_func(self, *args, **kwargs):
-            with autocast(
-                enabled=module_uses_fp8.get(id(self), False),
-                calibrating=calibrating,
-                recipe=recipe,
-                amax_reduction_group=amax_reduction_group,
-                _graph=True,
-            ):
-                return original_call(self, *args, **kwargs)
+    with contextlib.ExitStack() as cleanup:
 
-        if "__call__" in block_cls.__dict__:
-            restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
-        else:
-            restore_call = (delattr, block_cls, "__call__")
-        block_cls.__call__ = call_func
-        cleanup.callback(*restore_call)
+        def wrap_autocast(block_cls, original_call):
+            # Wrap the original call function of the module class.
+            def call_func(self, *args, **kwargs):
+                with autocast(
+                    enabled=module_uses_fp8.get(id(self), False),
+                    calibrating=calibrating,
+                    recipe=recipe,
+                    amax_reduction_group=amax_reduction_group,
+                    _graph=True,
+                ):
+                    return original_call(self, *args, **kwargs)
 
-    try:
+            if "__call__" in block_cls.__dict__:
+                restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
+            else:
+                restore_call = (delattr, block_cls, "__call__")
+            block_cls.__call__ = call_func
+            cleanup.callback(*restore_call)
+
         set_capture_start()
         cleanup.callback(set_capture_end)
         saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
@@ -1726,7 +1725,7 @@ def make_graphed_callables(
         for gen in reversed(generators):
             cleanup.callback(gen.set_state, gen.get_state())
 
-        graphed_callables = _make_graphed_callables(
+        return _make_graphed_callables(
             modules[0] if just_one_callable else modules,
             sample_args,
             num_warmup_iters=num_warmup_iters,
@@ -1743,11 +1742,3 @@ def make_graphed_callables(
             post_warmup_hook=post_warmup_hook,
             capture_time_hooks=capture_time_hooks,
         )
-    except BaseException as error:
-        try:
-            cleanup.close()
-        except BaseException as cleanup_error:
-            raise error from cleanup_error
-        raise
-    cleanup.close()
-    return graphed_callables
