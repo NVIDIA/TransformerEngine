@@ -19,7 +19,6 @@ from ...quantization import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
-    _2X_ACC_FPROP,
 )
 from ...quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -246,7 +245,6 @@ class UserbuffersForwardLinear(FusedOperation):
             out_dtype=dtype,
             quantization_params=output_quantizer,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
             ub=ub_comm,
             ub_type=ub_type,
             extra_output=reduce_scatter_output,

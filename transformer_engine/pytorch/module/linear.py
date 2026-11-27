@@ -27,9 +27,6 @@ from .base import (
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
 )
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
@@ -140,8 +137,6 @@ class LinearFwdArgs:
     fp8_output: bool
     save_original_input: bool
     backward_override: Optional[str]
-    dgrad_use_split_accumulator: bool
-    wgrad_use_split_accumulator: bool
     custom: bool
     debug: bool
 
@@ -257,8 +252,6 @@ class LinearBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
-    wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
     custom: bool = False
@@ -591,13 +584,6 @@ def _linear_forward_impl(
         if weight_quantizer is not None:
             weight_quantizer.calibrate(weight)
 
-    # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
     # Configure output quantizer
     if output_quantizer is not None:
         output_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -621,7 +607,6 @@ def _linear_forward_impl(
         quantization_params=output_quantizer,
         out_dtype=activation_dtype,
         bias=bias,
-        use_split_accumulator=use_split_accumulator,
         ub=ub_obj,
         ub_type=ub_type,
         extra_output=reduce_scatter_out,
@@ -1026,8 +1011,6 @@ def _linear_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
-    bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     bwd_args.custom = fwd_args.custom
@@ -1376,9 +1359,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             ):
                 weight_fp8.update_usage(columnwise_usage=True)
 
-            # Choose whether to use GEMM kernel with split accumulator
-            use_split_accumulator = bwd_args.dgrad_use_split_accumulator
-
             # Update grad input quantizer
             if grad_input_quantizer is not None:
                 grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1419,7 +1399,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 quantization_params=grad_input_quantizer,
                 out=gemm_out,
                 out_dtype=bwd_args.activation_dtype,
-                use_split_accumulator=use_split_accumulator,
                 ub=ub_obj_dgrad,
                 ub_type=ub_type_dgrad,
                 extra_output=reduce_scatter_out,
@@ -1573,9 +1552,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     grad_output = grad_output_quantizer(grad_output)
 
-            # Figure out whether to use split accumulator
-            use_split_accumulator = bwd_args.wgrad_use_split_accumulator
-
             # Figure out whether to output wgrad GEMM directly into main grad
             if is_dist_weight:
                 # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
@@ -1613,7 +1589,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 "layout": "NT",
                 "out": main_grad if bwd_args.fuse_wgrad_accumulation else None,
                 "bias": (bias if (grad_bias is None and not bwd_args.fp8) else None),
-                "use_split_accumulator": use_split_accumulator,
                 "grad": True,
                 "ub": ub_obj_wgrad,
                 "ub_type": ub_type_wgrad,
@@ -2460,15 +2435,9 @@ class Linear(TransformerEngineBaseModule):
             if cache_name is not None and not (use_compiled_op and is_first_microbatch):
                 weight_workspace = self._fp8_workspaces.get(cache_name)
 
-            dgrad_use_split_accumulator = _2X_ACC_DGRAD
-            wgrad_use_split_accumulator = _2X_ACC_WGRAD
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
-                if hasattr(_recipe, "fp8_gemm_dgrad"):
-                    dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
-                if hasattr(_recipe, "fp8_gemm_wgrad"):
-                    wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
             else:
                 backward_override = None
             custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
@@ -2524,8 +2493,6 @@ class Linear(TransformerEngineBaseModule):
                 fp8_output=fp8_output,
                 save_original_input=self.save_original_input,
                 backward_override=backward_override,
-                dgrad_use_split_accumulator=dgrad_use_split_accumulator,
-                wgrad_use_split_accumulator=wgrad_use_split_accumulator,
                 custom=custom,
                 debug=debug,
                 # weight-workspace caching

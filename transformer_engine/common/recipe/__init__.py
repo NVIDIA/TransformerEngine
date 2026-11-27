@@ -54,30 +54,6 @@ class Format(Enum):
 
 
 @dataclass(frozen=True)
-class MMParams:
-    """Matrix multiplication options.
-
-    Parameters
-    ----------
-    use_split_accumulator : bool, default = True
-        Use FP8 fast accumulation on Hopper or Ada. For more details,
-        see CUBLASLT_MATMUL_DESC_FAST_ACCUM option for cublasLtMatmul.
-    """
-
-    use_split_accumulator: bool = True
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "_cached_repr",
-            f"MMParams(use_split_accumulator={self.use_split_accumulator})",
-        )
-
-    def __repr__(self) -> str:
-        return self._cached_repr
-
-
-@dataclass(frozen=True)
 class QParams:
     """Quantization parameters.
     power_2_scale: use power of 2 scale parameter
@@ -329,9 +305,6 @@ class Float8CurrentScaling(Recipe):
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
-    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
-    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
-    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
@@ -360,9 +333,6 @@ class Float8CurrentScaling(Recipe):
             f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
             f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
             f"fp8_quant_bwd_grad={self.fp8_quant_bwd_grad}, "
-            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
-            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
-            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
@@ -445,12 +415,6 @@ class Float8BlockScaling(Recipe):
     NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
     This is only supported on Hopper; Blackwell and newer require power-of-2 scales.
 
-    NOTE: FP8 block scaling requires split accumulation for numerical accuracy, so
-    ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
-    ``use_split_accumulator=True`` (enforced in ``__post_init__``). The fused grouped
-    GEMM path (GroupedLinear) always uses split accumulation for FP8 block scaling and
-    ignores any caller- or recipe-supplied ``use_split_accumulator`` value.
-
     Parameters
     ----------
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
@@ -469,9 +433,6 @@ class Float8BlockScaling(Recipe):
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1
-    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=True)
-    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
-    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
@@ -492,9 +453,6 @@ class Float8BlockScaling(Recipe):
         assert not (
             self.w_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2
         ), "2D by 2D block gemm not supported."
-        assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
-        assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
-        assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
         assert (
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
@@ -521,9 +479,6 @@ class Float8BlockScaling(Recipe):
             f"x_block_scaling_dim={self.x_block_scaling_dim}, "
             f"w_block_scaling_dim={self.w_block_scaling_dim}, "
             f"grad_block_scaling_dim={self.grad_block_scaling_dim}, "
-            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
-            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
-            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"

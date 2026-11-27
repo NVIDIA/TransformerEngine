@@ -30,9 +30,6 @@ from .base import (
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..jit import (
@@ -232,8 +229,6 @@ class LayerNormMLPFwdArgs:
     fp8: bool
     fp8_calibration: bool
     backward_override: Optional[str]
-    dgrad_use_split_accumulator: bool
-    wgrad_use_split_accumulator: bool
     debug: bool
 
     # --- Weight-workspace caching ---
@@ -355,8 +350,6 @@ class LayerNormMLPBwdArgs:
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
     fp8_recipe: Optional[Any] = None
-    dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
-    wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     debug: bool = False
 
@@ -562,13 +555,6 @@ def _layernorm_mlp_forward_impl(
     ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
     ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
-    # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
     # Configure quantizer for norm output
     if fp8:
         if fc1_input_quantizer is None:
@@ -773,7 +759,6 @@ def _layernorm_mlp_forward_impl(
             fc1_bias_cast if not bias_gelu_fusion else None
         ),  # otherwise bias is added later (fused with gelu)
         gelu=gemm_gelu_fusion,
-        use_split_accumulator=use_split_accumulator,
         ub=ub_obj_lnout,
         ub_type=tex.CommOverlapType.AG if ub_overlap_ag else None,
     )
@@ -872,7 +857,6 @@ def _layernorm_mlp_forward_impl(
             out_dtype=activation_dtype,
             bias=fc2_bias_cast,
             quantization_params=fc2_output_quantizer,
-            use_split_accumulator=use_split_accumulator,
             ub=ub_obj_fc2out,
             ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
             extra_output=reduce_scatter_out,
@@ -1165,8 +1149,6 @@ def _layernorm_mlp_setup_ctx(
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
     bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-    bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
-    bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = fwd_args.backward_override
     bwd_args.debug = debug
 
@@ -1376,10 +1358,6 @@ def _layernorm_mlp_backward_impl(
         #    fc2_weight_fp8 if args.fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
         # )
 
-        # Choose whether to use GEMM kernel with split accumulator
-        dgrad_use_split_accumulator = args.dgrad_use_split_accumulator
-        wgrad_use_split_accumulator = args.wgrad_use_split_accumulator
-
         # No need to do bulk DGRAD/WGRAD overlap if WGRAD is not required
         ub_bulk_dgrad = args.fc1_weight_requires_grad and args.ub_bulk_dgrad
         ub_bulk_wgrad = args.fc1_weight_requires_grad and args.ub_bulk_wgrad
@@ -1499,7 +1477,6 @@ def _layernorm_mlp_backward_impl(
             out_dtype=args.activation_dtype,
             gelu=fc2_dgrad_gemm_gelu_fusion,
             gelu_in=fc1_out if fc2_dgrad_gemm_gelu_fusion else None,
-            use_split_accumulator=dgrad_use_split_accumulator,
             ub=ub_obj_fc2_dgrad,
             ub_type=tex.CommOverlapType.AG if args.ub_overlap_ag else None,
         )
@@ -1645,7 +1622,6 @@ def _layernorm_mlp_backward_impl(
                 "layout": "NT",
                 "out": fc2_weight_main_grad if args.fuse_wgrad_accumulation else None,
                 "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
-                "use_split_accumulator": wgrad_use_split_accumulator,
                 "grad": grad_arg,
             }
 
@@ -1811,7 +1787,6 @@ def _layernorm_mlp_backward_impl(
             quantization_params=args.fc1_grad_input_quantizer,
             layout="NN",
             grad=True,
-            use_split_accumulator=dgrad_use_split_accumulator,
             ub=ub_obj_fc1_dgrad,
             ub_type=ub_type_fc1_dgrad,
             extra_output=reduce_scatter_out,
@@ -1912,7 +1887,6 @@ def _layernorm_mlp_backward_impl(
                 "layout": "NT",
                 "out": fc1_weight_main_grad if args.fuse_wgrad_accumulation else None,
                 "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
-                "use_split_accumulator": wgrad_use_split_accumulator,
                 "grad": fuse_gemm_and_bias_fc1_wgrad,
                 "ub": ub_obj_fc1_wgrad,
                 "ub_type": ub_type_fc1_wgrad,
@@ -2711,15 +2685,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
             )
 
-            dgrad_use_split_accumulator = _2X_ACC_DGRAD
-            wgrad_use_split_accumulator = _2X_ACC_WGRAD
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
-                if hasattr(_recipe, "fp8_gemm_dgrad"):
-                    dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
-                if hasattr(_recipe, "fp8_gemm_wgrad"):
-                    wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
             else:
                 backward_override = None
 
@@ -2797,8 +2765,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
                 backward_override=backward_override,
-                dgrad_use_split_accumulator=dgrad_use_split_accumulator,
-                wgrad_use_split_accumulator=wgrad_use_split_accumulator,
                 debug=debug,
                 # weight-workspace caching
                 is_first_microbatch=is_first_microbatch,

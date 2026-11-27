@@ -61,6 +61,48 @@ nvfp4_available = is_nvfp4_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2])
+@pytest.mark.parametrize("reduction_size", [4096, 16384])
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+def test_fp8_gemm_accurate_accumulation(fp8_dtype, reduction_size, layout):
+    """Exactly representable products expose precision loss in long FP8 reductions."""
+    torch.manual_seed(1234)
+    quantizer = Float8Quantizer(
+        torch.ones(1, device="cuda"),
+        torch.zeros(1, device="cuda"),
+        fp8_dtype,
+        rowwise=True,
+        columnwise=True,
+    )
+    weight_quantizer = Float8Quantizer(
+        torch.ones(1, device="cuda"),
+        torch.zeros(1, device="cuda"),
+        DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    weight = torch.randint(1, 9, (32, reduction_size), device="cuda").float() / 8
+    inputs = torch.randint(1, 9, (32, reduction_size), device="cuda").float() / 8
+    weight_quantized = weight_quantizer(weight if layout[0] == "T" else weight.T.contiguous())
+    inputs_quantized = quantizer(inputs if layout[1] == "N" else inputs.T.contiguous())
+    weight_reference = weight_quantized.dequantize().double()
+    inputs_reference = inputs_quantized.dequantize().double()
+    if layout[0] == "N":
+        weight_reference = weight_reference.T
+    if layout[1] == "T":
+        inputs_reference = inputs_reference.T
+    reference = inputs_reference @ weight_reference.T
+    output, *_ = general_gemm(
+        weight_quantized,
+        inputs_quantized,
+        out_dtype=torch.float32,
+        layout=layout,
+    )
+    torch.testing.assert_close(output, reference.float(), rtol=0, atol=0)
+
+
 seed = 1234
 # Reset RNG states.
 reset_rng_states()
@@ -2752,7 +2794,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         outp_type,
         quantization_params=out_quantizer,
         bias=None,
-        use_split_accumulator=False,
     )
 
     out, *_ = general_gemm(
@@ -2761,7 +2802,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         outp_type,
         quantization_params=None,
         bias=None,
-        use_split_accumulator=False,
     )
     expected_quantized_out = out_quantizer(out)
 

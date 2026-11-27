@@ -22,11 +22,6 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
     is_fp8_available,
 )
-from transformer_engine.pytorch.module.base import (
-    _2X_ACC_DGRAD,
-    _2X_ACC_FPROP,
-    _2X_ACC_WGRAD,
-)
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 
@@ -74,7 +69,7 @@ def _fake_cast(tensor, fp8_dtype, scale):
     return fp8_tensor.dequantize()
 
 
-def _fp8_gemm_kernel(tensor1, scale1, dtype1, tensor2, scale2, dtype2, use_split_accumulator):
+def _fp8_gemm_kernel(tensor1, scale1, dtype1, tensor2, scale2, dtype2):
     fp8_tensor1 = _cast_to_fp8(tensor1, scale1, dtype1)
     fp8_tensor2 = _cast_to_fp8(tensor2, scale2, dtype2)
 
@@ -82,7 +77,6 @@ def _fp8_gemm_kernel(tensor1, scale1, dtype1, tensor2, scale2, dtype2, use_split
         fp8_tensor1,
         fp8_tensor2,
         torch.float32,
-        use_split_accumulator=use_split_accumulator,
     )
     out.requires_grad = True
     return out.T
@@ -119,7 +113,6 @@ def _emulate_linear(
             weight,
             _scalar(fprop_weight_scale or 1.0),
             tepytorch.DType.kFloat8E4M3,
-            _2X_ACC_FPROP,
         )
         activation = activation.clone().detach().contiguous().requires_grad_(True)
     else:
@@ -155,7 +148,6 @@ def _emulate_linear(
             gradient,
             _scalar(dgrad_gradient_scale or 1.0),
             tepytorch.DType.kFloat8E5M2,
-            _2X_ACC_DGRAD,
         ).T
     else:
         dgrad_gradient = (
@@ -179,7 +171,6 @@ def _emulate_linear(
             gradient.T,
             _scalar(wgrad_gradient_scale or 1.0),
             tepytorch.DType.kFloat8E5M2,
-            _2X_ACC_WGRAD,
         ).T
     else:
         wgrad_gradient = (
@@ -200,7 +191,6 @@ def _emulate_linear(
             torch.float32,
             layout="NT",
             grad=True,
-            use_split_accumulator=_2X_ACC_WGRAD,
         )
 
     return {"activation": activation, "wgrad": wgrad, "dgrad": dgrad}

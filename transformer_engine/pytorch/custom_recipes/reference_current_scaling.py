@@ -390,6 +390,7 @@ class CurrentScalingQuantizerRef(Quantizer):
         qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:
         """Python implementation of quantized gemm."""
+        del m_params
         M, K = qx.shape
         N, _ = qw.shape
 
@@ -415,7 +416,7 @@ class CurrentScalingQuantizerRef(Quantizer):
             scale_a=sx,
             scale_b=sw,
             out_dtype=out_dtype,
-            use_fast_accum=not m_params.use_split_accumulator,
+            use_fast_accum=False,
             bias=bias if use_bias_in_gemm else None,
         )
         y = scaled_mm_res[0] if isinstance(scaled_mm_res, tuple) else scaled_mm_res

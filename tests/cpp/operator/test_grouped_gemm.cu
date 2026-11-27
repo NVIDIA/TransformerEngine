@@ -291,7 +291,6 @@ struct GroupedGemmRefSetup {
   std::vector<Tensor> B_tensors;
   std::vector<Tensor> D_multi;
   std::vector<Tensor> workspaces;
-  bool use_split_accum = false;
 };
 
 inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
@@ -350,8 +349,6 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
                                   std::vector<size_t>{M, N}, params.output_dtype));
   }
 
-  // FP8 block scaling requires split accumulator (no fast accumulation).
-  s.use_split_accum = is_fp8_block_recipe(params.recipe);
 
   std::vector<NVTETensor> A_ptrs(s.num_gemms), B_ptrs(s.num_gemms), D_ptrs(s.num_gemms);
   std::vector<NVTETensor> workspace_ptrs(s.num_gemms, nullptr);
@@ -368,7 +365,7 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
   nvte_multi_tensor_gemm(A_ptrs.data(), B_ptrs.data(), D_ptrs.data(), bias_ptrs.data(),
                          gelu_ptrs.data(), static_cast<int>(s.num_gemms),
                          params.transa, params.transb, false, workspace_ptrs.data(),
-                         false, s.use_split_accum, 0, 0);
+                         false, 0, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   return s;
 }
@@ -518,9 +515,6 @@ void run_grouped_gemm_case(const TestParams& params) {
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
 
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) {
-    grouped_config.set_use_split_accumulator(true);
-  }
 
   nvte_grouped_gemm(grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
                     params.use_null_c ? nullptr : grouped_C->get_handle(), grouped_D.get_handle(),
@@ -588,9 +582,6 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
 
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) {
-    grouped_config.set_use_split_accumulator(true);
-  }
 
   nvte_grouped_gemm_with_discrete_out(
       grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
@@ -677,9 +668,6 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   for (size_t i = 0; i < num_gemms; ++i) A_list_ptrs.push_back(ref.A_tensors[i].data());
 
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) {
-    grouped_config.set_use_split_accumulator(true);
-  }
 
   nvte_grouped_gemm_with_discrete_inputA(
       A_list_ptrs.data(), num_gemms, params.transa, grouped_B.get_handle(), params.transb,
@@ -743,7 +731,6 @@ void run_grouped_gemm_graph_case(const TestParams& params) {
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -816,7 +803,6 @@ void run_grouped_gemm_discrete_out_graph_case(const TestParams& params) {
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -913,7 +899,6 @@ void run_grouped_gemm_discrete_in_graph_case(const TestParams& params) {
   for (size_t i = 0; i < num_gemms; ++i) A_list_ptrs.push_back(ref.A_tensors[i].data());
 
   GroupedMatmulConfigWrapper grouped_config;
-  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));

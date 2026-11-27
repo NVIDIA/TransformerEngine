@@ -50,10 +50,8 @@ enum NVTEMatmulConfigAttribute {
    * input.
    */
   kNVTEMatmulConfigEpilogueAuxTensor = 4,
-  /*! Whether to use split accumulator for FP8 GEMM. */
-  kNVTEMatmulConfigUseSplitAccumulator = 5,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
-  kNVTEMatmulConfigSMCount = 6,
+  kNVTEMatmulConfigSMCount = 5,
   /*! Whether alpha and beta are device pointers. Default: false.
    *
    *  Known bugs: only supported with NVFP4, NVFP4 amaxes are ignored when alpha and beta are device pointers.
@@ -61,7 +59,7 @@ enum NVTEMatmulConfigAttribute {
    *  \todo Generalize to all tensor formats
    *  \todo Correctly handle NVFP4 amaxes when alpha and beta are device pointers
    */
-  kNVTEMatmulConfigAlphaBetaOnDevice = 7,
+  kNVTEMatmulConfigAlphaBetaOnDevice = 6,
   kNVTEMatmulConfigNumAttributes
 };
 
@@ -92,8 +90,6 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigAvgK = 2,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEGroupedMatmulConfigSMCount = 3,
-  /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
-  kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -182,14 +178,13 @@ void nvte_destroy_grouped_matmul_config(NVTEGroupedMatmulConfig config);
  *                                       gradient computation.
  *  \param[out]    workspace             Workspace tensor.
  *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
- *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream used for the operation.
  */
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
-                      NVTETensor workspace, bool accumulate, bool use_split_accumulator,
-                      int math_sm_count, cudaStream_t stream);
+                      NVTETensor workspace, bool accumulate, int math_sm_count,
+                      cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations.
  *
@@ -314,14 +309,13 @@ void nvte_cublas_gemm_strided_batched_mxfp8(int transa, int transb, const float 
  *  \param[in]     alpha                 Scaling factor applied to the result of the GEMM
  *  \param[in]     beta                  Scaling factor applied to original value of D when
  *                                       accumulating into it. beta=0 means no accumulation.
- *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream used for the operation.
  */
 void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor D,
                              const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
                              bool transb, bool grad, NVTETensor workspace, float alpha, float beta,
-                             bool use_split_accumulator, int math_sm_count, cudaStream_t stream);
+                             int math_sm_count, cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices with chunking and atomic counters.
  *
@@ -343,7 +337,6 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
  *                                       gradient computation.
  *  \param[out]    workspace             Workspace tensor.
  *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
- *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     m_split               Number of chunks/splits along m-dimension for Atomic GEMM.
  *  \param[in]     n_split               Number of chunks/splits along n-dimension for Atomic GEMM.
@@ -354,9 +347,8 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
                              const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
                              bool transb, bool grad, NVTETensor workspace, bool accumulate,
-                             bool use_split_accumulator, int math_sm_count, int m_split,
-                             int n_split, bool gemm_producer, const NVTETensor counter,
-                             cudaStream_t stream);
+                             int math_sm_count, int m_split, int n_split, bool gemm_producer,
+                             const NVTETensor counter, cudaStream_t stream);
 
 /*! \brief Compute multiple pairs of matrix multiplication, potentially fused with other operations,
  * on multiple streams.
@@ -378,15 +370,13 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
  *                                       gradient computation.
  *  \param[out]    workspace             List of workspace tensors.
  *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
- *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream to wait on.
  */
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
                             bool transa, bool transb, bool grad, NVTETensor *workspace,
-                            bool accumulate, bool use_split_accumulator, int math_sm_count,
-                            cudaStream_t stream);
+                            bool accumulate, int math_sm_count, cudaStream_t stream);
 
 /*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
  *
@@ -642,13 +632,6 @@ class MatmulConfigWrapper {
                                      &epilogue_aux_tensor, sizeof(NVTETensor));
   }
 
-  /*! \brief Set whether to use split accumulator for FP8 GEMM. */
-  void set_use_split_accumulator(bool use_split_accumulator) {
-    const auto val = static_cast<uint8_t>(use_split_accumulator);
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator, &val,
-                                     sizeof(val));
-  }
-
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
   void set_sm_count(int sm_count) {
     const auto val = static_cast<int32_t>(sm_count);
@@ -724,13 +707,6 @@ class GroupedMatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
                                              sizeof(int));
-  }
-
-  /*! \brief Set split accumulator mode. Only taken into account on Hopper. */
-  void set_use_split_accumulator(bool use_split_accumulator) {
-    const auto val = static_cast<uint8_t>(use_split_accumulator);
-    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
-                                             &val, sizeof(val));
   }
 
  private:

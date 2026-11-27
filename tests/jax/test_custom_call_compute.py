@@ -1377,6 +1377,35 @@ supported_nvfp4_scaling_mode_pairs = [
 
 
 class TestDense:
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
+    @pytest.mark.parametrize("with_jax_gemm", [False, True])
+    @pytest.mark.parametrize("reduction_size", [4096, 16384])
+    @pytest.mark.parametrize("fp8_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    def test_fp8_gemm_accurate_accumulation(self, with_jax_gemm, reduction_size, fp8_dtype):
+        """Both GEMM backends use accurate accumulation without an environment override."""
+        generator = np.random.default_rng(1234)
+        inputs = jnp.asarray(generator.integers(1, 9, (32, reduction_size)), dtype=jnp.float32) / 8
+        weight = jnp.asarray(generator.integers(1, 9, (32, reduction_size)), dtype=jnp.float32) / 8
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            q_dtype=fp8_dtype,
+            q_layout=QuantizeLayout.ROWWISE,
+        )
+        weight_quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            q_dtype=jnp.float8_e4m3fn,
+            q_layout=QuantizeLayout.ROWWISE,
+        )
+        inputs_quantized = quantizer.quantize(inputs, flatten_axis=1)
+        weight_quantized = weight_quantizer.quantize(weight, flatten_axis=1)
+        reference = (
+            np.asarray(inputs_quantized.dequantize(), dtype=np.float64)
+            @ np.asarray(weight_quantized.dequantize(), dtype=np.float64).T
+        )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            output = tex.gemm(inputs_quantized, weight_quantized, contracting_dims=((1,), (1,)))
+        np.testing.assert_array_equal(output, reference)
+
     def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
         if data_layout[0] == "T":
             a = jnp.swapaxes(a, -1, -2)

@@ -67,7 +67,6 @@ class CuBLASRefBlockwiseGemm:
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        use_split_accumulator: bool = False,
     ) -> torch.Tensor:
         # demunge scale shapes for cuBLAS
         is_a_1d_scaled = quant_tile_shape_x[0] == 1
@@ -95,7 +94,6 @@ class CuBLASRefBlockwiseGemm:
             demunged_sx,
             demunged_sw,
             mm_tile_shape,
-            use_split_accumulator,
             is_a_1d_scaled,
             is_b_1d_scaled,
         )
@@ -120,7 +118,6 @@ class CuBLASRefBlockwiseGemm:
         sx: torch.Tensor,
         sw: torch.Tensor,
         mm_tile_shape: Tuple[int, int, int],
-        use_split_accumulator: bool,
         is_a_1d_scaled: bool,
         is_b_1d_scaled: bool,
     ) -> torch.Tensor:
@@ -201,7 +198,7 @@ class CuBLASRefBlockwiseGemm:
                         scale_a=one,
                         scale_b=one,
                         out_dtype=torch.float32,
-                        use_fast_accum=not use_split_accumulator,
+                        use_fast_accum=False,
                     )
 
                     # Accumulate the partial result

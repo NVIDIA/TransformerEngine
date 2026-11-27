@@ -559,7 +559,6 @@ def _compute_linear_backward_reference_from_saved_operands(
         out_dtype=out_dtype,
         layout="NN",
         grad=True,
-        use_split_accumulator=True,
     )
     db_seed = (
         torch.empty(dy_mat.shape[-1], dtype=out_dtype, device=dy_mat.device) if with_bias else None
@@ -572,7 +571,6 @@ def _compute_linear_backward_reference_from_saved_operands(
         layout="NT",
         grad=True,
         bias=db_seed,
-        use_split_accumulator=True,
     )
     if db_ref is None:
         db_ref = dy_mat.sum(dim=0).to(out_dtype)

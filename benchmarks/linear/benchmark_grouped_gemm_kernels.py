@@ -65,11 +65,6 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm_for_grouped_tensor,
 )
 from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported
-from transformer_engine.pytorch.module.base import (
-    _2X_ACC_DGRAD,
-    _2X_ACC_FPROP,
-    _2X_ACC_WGRAD,
-)
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor import GroupedTensor, GroupedTensorStorage
 import transformer_engine_torch as tex
@@ -322,15 +317,6 @@ def _assert_mxfp8_operands_are_gemm_ready(prepared: PreparedGemm) -> None:
             ), "MXFP8 operand was not prepared with GEMM-swizzled scales"
 
 
-def _use_split_accumulator(spec: GemmSpec) -> bool:
-    """Match GroupedLinear's accumulator policy for each training GEMM."""
-    if spec.gemm == "fwd":
-        return _2X_ACC_FPROP
-    if spec.gemm == "dgrad":
-        return _2X_ACC_DGRAD
-    return _2X_ACC_WGRAD
-
-
 def _run_multistream(prepared: PreparedGemm, iterations: int) -> None:
     """Launch the multi-stream grouped GEMM repeatedly."""
     spec = prepared.spec
@@ -345,7 +331,6 @@ def _run_multistream(prepared: PreparedGemm, iterations: int) -> None:
             m_splits=prepared.split_sizes,
             grad=spec.gemm != "fwd",
             single_output=spec.gemm != "wgrad",
-            use_split_accumulator=_use_split_accumulator(spec),
         )
 
 
@@ -357,7 +342,6 @@ def _run_cublas_grouped(prepared: PreparedGemm, iterations: int) -> None:
             prepared.grouped_b,
             prepared.grouped_out,
             layout=prepared.spec.layout,
-            use_split_accumulator=_use_split_accumulator(prepared.spec),
         )
 
 

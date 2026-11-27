@@ -163,7 +163,6 @@ void run_gemm_test(const GemmTestParams &params, bool with_C) {
 
   // Launch GEMM
   MatmulConfigWrapper config;
-  config.set_use_split_accumulator(true);
   nvte_cublas_gemm_v2(transa, transb, &alpha, A.data(), B.data(), &beta,
                       with_C ? C.data() : nullptr, D.data(), workspace.data(), config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
@@ -198,6 +197,13 @@ TEST_P(GemmTestSuite, OutOfPlaceAccumulation) { run_gemm_test(GetParam(), true);
 
 /* GEMM without accumulation input */
 TEST_P(GemmTestSuite, NoAccumulationInput) { run_gemm_test(GetParam(), false); }
+
+TEST(GemmTest, FP8LongReduction) {
+  for (size_t reduction_size : {4096, 16384}) {
+    run_gemm_test({{DType::kFloat8E4M3, DType::kFloat32}, {true, false}, {32, 32, reduction_size}},
+                    false);
+  }
+}
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest, GemmTestSuite,

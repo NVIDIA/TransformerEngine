@@ -180,8 +180,6 @@ class FusedMLAQUpProjRopeQuant:
         from ..module.linear import (
             LinearBwdArgs,
             _linear_backward_impl,
-            _2X_ACC_DGRAD,
-            _2X_ACC_WGRAD,
         )
 
         tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
@@ -206,8 +204,6 @@ class FusedMLAQUpProjRopeQuant:
             # This temporary fused API always computes both projection gradients.
             requires_dgrad=True,
             requires_wgrad=True,
-            dgrad_use_split_accumulator=_2X_ACC_DGRAD,
-            wgrad_use_split_accumulator=_2X_ACC_WGRAD,
             is_weight_param_quantized=fp8,
             parallel_mode="column",
             tp_group=tp_group,

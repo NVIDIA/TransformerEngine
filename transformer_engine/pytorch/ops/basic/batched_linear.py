@@ -17,7 +17,6 @@ from transformer_engine.common.recipe import Recipe
 
 from ...cpp_extensions import strided_batched_gemm
 from ...distributed import CudaRNGStatesTracker
-from ...module.base import _2X_ACC_DGRAD, _2X_ACC_FPROP, _2X_ACC_WGRAD
 from ...quantization import FP8GlobalStateManager, QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
 from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -565,7 +564,6 @@ class BatchedLinear(BasicOperation):
             batch_dim_b=self.input_batch_dim,
             batch_dim_out=self.input_batch_dim,
             layout="TN",
-            use_split_accumulator=_2X_ACC_FPROP,
         )
         output = self._apply_bias(output, dtype).view(output_shape)
 
@@ -634,7 +632,6 @@ class BatchedLinear(BasicOperation):
                 batch_dim_b=self.input_batch_dim,
                 batch_dim_out=self.input_batch_dim,
                 layout="NN",
-                use_split_accumulator=_2X_ACC_DGRAD,
             )
 
         grad_weight = None
@@ -697,7 +694,6 @@ class BatchedLinear(BasicOperation):
                 batch_dim_out=0,
                 layout="NT",
                 accumulate=accumulate_wgrad,
-                use_split_accumulator=_2X_ACC_WGRAD,
             )
 
             if self._accumulate_into_main_grad:

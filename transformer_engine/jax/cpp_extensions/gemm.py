@@ -432,12 +432,6 @@ def get_rhs_axis_boundary(rhs_cdims, is_transposed):
     return min(rhs_cdims) if is_transposed else max(rhs_cdims) + 1
 
 
-@cache
-def _get_high_precision_accumulation_from_env() -> bool:
-    """Read NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION once per process (cached)."""
-    return os.getenv("NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION", "0") == "1"
-
-
 def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
     """Assert that the given tensor shape and layout meet the requirements for cuBLAS GEMM."""
     if scaling_mode != ScalingMode.NO_SCALING:
@@ -500,7 +494,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -516,14 +510,13 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
         collective_op,
         mesh_resource=None,
     ):
-        del use_split_accumulator, transpose_batch_sequence, mesh_resource
+        del transpose_batch_sequence, mesh_resource
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -677,7 +670,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -700,7 +692,6 @@ class GemmPrimitive(BasePrimitive):
             "rhs_axis_boundary": get_rhs_axis_boundary(rhs_cdims, rhs_transposed),
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
-            "use_split_accumulator": use_split_accumulator,
         }
 
         return jax.ffi.ffi_lowering(GemmPrimitive.name)(ctx, *args, config=kwargs)
@@ -717,7 +708,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -802,7 +792,6 @@ class GemmPrimitive(BasePrimitive):
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
             scaling_mode=scaling_mode,
-            use_split_accumulator=use_split_accumulator,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=is_outer,
@@ -828,7 +817,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -846,7 +834,6 @@ class GemmPrimitive(BasePrimitive):
             out_dtype,
             contracting_dims,
             scaling_mode,
-            use_split_accumulator,
             transpose_batch_sequence,
             sequence_dim,
             is_outer,
@@ -861,7 +848,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -886,7 +872,6 @@ class GemmPrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                use_split_accumulator=use_split_accumulator,
                 collective_op=collective_op,
                 mesh_resource=mesh_resource,
                 transpose_batch_sequence=transpose_batch_sequence,
@@ -1135,7 +1120,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -1147,7 +1131,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del (
             out_dtype,
-            use_split_accumulator,
             result_infos,
             is_outer,
             sequence_dim,
@@ -1170,7 +1153,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -1235,7 +1217,6 @@ class GemmPrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                use_split_accumulator=use_split_accumulator,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=inferred_sequence_dim,
                 is_outer=False,
@@ -1264,7 +1245,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -1274,7 +1254,7 @@ class GemmPrimitive(BasePrimitive):
         operand_types,
         result_types,
     ):
-        del out_dtype, use_split_accumulator
+        del out_dtype
         del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, mesh_resource
 
         if not collective_op.is_none:
@@ -1355,7 +1335,6 @@ def _te_gemm(
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
-    use_split_accumulator: bool = False,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
     mesh_resource=None,
@@ -1446,7 +1425,6 @@ def _te_gemm(
         out_dtype=out_dtype,
         contracting_dims=(lhs_cdims, rhs_cdims),
         scaling_mode=scaling_mode,
-        use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
@@ -2011,7 +1989,6 @@ def _jax_gemm(
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
-    use_split_accumulator: bool = False,
 ) -> jnp.ndarray:
     """
     FP8 GEMM via JAX
@@ -2025,9 +2002,7 @@ def _jax_gemm(
                     f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
                 )
 
-            precision = (
-                jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
-            )
+            precision = jax.lax.Precision.HIGHEST
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
 
         if lhs.scaling_mode.is_1d_block_scaling:
@@ -2126,17 +2101,11 @@ def gemm(
             lhs_quantizer = quantizer_set.x
             rhs_quantizer = quantizer_set.kernel
 
-    # This option enable promoting some intermediate sums to higher precision when accumulating the result in
-    # the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
-    use_split_accumulator = _get_high_precision_accumulation_from_env()
-
     # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
     if not GemmPrimitive.enabled():
         if not collective_op.is_none:
             raise RuntimeError("JAX GEMM does not support collective GEMM")
-        output = _jax_gemm(
-            lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator
-        )
+        output = _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
         if bias is not None:
             output += bias  # Unfused
         return output
@@ -2148,7 +2117,6 @@ def gemm(
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
-        use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op,
         mesh_resource=mesh_resource,

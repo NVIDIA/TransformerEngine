@@ -22,11 +22,6 @@ from ...distributed import (
     reduce_scatter_along_first_dim,
 )
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
-from ...module.base import (
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
 from ...module._common import set_quantizer_amax_reduction_group
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -711,7 +706,6 @@ class BasicLinear(BasicOperation):
             accumulate=accumulate_into_out,
             out=y,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
         )
 
         # Reduce tensor-parallel output if needed
@@ -1019,7 +1013,6 @@ class BasicLinear(BasicOperation):
                 accumulate=accumulate_into_grad_input,
                 layout="NN",
                 out=dx,
-                use_split_accumulator=_2X_ACC_DGRAD,
                 grad=True,
             )
 
@@ -1070,7 +1063,6 @@ class BasicLinear(BasicOperation):
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
                 out=dw,
-                use_split_accumulator=_2X_ACC_WGRAD,
                 grad=True,
             )
 

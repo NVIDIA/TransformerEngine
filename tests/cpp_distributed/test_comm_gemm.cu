@@ -365,7 +365,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
       auto aux_ref = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
       nvte_cublas_gemm(a.data(), b_ref.data(), d_ref.data(), bias.data(), aux_ref.data(), transa,
                        transb, grad, workspace.data(), accumulate,
-                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+                       0 /* math_sm_count */, stream);
 
       std::vector<DType> out_ref(dims.d_rows_num * dims.d_cols_num);
       NVTE_CHECK_CUDA(cudaMemcpy(out_ref.data(), d_ref.rowwise_dptr(),
@@ -378,7 +378,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
       auto aux_partial = Make<DType>(m, n, d_scale);
       nvte_cublas_gemm(a.data(), b.data(), d_partial.data(), empty_bias.data(),
                        aux_partial.data(), transa, transb, grad, workspace.data(), accumulate,
-                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+                       0 /* math_sm_count */, stream);
 
       std::vector<DType> partial_host(m * n);
       NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),

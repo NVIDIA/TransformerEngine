@@ -65,7 +65,6 @@ def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
             workspace,
             workspace.numel(),
             False,
-            False,
         )[0]
 
     torch.testing.assert_close(gemm(w_test, x_test), gemm(w_ref, x_ref), atol=0, rtol=0)
@@ -244,7 +243,6 @@ def check_nvfp4_gemm_versus_reference(
     use_gelu = False
     gelu_input = None
     use_grad = False
-    use_split_accumulator = False
 
     if x_columnwise:
         x_nvfp4_native.update_usage(rowwise_usage=False)
@@ -280,7 +278,6 @@ def check_nvfp4_gemm_versus_reference(
             workspace,
             workspace.shape[0],
             accumulate,
-            use_split_accumulator,
         )[0]
 
     # just in case of accumulation, make sure y_ref and y_native are not the same tensor

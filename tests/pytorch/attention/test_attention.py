@@ -3792,9 +3792,6 @@ def _run_ref_mha_f16(dtype, config, backend):
 
 
 _CUBLASLT_WORKSPACE_SIZE_BYTES = 33_554_432  # 32MiB
-_2X_ACC_FPROP = False
-_2X_ACC_DGRAD = False
-_2X_ACC_WGRAD = False
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
 META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
@@ -3849,7 +3846,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             bias=qkv_bias,
             out_dtype=qkv_weight_fp8.dtype,
             quantization_params=qkv_quantizer,
-            use_split_accumulator=_2X_ACC_FPROP,
         )
         qkv_layout = "bs3hd"
         o_format = "bshd"
@@ -3976,7 +3972,6 @@ class _custom_mha_fp8(torch.autograd.Function):
                 qkv_weight_fp8,
                 dqkv_c,
                 ctx.dtype,
-                use_split_accumulator=_2X_ACC_DGRAD,
                 layout="NN",
             )
 
@@ -3985,7 +3980,6 @@ class _custom_mha_fp8(torch.autograd.Function):
                 inp_fp8,
                 dqkv,
                 ctx.dtype,
-                use_split_accumulator=_2X_ACC_WGRAD,
                 layout="NT",
             )
 

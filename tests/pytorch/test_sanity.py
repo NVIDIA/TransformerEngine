@@ -1332,7 +1332,6 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
         inp_fp8,
         outp_type,
         bias=None,
-        use_split_accumulator=False,
     )
     torch.cuda.synchronize()
 
