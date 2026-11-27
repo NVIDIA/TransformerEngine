@@ -1487,9 +1487,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 }
 
 // The grouped NVFP4 kernels use the first quantizer's configuration for every split.
-bool supports_grouped_nvfp4(const std::vector<std::unique_ptr<Quantizer>> &quantizers,
+bool supports_grouped_nvfp4(const std::vector<NVFP4Quantizer *> &quantizers,
                             const std::vector<size_t> &split_sections, DType input_dtype) {
-  const auto &first = static_cast<const NVFP4Quantizer &>(*quantizers.front());
+  const auto &first = *quantizers.front();
   if (first.with_rht || !first.disable_second_level_scale) {
     // The grouped RHT and amax kernels take up to 64 BF16 splits in 64-row tiles.
     if (input_dtype != DType::kBFloat16 || split_sections.size() > 64 ||
@@ -1504,10 +1504,10 @@ bool supports_grouped_nvfp4(const std::vector<std::unique_ptr<Quantizer>> &quant
                     q.rht_matrix_random_sign_mask_t, q.nvfp4_4over6_mode, q.nvfp4_e4m3_max,
                     q.disable_second_level_scale);
   };
-  return std::all_of(quantizers.begin(), quantizers.end(), [&](const auto &quantizer) {
-    const auto &q = static_cast<const NVFP4Quantizer &>(*quantizer);
-    return !q.row_scaled_nvfp4 && !q.with_2d_quantization && !q.with_amax_reduction &&
-           config(q) == config(first) && (!q.with_rht || q.rht_matrix.is_same(first.rht_matrix));
+  const auto first_config = config(first);
+  return std::all_of(quantizers.begin(), quantizers.end(), [&](const NVFP4Quantizer *q) {
+    return !q->row_scaled_nvfp4 && !q->with_2d_quantization && !q->with_amax_reduction &&
+           config(*q) == first_config && (!q->with_rht || q->rht_matrix.is_same(first.rht_matrix));
   });
 }
 
@@ -1535,9 +1535,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
   const bool disable_second_level_scale = quantizer_cpp_list[0]->disable_second_level_scale;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-  }
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const auto scale_dtype = quantizer_cpp_list[0]->scale_dtype;
 
@@ -2057,13 +2054,6 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(quantizers.size() == num_tensors, "Expected ", num_tensors,
              " NVFP4 quantizers, but got ", quantizers.size(), ".");
 
-  // sanity check all the quantizers have the same scaling mode
-  bool all_same_scaling_mode =
-      std::all_of(quantizers.begin(), quantizers.end(), [&](const NVFP4Quantizer *quantizer) {
-        return quantizer->get_scaling_mode() == quantizers.front()->get_scaling_mode();
-      });
-  NVTE_CHECK(all_same_scaling_mode, "All quantizers must have the same scaling mode");
-
   // Trivial cases
   if (num_tensors == 0) {
     return;
@@ -2076,12 +2066,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     return;
   }
 
-  // Assume all quantizers have identical config
+  // Group eligibility and configuration were checked before bulk allocation.
   const auto &quantizer = *quantizers.front();
-  NVTE_CHECK(!quantizer.with_2d_quantization,
-             "NVFP4 split-quantize does not support 2D quantization");
-  NVTE_CHECK(!quantizer.with_amax_reduction,
-             "NVFP4 split-quantize does not support amax reduction");
   if (quantizer.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled) {
     NVTE_CHECK(!quantizer.with_rht, "NVFP4 4over6 quantization does not support RHT.");
     NVTE_CHECK(!quantizer.stochastic_rounding,
@@ -2211,6 +2197,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
+  std::vector<NVFP4Quantizer *> nvfp4_quantizers;
   if (!disable_bulk_allocation) {
     if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                     [](const py::handle &quantizer) -> bool {
@@ -2226,8 +2213,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
+      nvfp4_quantizers.reserve(num_splits);
+      for (const auto &quantizer : quantizer_cpp_list) {
+        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+      }
       if (input_shape.size() == 2 && dim0_offset == input_shape[0] &&
-          supports_grouped_nvfp4(quantizer_cpp_list, split_sections, input_dtype)) {
+          supports_grouped_nvfp4(nvfp4_quantizers, split_sections, input_dtype)) {
         allocation_method = AllocationMethod::BULK_NVFP4;
         quantization_method = QuantizationMethod::FUSED_NVFP4;
       }
@@ -2260,10 +2251,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     }
     case AllocationMethod::BULK_NVFP4: {
       // Bulk allocation for NVFP4 tensors
-      std::vector<NVFP4Quantizer *> nvfp4_quantizers;
-      for (auto &quantizer : quantizer_cpp_list) {
-        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
-      }
       bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
@@ -2300,10 +2287,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     case QuantizationMethod::FUSED_NVFP4: {
       // Fused NVFP4 quantize kernel
       auto input_nvte = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
-      std::vector<NVFP4Quantizer *> nvfp4_quantizers;
-      for (auto &quantizer : quantizer_cpp_list) {
-        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
-      }
       split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
                                 nvfp4_quantizers);
       break;
