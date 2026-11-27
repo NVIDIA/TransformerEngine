@@ -315,6 +315,8 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.RMSNorm
 
+.. autoapiclass:: transformer_engine.pytorch.ops.SiLUGate
+
 .. autoapiclass:: transformer_engine.pytorch.ops.SReGLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SReLU
