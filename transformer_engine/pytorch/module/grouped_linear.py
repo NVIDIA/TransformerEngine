@@ -239,6 +239,7 @@ class GroupedLinearFwdArgs:
     wgrad_store: Optional[Any]
     cpu_offloading: bool
     is_grad_enabled: bool
+    min_offloaded_tensor_size: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -295,11 +296,16 @@ class GroupedLinearBwdArgs:
         self.biases = saved[3 * n : 3 * n + self.num_bias_args]
 
 
-def _disable_input_bulk_allocation(cpu_offloading, input_quantizer):
-    # Block-scaled FP8 data and scales use separate bulk allocations.
-    return cpu_offloading and not isinstance(
-        input_quantizer, (Float8BlockQuantizer, MXFP8Quantizer)
-    )
+def _disable_input_bulk_allocation(args: GroupedLinearFwdArgs) -> bool:
+    if not args.cpu_offloading:
+        return False
+    if args.min_offloaded_tensor_size is None or not isinstance(
+        args.input_quantizers[0], (Float8BlockQuantizer, MXFP8Quantizer)
+    ):
+        return True
+    # A retained nonempty expert view would pin the other experts' data.
+    width = args.inp.size(-1)
+    return any(0 < rows * width < args.min_offloaded_tensor_size for rows in args.m_splits)
 
 
 def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
@@ -387,7 +393,7 @@ def _grouped_linear_forward_impl(
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=_disable_input_bulk_allocation(cpu_offloading, input_quantizers[0]),
+        disable_bulk_allocation=_disable_input_bulk_allocation(args),
     )
 
     if cpu_offloading:
@@ -741,9 +747,7 @@ def _grouped_linear_backward_impl(
                 with_quantized_output=args.fp8 or args.debug,
                 quantizers=args.input_quantizers,
                 activation_dtype=args.activation_dtype,
-                disable_bulk_allocation=_disable_input_bulk_allocation(
-                    args.cpu_offloading, args.input_quantizers[0]
-                ),
+                disable_bulk_allocation=args.cpu_offloading,
             )
         elif args.backward_override == "dequantized":
             inputmats = [
@@ -1768,6 +1772,10 @@ class GroupedLinear(TransformerEngineBaseModule):
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
+    # An external offload manager can supply its per-tensor threshold (in elements)
+    # to allow split FP8 bulk allocation when all nonempty expert data can move.
+    min_offloaded_tensor_size: Optional[int] = None
+
     def __init__(
         self,
         num_gemms: int,
@@ -2552,6 +2560,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 wgrad_store=self.wgrad_store,
                 cpu_offloading=cpu_offloading,
                 is_grad_enabled=is_grad_enabled,
+                min_offloaded_tensor_size=self.min_offloaded_tensor_size,
             )
 
             out, new_workspaces = _grouped_linear_eager(
