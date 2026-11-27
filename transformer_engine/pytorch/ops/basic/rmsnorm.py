@@ -205,7 +205,7 @@ class RMSNorm(BasicOperation):
         *,
         next_op_input_quantizer,
         basic_op_kwargs,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> RMSNormFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("RMSNorm forward does not expect keyword arguments")
@@ -242,7 +242,6 @@ class RMSNorm(BasicOperation):
         inner_dim = math.prod(weight_dims)
         x = maybe_dequantize(args.input_, args.dtype)
         w = maybe_dequantize(args.weight, args.dtype).view((inner_dim,))
-        # A 2D view of a quantized output would drop its columnwise data.
         x_kernel = (
             x if len(weight_dims) == 1 else x.view((*x.shape[: -len(weight_dims)], inner_dim))
         )
@@ -280,7 +279,7 @@ class RMSNorm(BasicOperation):
         saved_input = None
         if is_quantized_tensor(x) or x.dtype != args.dtype:
             saved_input = TensorSpec(shape=x.shape, dtype=args.dtype, device=x.device)
-        rows = math.prod(x.shape) // math.prod(args.weight.shape)
+        rows = math.prod(x.shape[: len(x.shape) - len(args.weight.shape)])
         rstdevs = TensorSpec(shape=(rows,), dtype=torch.float32, device=x.device)
         return out, [()], (saved_input, rstdevs)
 
@@ -293,9 +292,7 @@ class RMSNorm(BasicOperation):
         ctx.save_for_backward(x, rstdevs)
         ctx.dtype = args.dtype
 
-    def pack_backward_args(
-        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
-    ) -> RMSNormBwdArgs:
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **_unused) -> RMSNormBwdArgs:
         ctx = basic_op_ctxs[0]
         x, rstdevs = ctx.saved_tensors
         return RMSNormBwdArgs(

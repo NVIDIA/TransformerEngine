@@ -104,7 +104,7 @@ class L2Normalization(BasicOperation):
         input_,
         *,
         basic_op_kwargs,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> L2NormalizationFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("L2Normalization forward does not expect keyword arguments")
@@ -146,9 +146,7 @@ class L2Normalization(BasicOperation):
             mark_activation_offload(x, rsqrt_norm)
         ctx.save_for_backward(x, rsqrt_norm)
 
-    def pack_backward_args(
-        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
-    ) -> L2NormalizationBwdArgs:
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **_unused) -> L2NormalizationBwdArgs:
         x, rsqrt_norm = basic_op_ctxs[0].saved_tensors
         return L2NormalizationBwdArgs(grad_output, x, rsqrt_norm, self.eps)
 
