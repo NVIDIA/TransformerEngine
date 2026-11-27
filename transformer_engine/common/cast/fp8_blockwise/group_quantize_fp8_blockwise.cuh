@@ -224,7 +224,7 @@ __device__ __forceinline__ int smem_t_swz_delta(int smem_t_row) {
   return ((smem_t_row >> 3) & 0xf) << 2;
 }
 
-// Drain smem_T to gmem for the CW path: 4 cols/warp, 8 lanes/col, each lane
+// Drain smem_T to gmem for the transposed CW layout: 4 cols/warp, 8 lanes/col, each lane
 // stores a 16-row chunk so the 8 lanes of a col emit one 128 B gmem line.
 //
 // Columnwise data is stored per-expert contiguously as a (K, M_t) transposed
@@ -415,9 +415,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
 
   // ---- Pass 2: quantize from register-staged inputs, emit rowwise + colwise outputs ----
   // 2D block-scaling uses a per-tile (128x128) scalar scale, so the row-wise and
-  // column-wise quantized bytes are identical -- only the gmem layout differs. The
-  // columnwise buffer is physically transposed (cuBLAS FP8 block-scaling GEMM is
-  // TN-only), so we stage into smem_T and drain to the per-expert (K, M_t) transposed block.
+  // column-wise quantized bytes are identical -- only the gmem layout differs. A columnwise
+  // buffer is present only in the transposed layout (otherwise the rowwise output also serves
+  // columnwise usage), so we stage into smem_T and drain to the per-expert (K, M_t) transposed
+  // block.
   if constexpr (kReturnColwise) {
     constexpr int kSMemTRowStride = kTileDim + 4;
     __shared__ OType smem_T[kTileDim][kSMemTRowStride];
@@ -563,11 +564,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 // ----- 1D block scaling kernel with TMA input ------------------------------------------------
 // CW and BOTH path. TMA fills a 128x128 smem input cache. RW pass reads rows
-// and stores quantized output. CW pass stages a column slice in registers,
-// computes the per-column amax there, then fills smem_T and drains to gmem.
+// and stores quantized output. In the transposed columnwise layout, the CW pass
+// stages a column slice in registers, computes the per-column amax there, then
+// fills smem_T and drains to gmem. In the non-transposed layout, it reduces the
+// column amaxes through smem and stores row segments from the smem input cache.
 
-template <bool kSameBothDims, bool kReturnRowwise, bool kReturnColwise, typename CType,
-          typename IType, typename OType>
+template <bool kSameBothDims, bool kReturnRowwise, bool kReturnColwise, bool kColwiseTransposed,
+          typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input, OType* __restrict__ output_base,
     OType* __restrict__ output_t_base, CType* __restrict__ scale_inv_base,
@@ -603,7 +606,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
   const size_t global_col_base = tile_x * kTileDim;
 
   // Dynamic smem: IType[kTileDim][kTileDim], 128 B aligned for TMA. Static smem
-  // (smem_T when CW, tma_mbar) lives outside the dynamic region.
+  // (the CW pass's arrays, tma_mbar) lives outside the dynamic region.
   extern __shared__ char smem_raw_1d_tma[];
   char* smem_base = align_up(smem_raw_1d_tma, TMA_SHMEM_ALIGNMENT);
   IType(*smem)[kTileDim] = reinterpret_cast<IType(*)[kTileDim]>(smem_base);
@@ -696,7 +699,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     __syncthreads();
   }
 
-  // ---- CW pass (128x1 scale per column) ----
+  // ---- CW pass (128x1 scale per column), transposed layout ----
   // CW-only: 2 t/col, single column pass per CTA, 64-row reg_data per thread.
   // BOTH:    4 t/col, two column passes per CTA, 32-row reg_data per thread.
   //
@@ -708,10 +711,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
   // bank-conflict footprint on the smem load, which costs more than the extra
   // CTA/SM gains.
   //
-  // The columnwise buffer is physically transposed (cuBLAS FP8 block-scaling
-  // GEMM is TN-only); we stage in smem_T and drain to the per-expert (K, M_t)
-  // transposed block.
-  if constexpr (kReturnColwise) {
+  // We stage in smem_T and drain to the per-expert (K, M_t) transposed block.
+  if constexpr (kReturnColwise && kColwiseTransposed) {
     constexpr int kSMemTRowStride = kTileDim + 4;
     __shared__ OType smem_T[kTileDim][kSMemTRowStride];
 
@@ -760,6 +761,84 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     const size_t tensor_M = tensor_row_blocks * kTileDim;
     drain_smem_t_to_gmem<false, OType, kSMemTRowStride>(
         smem_T, output_t_base, global_col_base, global_row_base, tensor_row_base, tensor_M, K, tid);
+  }
+
+  // ---- CW pass (128x1 scale per column), non-transposed layout ----
+  // The columnwise data is row-major like the rowwise data: expert t's block is (M_t, K) at
+  // element offset K * tensor_row_base, so element (r, c) is at r * K + c.
+  // Warp w handles rows [w * kRowsPerWarp, (w + 1) * kRowsPerWarp) of the tile and lane l handles
+  // columns [l * kColsPerLane, (l + 1) * kColsPerLane), so a warp reads and stores whole rows.
+  // Each thread computes the amax of its columns over its rows, the per-warp amaxes are reduced
+  // through shared memory, and the tile is re-read from shared memory to quantize it.
+  if constexpr (kReturnColwise && !kColwiseTransposed) {
+    constexpr int kColsPerLane = kTileDim / kThreadsPerWarp;
+    constexpr int kRowsPerWarp = kTileDim / kNumWarps;
+    using IVec = Vec<IType, kColsPerLane>;
+    using CVec = Vec<CType, kColsPerLane>;
+    using OVec = Vec<OType, kColsPerLane>;
+    __shared__ __align__(sizeof(CVec)) CType smem_amax[kNumWarps][kTileDim];
+    __shared__ __align__(sizeof(CVec)) CType smem_scale[kTileDim];
+    const int warp = tid / kThreadsPerWarp;
+    const int r_s = warp * kRowsPerWarp;                     // First row in the tile
+    const int c_s = (tid % kThreadsPerWarp) * kColsPerLane;  // First column in the tile
+
+    // Compute the amax of each column over the warp's rows
+    CVec amax;
+    amax.clear();
+#pragma unroll
+    for (int i = 0; i < kRowsPerWarp; ++i) {
+      IVec in_vec;
+      in_vec.load_from(&smem[r_s + i][c_s]);
+#pragma unroll
+      for (int j = 0; j < kColsPerLane; ++j) {
+        amax.data.elt[j] = fmaxf(amax.data.elt[j], fabsf(static_cast<CType>(in_vec.data.elt[j])));
+      }
+    }
+    amax.store_to(&smem_amax[warp][c_s]);
+    __syncthreads();
+
+    // Reduce the column amaxes across warps, compute scales and write scale_inv_t
+    if (tid < kTileDim) {
+      const int c = tid;  // Column in the tile
+      CType col_amax = 0.f;
+#pragma unroll
+      for (int w = 0; w < kNumWarps; ++w) {
+        col_amax = fmaxf(col_amax, smem_amax[w][c]);
+      }
+      const CType col_scale =
+          compute_scale_from_types<IType, OType>(col_amax, epsilon, pow_2_scales);
+      smem_scale[c] = col_scale;
+      const size_t col_g = global_col_base + c;  // Column in global memory
+      if (col_g < K) {
+        scale_inv_t_base[col_g + tile_y_global * scale_t_stride_aligned_K] = 1.f / col_scale;
+      }
+    }
+    __syncthreads();
+
+    // Quantize and store output_t. Every row of the tile is in bounds, since the early return
+    // above skips tiles that extend past their tensor's last row. The dispatcher requires K to be a
+    // multiple of TMA_GMEM_ALIGNMENT, hence of kColsPerLane, so a thread's columns are either all
+    // inside or all outside the last dim.
+    static_assert(TMA_GMEM_ALIGNMENT % kColsPerLane == 0, "Lanes must not straddle the last dim.");
+    const size_t c_g = global_col_base + c_s;  // Column in global memory
+    if (c_g < K) {
+      CVec scale;
+      scale.load_from(&smem_scale[c_s]);
+      size_t r_g = global_row_base + r_s;  // Row in global memory
+#pragma unroll
+      for (int i = 0; i < kRowsPerWarp; ++i) {
+        IVec in_vec;
+        in_vec.load_from(&smem[r_s + i][c_s]);
+        OVec out_vec;
+#pragma unroll
+        for (int j = 0; j < kColsPerLane; ++j) {
+          out_vec.data.elt[j] =
+              static_cast<OType>(static_cast<CType>(in_vec.data.elt[j]) * scale.data.elt[j]);
+        }
+        out_vec.store_to(&output_t_base[r_g * K + c_g]);
+        ++r_g;
+      }
+    }
   }
 #endif  // __CUDA_ARCH__ >= 900
 }
@@ -916,6 +995,8 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                         const bool pow_2_scales, cudaStream_t stream,
                                         GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
+  // Columnwise data is stored as per-expert (K, M_t) blocks if transposed, else as (M_t, K)
+  const bool columnwise_transposed = output->columnwise_transposed;
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,
              ".");
@@ -981,14 +1062,22 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                       } else if constexpr (kRowwise || kColwise) {
                         // CW-only, BOTH, or RW-only WITH dbias: smem-cached TMA kernel.
                         const size_t smem_bytes = kTileDim * kTileDim * sizeof(IType);
+                        // Static smem bound: the transposed layout's smem_T is larger than the
+                        // non-transposed layout's static smem.
                         constexpr size_t kStaticSmemCWBytes =
                             (kTileDim * (kTileDim + 4)) * sizeof(OType);
                         const size_t static_smem_bytes = kColwise ? kStaticSmemCWBytes : 0;
                         const size_t tma_smem_bytes = smem_bytes + TMA_SHMEM_ALIGNMENT - 1;
                         const size_t total_smem_tma = tma_smem_bytes + static_smem_bytes;
+                        // The columnwise layout only matters with CW output. Without it, both
+                        // arms name the same instantiation.
                         auto tma_kernel =
-                            group_block_scaled_1d_tma_kernel<kSameBothDims, kRowwise, kColwise,
-                                                             CType, IType, OType>;
+                            columnwise_transposed
+                                ? group_block_scaled_1d_tma_kernel<
+                                      kSameBothDims, kRowwise, kColwise, true, CType, IType, OType>
+                                : group_block_scaled_1d_tma_kernel<kSameBothDims, kRowwise,
+                                                                   kColwise, !kColwise, CType,
+                                                                   IType, OType>;
                         if (total_smem_tma >= 48 * 1024) {
                           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                               tma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,

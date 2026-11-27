@@ -57,11 +57,11 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
 
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
- *  If rowwise==false, the columnwise data will be reinterpreted as
- *  rowwise data to avoid transposing it in memory. Due to differences
- *  in how block scaling and mxfp8 store data, this requires the
- *  calling code to treat the output tensor as having been transposed
- *  in this case.
+ *  If rowwise==false and the columnwise data is stored transposed, the
+ *  columnwise data will be reinterpreted as rowwise data to avoid
+ *  transposing it in memory. Due to differences in how block scaling
+ *  and mxfp8 store data, this requires the calling code to treat the
+ *  output tensor as having been transposed in this case.
  *
  *  Returns the swizzled scaling factor of the converted mxfp8 tensor.
  *  The returned swizzled scaling factor tensor should be kept alive
@@ -78,8 +78,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensors(std::vector<TensorWrapper>& in
 
 /*! \brief Convert an FP8 block-scaling grouped tensor to an MXFP8 grouped tensor in-place.
  *
- *  If rowwise==false, the (transposed) columnwise data is viewed as rowwise data of the
- *  transposed tensors, with first and last dims swapped, so the GEMM must use the TN layout.
+ *  If rowwise==false and the columnwise data is stored transposed, it is viewed as rowwise data of
+ *  the transposed tensors, with first and last dims swapped, so the GEMM must use the TN layout.
  *  Returns the swizzled scaling factors, which must be kept alive during the GEMM.
  */
 at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper& input, bool rowwise);

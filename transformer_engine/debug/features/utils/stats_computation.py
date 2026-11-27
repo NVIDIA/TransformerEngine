@@ -344,7 +344,8 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
     def get_scale_inv(quantized_tensor, columnwise):
         if hasattr(quantized_tensor, "_scale_inv"):
             return getattr(quantized_tensor, "_scale_inv")
-        if columnwise:
+        # 2D FP8 block-scaled tensors may serve columnwise usage with their rowwise scales
+        if columnwise and getattr(quantized_tensor, "_columnwise_scale_inv", None) is not None:
             return getattr(quantized_tensor, "_columnwise_scale_inv")
         return getattr(quantized_tensor, "_rowwise_scale_inv")
 

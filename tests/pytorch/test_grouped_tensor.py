@@ -23,7 +23,7 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported, mark_
 import transformer_engine_torch as tex
 
 # Import test utilities
-from utils import assert_close
+from utils import assert_close, fp8_block_scaling_valid_scale_shape
 
 # Check available recipes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -66,21 +66,32 @@ def test_mark_grouped_tensor_supports_unquantized_rowwise_storage():
     assert rowwise_data.grouped_tensor_scale_inv is False
 
 
-def test_mark_grouped_tensor_marks_quantized_columnwise_storage():
+@pytest.mark.parametrize(
+    "rowwise_serves_columnwise", (False, True), ids=("columnwise", "rowwise_serves_columnwise")
+)
+def test_mark_grouped_tensor_marks_quantized_columnwise_storage(rowwise_serves_columnwise):
     rowwise_data = torch.empty(16)
-    columnwise_data = torch.empty(16)
-    columnwise_scale_inv = torch.empty(4)
+    scale_inv = torch.empty(4)
+    columnwise_data = None if rowwise_serves_columnwise else torch.empty(16)
+    columnwise_scale_inv = None if rowwise_serves_columnwise else torch.empty(4)
     grouped_tensor = SimpleNamespace(
         rowwise_data=rowwise_data,
+        scale_inv=scale_inv,
         columnwise_data=columnwise_data,
         columnwise_scale_inv=columnwise_scale_inv,
+        _rowwise_serves_columnwise=lambda: rowwise_serves_columnwise,
     )
 
     mark_grouped_tensor(grouped_tensor)
 
-    assert not hasattr(rowwise_data, "grouped_tensor_scale_inv")
-    assert columnwise_data.grouped_tensor_scale_inv is False
-    assert columnwise_scale_inv.grouped_tensor_scale_inv is True
+    # The marked buffers are the ones wgrad reads
+    if rowwise_serves_columnwise:
+        assert rowwise_data.grouped_tensor_scale_inv is False
+        assert scale_inv.grouped_tensor_scale_inv is True
+    else:
+        assert not hasattr(rowwise_data, "grouped_tensor_scale_inv")
+        assert columnwise_data.grouped_tensor_scale_inv is False
+        assert columnwise_scale_inv.grouped_tensor_scale_inv is True
 
 
 _quantization_params = [
@@ -1609,7 +1620,7 @@ class TestGroupedTensor:
             assert torch.equal(grouped_output.columnwise_data[: expected.numel()], expected)
 
     @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
-    @pytest.mark.parametrize("shape_case", ["uniform", "varying_first"])
+    @pytest.mark.parametrize("shape_case", ["uniform", "varying_first", "k_tail"])
     @pytest.mark.parametrize("direction", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.parametrize(
@@ -1628,16 +1639,15 @@ class TestGroupedTensor:
     ) -> None:
         """Test grouped FP8 block-scaling quantization against per-tensor quantization.
 
-        Covers rowwise, columnwise and both directions. Each expert's data sub-block (and, for
-        rowwise, its scale sub-block placed at the cumulative padded offset from
-        ``_fp8bs_per_expert_scale_floats``) is compared against an independent per-tensor reference
-        quantizer. The columnwise scale layout carries 2D padding plus the per-expert slack
-        reserved in ``Float8BlockQuantizer.create_grouped_tensor``; it is validated end to end by
-        ``test_group_dequantize_fp8_blockwise`` rather than by a fragile byte-compare here.
+        Covers rowwise, columnwise and both directions. Each expert's data sub-block and the valid
+        region of its scale sub-block, placed at the cumulative padded offset from
+        ``_fp8bs_per_expert_scale_floats``, are compared against an independent per-tensor
+        reference quantizer. 2D columnwise scales are covered by
+        ``test_group_dequantize_fp8_blockwise``.
 
-        FP8 block-scaling supports only SAME_BOTH_DIMS (``uniform``) and VARYING_FIRST_DIM
-        (``varying_first``); ``varying_last``/``varying_both`` are rejected at the kernel level.
-        Per-tensor first dim must be a multiple of 128 (kernel tile size).
+        FP8 block scaling supports only SAME_BOTH_DIMS (``uniform``) and VARYING_FIRST_DIM
+        (``varying_first``, ``k_tail``). Per-tensor first dims are multiples of 128; ``k_tail``
+        has a partial last 128-column block.
         """
         if not force_pow_2_scales and _fp8bs_pow2_required:
             # Non-power-of-2 FP8 block scales cannot be emulated with MXFP8 on Blackwell+.
@@ -1654,19 +1664,28 @@ class TestGroupedTensor:
                 tex.group_quantize(x, quantizer, 2, None)
             return
 
-        rowwise = direction in ("rowwise", "both")
-        columnwise = direction in ("columnwise", "both")
+        requested_rowwise = direction in ("rowwise", "both")
+        requested_columnwise = direction in ("columnwise", "both")
+
+        # Where FP8 GEMM supports non-TN layouts, 2D rowwise data and scales also serve
+        # columnwise usage, so there are no 2D columnwise buffers.
+        columnwise_from_rowwise = block_scaling_dim == 2 and is_non_tn_fp8_gemm_supported()
+        rowwise = requested_rowwise or (requested_columnwise and columnwise_from_rowwise)
+        columnwise = requested_columnwise and not columnwise_from_rowwise
 
         # dbias is the bias gradient (per-column input sum) emitted by the bgrad path, which
         # requires rowwise output; the columnwise-only + dbias combination is not applicable.
-        if output_dbias and not rowwise:
+        if output_dbias and not requested_rowwise:
             pytest.skip("bgrad (dbias) requires rowwise output; columnwise-only does not apply.")
 
         if shape_case == "uniform":
             per_tensor_shapes = [(128, 512)] * 3
             first_dims_host = None
-        else:  # varying_first
+        elif shape_case == "varying_first":
             per_tensor_shapes = [(128, 512), (256, 512), (384, 512)]
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+        else:  # k_tail
+            per_tensor_shapes = [(128, 272), (256, 272), (384, 272)]
             first_dims_host = [s[0] for s in per_tensor_shapes]
 
         num_tensors = len(per_tensor_shapes)
@@ -1686,8 +1705,8 @@ class TestGroupedTensor:
 
         quantizer = Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=rowwise,
-            columnwise=columnwise,
+            rowwise=requested_rowwise,
+            columnwise=requested_columnwise,
             force_pow_2_scales=force_pow_2_scales,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
@@ -1699,6 +1718,11 @@ class TestGroupedTensor:
             )
         else:
             grouped_output = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        assert (grouped_output.rowwise_data is not None) == rowwise
+        assert (grouped_output.scale_inv is not None) == rowwise
+        assert (grouped_output.columnwise_data is not None) == columnwise
+        assert (grouped_output.columnwise_scale_inv is not None) == columnwise
 
         # Compare each expert's sub-block against an independent per-tensor reference. The
         # reference enables both directions: the non-grouped 2D kernel requires rowwise output to
@@ -1712,30 +1736,48 @@ class TestGroupedTensor:
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
-        # Data sub-blocks are contiguous (rowwise (M_t, K) / columnwise transposed (K, M_t)) with
-        # no inter-expert padding. The rowwise scale sub-block is placed at the cumulative
-        # per-expert padded offset, so a wrong stride fails byte-equality here. The columnwise
-        # scale carries 2D ``roundup(blocks_y_t, 4)`` padding columns (and the per-expert slack),
-        # so its layout is validated end to end by ``test_group_dequantize_fp8_blockwise`` instead.
+        # Data sub-blocks are contiguous with no inter-expert padding: rowwise (M_t, K), and
+        # columnwise (M_t, K) where FP8 GEMM supports non-TN layouts, else transposed (K, M_t).
+        # Scale sub-blocks sit at the cumulative per-expert padded offsets, so a wrong stride fails
+        # byte-equality here. Only the valid region of each scale sub-block is compared: the
+        # padding columns are not part of the quantized result.
+        split_tensors = grouped_output.split_into_quantized_tensors()
         data_off = 0
         rw_scale_off = 0
-        for tensor in input_tensors:
+        cw_scale_off = 0
+        for tensor, split_tensor in zip(input_tensors, split_tensors):
             m_t, k = tensor.shape
             numel = m_t * k
             ref = ref_quantizer(tensor)
             if rowwise:
                 ref_rw = ref._rowwise_data.reshape(-1)
                 assert torch.equal(grouped_output.rowwise_data[data_off : data_off + numel], ref_rw)
-                ref_rs = ref._rowwise_scale_inv.reshape(-1)
-                assert torch.equal(
-                    grouped_output.scale_inv[rw_scale_off : rw_scale_off + ref_rs.numel()], ref_rs
-                )
+                ref_rs = ref._rowwise_scale_inv
+                rs = grouped_output.scale_inv[rw_scale_off : rw_scale_off + ref_rs.numel()]
+                valid_cols = fp8_block_scaling_valid_scale_shape(
+                    (m_t, k), block_scaling_dim, False
+                )[1]
+                assert torch.equal(rs.view(ref_rs.shape)[:, :valid_cols], ref_rs[:, :valid_cols])
                 rw_scale_off += _fp8bs_per_expert_scale_floats(block_scaling_dim, False, m_t, k)
             if columnwise:
                 ref_cw = ref._columnwise_data.reshape(-1)
                 assert torch.equal(
                     grouped_output.columnwise_data[data_off : data_off + numel], ref_cw
                 )
+                expected_cw_shape = (m_t, k) if is_non_tn_fp8_gemm_supported() else (k, m_t)
+                assert tuple(split_tensor._columnwise_data.shape) == expected_cw_shape
+                assert torch.equal(split_tensor._columnwise_data, ref._columnwise_data)
+            else:
+                assert split_tensor._columnwise_data is None
+            if columnwise and block_scaling_dim == 1:
+                # 1D columnwise scales are [blocks_y_t, roundup(K, 4)] on every arch.
+                ref_cs = ref._columnwise_scale_inv
+                cs_numel = _fp8bs_per_expert_scale_floats(1, True, m_t, k)
+                assert ref_cs.numel() == cs_numel
+                cs = grouped_output.columnwise_scale_inv[cw_scale_off : cw_scale_off + cs_numel]
+                assert torch.equal(cs.view(ref_cs.shape)[:, :k], ref_cs[:, :k])
+                assert torch.equal(split_tensor._columnwise_scale_inv[:, :k], ref_cs[:, :k])
+                cw_scale_off += cs_numel
             data_off += numel
 
         if output_dbias:
@@ -1975,6 +2017,10 @@ class TestGroupedTensor:
         """Ensure grouped FP8 block-scaling dequantize is CUDA graph capturable (parity with MXFP8)."""
         rowwise = direction == "rowwise"
         columnwise = direction == "columnwise"
+        # Where FP8 GEMM supports non-TN layouts, 2D rowwise data and scales also serve
+        # columnwise usage, so the 2D columnwise direction dequantizes rowwise data.
+        columnwise_from_rowwise = block_scaling_dim == 2 and is_non_tn_fp8_gemm_supported()
+        dequantize_rowwise = rowwise or columnwise_from_rowwise
         num_tensors = 2
         shape = [(512, 1024) for _ in range(num_tensors)]
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
@@ -1993,6 +2039,8 @@ class TestGroupedTensor:
         )
 
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+        assert (quantized.rowwise_data is not None) == dequantize_rowwise
+        assert (quantized.columnwise_data is not None) == (not dequantize_rowwise)
 
         # Warmup dequantize.
         torch.cuda.synchronize()
@@ -2008,7 +2056,7 @@ class TestGroupedTensor:
             [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape], dim=0
         )
         fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
-        if rowwise:
+        if dequantize_rowwise:
             quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
             quantized.scale_inv.copy_(fresh_quantized.scale_inv)
         else:
@@ -2038,13 +2086,15 @@ class TestGroupedTensor:
     ) -> None:
         """Test grouped FP8 block-scaling dequantize round-trip for rowwise and columnwise.
 
-        The columnwise + ``varying_first`` + 2D case exercises the per-expert columnwise
-        scale-buffer slack end to end: a wrong slack/stride would place scales at the wrong
-        offsets and corrupt the dequantized values. ``group_dequantize`` consumes exactly one of
-        rowwise / columnwise data, so ``both`` is not a valid round-trip and is not tested here.
+        Where FP8 GEMM is TN-only, the columnwise + ``varying_first`` + 2D case covers the
+        per-expert columnwise scale offsets. Elsewhere, 2D columnwise usage round-trips through
+        rowwise data. ``both`` is not tested: ``group_dequantize`` consumes exactly one of rowwise
+        and columnwise data.
         """
         rowwise = direction == "rowwise"
         columnwise = direction == "columnwise"
+        columnwise_from_rowwise = block_scaling_dim == 2 and is_non_tn_fp8_gemm_supported()
+        dequantize_rowwise = rowwise or columnwise_from_rowwise
         num_tensors = len(shape)
 
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
@@ -2061,6 +2111,8 @@ class TestGroupedTensor:
         first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
 
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+        assert (quantized.rowwise_data is not None) == dequantize_rowwise
+        assert (quantized.columnwise_data is not None) == (not dequantize_rowwise)
         dequantized = tex.group_dequantize(quantized, te.DType.kBFloat16)
 
         assert dequantized.num_tensors == num_tensors

@@ -273,6 +273,8 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
+  // Column-wise data is stored transposed where FP8 GEMM is TN-only.
+  bool columnwise_transposed = true;
 
  private:
   int block_scaling_dim = 2;

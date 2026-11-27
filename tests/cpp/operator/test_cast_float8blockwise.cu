@@ -23,6 +23,7 @@ struct QuantizationOptions {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0;
   size_t block_scaling_dim = 2u;
+  bool columnwise_transposed = true;
 };
 
 constexpr size_t kBlockLen = 128;
@@ -219,7 +220,8 @@ void ref_quantize_onedimensional_blocks(const ProcessingMethod processing_method
           if (y_pos >= height) {
             continue;
           }
-          output_t[x * height + y_pos] = quantize_element(input[y_pos * width + x], qscale);
+          const size_t idx_t = opts.columnwise_transposed ? x * height + y_pos : y_pos * width + x;
+          output_t[idx_t] = quantize_element(input[y_pos * width + x], qscale);
         }
       }
     }
@@ -280,6 +282,7 @@ void runTestCase(const ProcessingMethod processing_method, const std::vector<siz
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
                   opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  output_c.set_columnwise_transposed(opts.columnwise_transposed);
   Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
@@ -355,6 +358,7 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
                   opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  output_c.set_columnwise_transposed(opts.columnwise_transposed);
   Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
@@ -414,6 +418,7 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16}, {65, 96}, {256, 256}, {993, 512},
     {256, 65536}, {4096, 1632}, {1024, 1},
     {16, 512}, {1024}, {8, 32, 1024}, {16, 8, 4, 512},
+    {129, 257},
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -450,12 +455,12 @@ std::vector<float> amax_epsilons = {
 class FusedCastFloat8BlockwiseTestSuite
     : public ::testing::TestWithParam<std::tuple<
           ProcessingMethod, ActivationType, std::vector<size_t>, transformer_engine::DType,
-          transformer_engine::DType, InputsFillCase, bool, float, bool>> {};
+          transformer_engine::DType, InputsFillCase, bool, float, bool, bool>> {};
 
 class FusedCastFloat8VectorwiseTestSuite
     : public ::testing::TestWithParam<std::tuple<
           ProcessingMethod, ActivationType, std::vector<size_t>, transformer_engine::DType,
-          transformer_engine::DType, InputsFillCase, bool, float, bool>> {};
+          transformer_engine::DType, InputsFillCase, bool, float, bool, bool>> {};
 
 #define DACT_FUNC_SWITCH(OP_FUNC_TYPE, OP, ...) \
   switch (OP_FUNC_TYPE) {                       \
@@ -491,7 +496,9 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
   const DType input_type = std::get<3>(GetParam());
   const DType output_type = std::get<4>(GetParam());
   const InputsFillCase fill_case = std::get<5>(GetParam());
-  const bool colwise = std::get<6>(GetParam());
+  const bool columnwise_transposed = std::get<9>(GetParam());
+  // 2D rowwise data and scales serve columnwise usage unless columnwise data is stored transposed
+  const bool colwise = std::get<6>(GetParam()) && columnwise_transposed;
   const bool rowwise = true;
   const float eps = std::get<7>(GetParam());
   const bool force_pow_2 = std::get<8>(GetParam());
@@ -500,6 +507,7 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
   q_opts.force_pow_2_scales = force_pow_2;
   q_opts.amax_epsilon = eps;
   q_opts.block_scaling_dim = 2u;
+  q_opts.columnwise_transposed = columnwise_transposed;
 
   // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
   // which requires using power of two scaling factors. Skip unsupported tests.
@@ -555,6 +563,7 @@ TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
   q_opts.force_pow_2_scales = force_pow_2;
   q_opts.amax_epsilon = eps;
   q_opts.block_scaling_dim = 1u;
+  q_opts.columnwise_transposed = std::get<9>(GetParam());
 
   // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
   // which requires using power of two scaling factors. Skip unsupported tests.
@@ -621,7 +630,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false),
+                       ::testing::Values(true, false)),
     [](const testing::TestParamInfo<FusedCastFloat8BlockwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));
@@ -634,7 +644,8 @@ INSTANTIATE_TEST_SUITE_P(
               test::caseName(std::get<5>(info.param)) + "X" +
               std::to_string(std::get<6>(info.param)) + "X" +
               std::to_string(std::get<7>(info.param) != 0.0f) + "X" +
-              std::to_string(std::get<8>(info.param));
+              std::to_string(std::get<8>(info.param)) + "X" +
+              std::to_string(std::get<9>(info.param));
       return name;
     });
 
@@ -645,7 +656,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false),
+                       ::testing::Values(true, false)),
     [](const testing::TestParamInfo<FusedCastFloat8VectorwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));
@@ -658,6 +670,7 @@ INSTANTIATE_TEST_SUITE_P(
               test::caseName(std::get<5>(info.param)) + "X" +
               std::to_string(std::get<6>(info.param)) + "X" +
               std::to_string(std::get<7>(info.param) != 0.0f) + "X" +
-              std::to_string(std::get<8>(info.param));
+              std::to_string(std::get<8>(info.param)) + "X" +
+              std::to_string(std::get<9>(info.param));
       return name;
     });

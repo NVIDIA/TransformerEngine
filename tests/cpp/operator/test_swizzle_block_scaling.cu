@@ -64,15 +64,18 @@ uint8_t e8m0_of(float scale_inv) {
   return static_cast<uint8_t>((bits >> 23) & 0xFF);
 }
 
-// Compact FP8 block-scaling scale size (floats) of one tensor with rowwise data [rows, cols].
-// Matches padded_block_{1d,2d}_scale_inv_floats(.., rowwise=true) in cublaslt_grouped_gemm.cu.
-size_t input_scale_floats(bool is_2d, size_t rows, size_t cols) {
+// Compact FP8 block-scaling scale size (floats) of one tensor with data [rows, cols], for rowwise
+// or columnwise output. Matches padded_block_{1d,2d}_scale_inv_floats(.., rowwise=!columnwise) in
+// cublaslt_grouped_gemm.cu; 2D scales are the rowwise ones in both directions.
+size_t input_scale_floats(bool is_2d, bool columnwise, size_t rows, size_t cols) {
+  if (columnwise && !is_2d) return ceil_div(rows, kBlock) * round_up(cols, 4);
   return is_2d ? ceil_div(rows, kBlock) * round_up(ceil_div(cols, kBlock), 4)
                : ceil_div(cols, kBlock) * round_up(rows, 4);
 }
 
-// Swizzled MXFP8 scale size (bytes). Matches padded_mxfp8_scale_inv_bytes(.., rowwise=true).
-size_t output_scale_bytes(size_t rows, size_t cols) {
+// Swizzled MXFP8 scale size (bytes). Matches padded_mxfp8_scale_inv_bytes(.., rowwise=!columnwise).
+size_t output_scale_bytes(bool columnwise, size_t rows, size_t cols) {
+  if (columnwise) return ceil_div(rows, kBlock) * 4 * round_up(cols, kBlock);
   return round_up(rows, kBlock) * ceil_div(cols, kBlock) * 4;
 }
 
@@ -108,6 +111,30 @@ std::vector<uint8_t> ref_convert(bool is_2d, size_t rows, size_t cols, const flo
   return swizzled;
 }
 
+// Reference conversion into columnwise MXFP8 scales, one per 32x1 block, for one tensor with data
+// [rows, cols]; `in` is its compact FP32 scale block: 1D columnwise scales
+// [ceil(rows/128), roundup(cols, 4)] (the kernel zero-fills columns past that padding) or 2D
+// scales. Columnwise scales are swizzled like the rowwise scales of the transposed data.
+std::vector<uint8_t> ref_convert_columnwise(bool is_2d, size_t rows, size_t cols, const float* in) {
+  const size_t padded_cols = round_up(cols, kBlock);
+  const size_t scale_rows = ceil_div(rows, kBlock) * 4;
+  std::vector<uint8_t> compact_t(padded_cols * scale_rows, 0);
+  for (size_t c = 0; c < padded_cols; ++c) {
+    for (size_t r = 0; r < scale_rows; ++r) {
+      const size_t row_block = r / 4;
+      if (is_2d) {
+        const size_t in_cols = round_up(ceil_div(cols, kBlock), 4);
+        compact_t[c * scale_rows + r] = e8m0_of(in[row_block * in_cols + c / kBlock]);
+      } else if (c < round_up(cols, 4)) {
+        compact_t[c * scale_rows + r] = e8m0_of(in[row_block * round_up(cols, 4) + c]);
+      }
+    }
+  }
+  std::vector<uint8_t> swizzled(padded_cols * scale_rows);
+  ref_swizzle_rowwise(compact_t.data(), swizzled.data(), padded_cols, scale_rows);
+  return swizzled;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Non-grouped API.
 
@@ -115,22 +142,25 @@ struct SingleCase {
   bool is_2d;
   size_t rows;
   size_t cols;
+  bool columnwise = false;  // columnwise output
 };
 
 std::string case_name(const SingleCase& c) {
   return std::string(c.is_2d ? "2D" : "1D") + "_" + std::to_string(c.rows) + "x" +
-         std::to_string(c.cols);
+         std::to_string(c.cols) + (c.columnwise ? "_colwise" : "");
 }
 
 // Device buffers and tensors for converting one tensor, with random power-of-2 input scales and
-// sentinel-filled output scales.
+// sentinel-filled output scales. Columnwise data is not stored transposed, so it converts to
+// columnwise MXFP8 data; 2D scales serve it from the rowwise slots.
 struct ConversionOperands {
   ConversionOperands(const SingleCase& c, uint32_t seed)
       : c(c),
-        in_rows(c.is_2d ? ceil_div(c.rows, kBlock) : ceil_div(c.cols, kBlock)),
-        in_cols(c.is_2d ? round_up(ceil_div(c.cols, kBlock), 4) : round_up(c.rows, 4)),
-        out_rows(round_up(c.rows, kBlock)),
-        out_cols(ceil_div(c.cols, kBlock) * 4),
+        in_rows(c.is_2d || c.columnwise ? ceil_div(c.rows, kBlock) : ceil_div(c.cols, kBlock)),
+        in_cols(c.is_2d ? round_up(ceil_div(c.cols, kBlock), 4)
+                        : round_up(c.columnwise ? c.cols : c.rows, 4)),
+        out_rows(c.columnwise ? ceil_div(c.rows, kBlock) * 4 : round_up(c.rows, kBlock)),
+        out_cols(c.columnwise ? round_up(c.cols, kBlock) : ceil_div(c.cols, kBlock) * 4),
         scales_h(random_pow2_scales(in_rows * in_cols, seed)),
         data(c.rows * c.cols),
         in_scales(scales_h.size() * sizeof(float)),
@@ -140,12 +170,25 @@ struct ConversionOperands {
     cudaMemcpy(in_scales.ptr, scales_h.data(), scales_h.size() * sizeof(float),
                cudaMemcpyHostToDevice);
     cudaMemset(out_scales.ptr, 0xAB, out_rows * out_cols);
-    input.set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
-    input.set_rowwise_scale_inv(in_scales.ptr, DType::kFloat32,
-                                std::vector<size_t>{in_rows, in_cols});
-    output.set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
-    output.set_rowwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0,
-                                 std::vector<size_t>{out_rows, out_cols});
+    if (c.columnwise && !c.is_2d) {
+      input.set_columnwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
+      input.set_columnwise_scale_inv(in_scales.ptr, DType::kFloat32,
+                                     std::vector<size_t>{in_rows, in_cols});
+    } else {
+      input.set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
+      input.set_rowwise_scale_inv(in_scales.ptr, DType::kFloat32,
+                                  std::vector<size_t>{in_rows, in_cols});
+    }
+    input.set_columnwise_transposed(false);
+    if (c.columnwise) {
+      output.set_columnwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
+      output.set_columnwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0,
+                                      std::vector<size_t>{out_rows, out_cols});
+    } else {
+      output.set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{c.rows, c.cols});
+      output.set_rowwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0,
+                                   std::vector<size_t>{out_rows, out_cols});
+    }
     output.set_with_gemm_swizzled_scales(true);
   }
 
@@ -156,7 +199,8 @@ struct ConversionOperands {
   }
 
   std::vector<uint8_t> expected() const {
-    return ref_convert(c.is_2d, c.rows, c.cols, scales_h.data());
+    return c.columnwise ? ref_convert_columnwise(c.is_2d, c.rows, c.cols, scales_h.data())
+                        : ref_convert(c.is_2d, c.rows, c.cols, scales_h.data());
   }
 
   SingleCase c;
@@ -182,6 +226,7 @@ std::vector<SingleCase> single_cases() {
     for (auto [rows, cols] : std::vector<std::pair<size_t, size_t>>{
              {128, 128}, {256, 384}, {384, 2880}, {160, 512}, {144, 528}, {2880, 256}}) {
       cases.push_back({is_2d, rows, cols});
+      cases.push_back({is_2d, rows, cols, /*columnwise=*/true});
     }
   }
   return cases;
@@ -230,11 +275,20 @@ std::vector<MultiCase> multi_cases() {
     MultiCase mixed_shapes{std::string(is_2d ? "2D" : "1D") + "_mixed_shapes", {}};
     for (auto [rows, cols] : shapes) mixed_shapes.tensors.push_back({is_2d, rows, cols});
     cases.push_back(mixed_shapes);
+    MultiCase colwise{mixed_shapes.name + "_colwise", mixed_shapes.tensors};
+    for (auto& t : colwise.tensors) t.columnwise = true;
+    cases.push_back(colwise);
   }
   // Switching scaling modes starts a new launch.
   MultiCase mixed_modes{"mixed_modes", {}};
   for (size_t i = 0; i < 6; ++i) mixed_modes.tensors.push_back({i % 2 == 1, 256, 384});
   cases.push_back(mixed_modes);
+  // So does switching output directions.
+  MultiCase mixed_directions{"mixed_directions", {}};
+  for (size_t i = 0; i < 8; ++i) {
+    mixed_directions.tensors.push_back({i % 4 >= 2, 256, 384, /*columnwise=*/i % 2 == 1});
+  }
+  cases.push_back(mixed_directions);
   cases.push_back(
       {"empty_tensors", {{false, 256, 256}, {false, 0, 256}, {true, 0, 128}, {true, 128, 384}}});
   // More tensors than one launch takes.
@@ -265,6 +319,7 @@ struct GroupedCase {
   size_t num_uniform = 0;       // kUniform only
   size_t capacity_extra = 0;    // logical varying total = sum(varying) + capacity_extra
   std::vector<size_t> replay;   // non-empty: capture with `varying`, replay with `replay`
+  bool columnwise = false;      // columnwise output
 };
 
 std::vector<std::pair<size_t, size_t>> tensor_dims(const GroupedCase& c,
@@ -304,7 +359,7 @@ TEST_P(GroupedSwizzleBlockScalingToMXFP8Test, MatchesPerTensorReference) {
   // Input scales: size for the larger of the capture and replay layouts.
   auto total_input_floats = [&](const std::vector<std::pair<size_t, size_t>>& dims) {
     size_t total = 0;
-    for (auto [f, l] : dims) total += input_scale_floats(c.is_2d, f, l);
+    for (auto [f, l] : dims) total += input_scale_floats(c.is_2d, c.columnwise, f, l);
     return total;
   };
   const size_t in_floats =
@@ -326,19 +381,34 @@ TEST_P(GroupedSwizzleBlockScalingToMXFP8Test, MatchesPerTensorReference) {
   const NVTEScalingMode mode = c.is_2d ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
   GroupedTensorWrapper input(n, logical, mode);
   GroupedTensorWrapper output(n, logical, NVTE_MXFP8_1D_SCALING);
+  // Columnwise data is not stored transposed, as in ConversionOperands
+  const bool columnwise_input = c.columnwise && !c.is_2d;
+  input.set_columnwise_transposed(false);
   for (GroupedTensorWrapper* t : {&input, &output}) {
-    t->set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{F * L});
+    if (t == &input ? columnwise_input : c.columnwise) {
+      t->set_columnwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{F * L});
+    } else {
+      t->set_rowwise_data(data.ptr, DType::kFloat8E4M3, std::vector<size_t>{F * L});
+    }
     if (c.rep == Rep::kVaryingFirst) {
       t->set_first_dims(dims_d.ptr, DType::kInt64, std::vector<size_t>{n});
     } else if (c.rep == Rep::kVaryingLast) {
       t->set_last_dims(dims_d.ptr, DType::kInt64, std::vector<size_t>{n});
     }
   }
-  input.set_rowwise_scale_inv(in_scales.ptr, DType::kFloat32, std::vector<size_t>{in_floats});
+  if (columnwise_input) {
+    input.set_columnwise_scale_inv(in_scales.ptr, DType::kFloat32, std::vector<size_t>{in_floats});
+  } else {
+    input.set_rowwise_scale_inv(in_scales.ptr, DType::kFloat32, std::vector<size_t>{in_floats});
+  }
   const size_t bound = nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(input.data());
   DeviceBuffer out_scales(std::max<size_t>(bound, 1));
   cudaMemset(out_scales.ptr, 0xAB, std::max<size_t>(bound, 1));
-  output.set_rowwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0, std::vector<size_t>{bound});
+  if (c.columnwise) {
+    output.set_columnwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0, std::vector<size_t>{bound});
+  } else {
+    output.set_rowwise_scale_inv(out_scales.ptr, DType::kFloat8E8M0, std::vector<size_t>{bound});
+  }
   output.set_with_gemm_swizzled_scales(true);
 
   if (c.replay.empty()) {
@@ -368,11 +438,13 @@ TEST_P(GroupedSwizzleBlockScalingToMXFP8Test, MatchesPerTensorReference) {
   std::vector<uint8_t> expected(bound, 0xAB);
   size_t in_offset = 0, out_offset = 0;
   for (auto [f, l] : final_dims) {
-    const auto ref = ref_convert(c.is_2d, f, l, scales_h.data() + in_offset);
+    const float* in = scales_h.data() + in_offset;
+    const auto ref = c.columnwise ? ref_convert_columnwise(c.is_2d, f, l, in)
+                                  : ref_convert(c.is_2d, f, l, in);
     ASSERT_LE(out_offset + ref.size(), bound);
     std::copy(ref.begin(), ref.end(), expected.begin() + out_offset);
-    in_offset += input_scale_floats(c.is_2d, f, l);
-    out_offset += output_scale_bytes(f, l);
+    in_offset += input_scale_floats(c.is_2d, c.columnwise, f, l);
+    out_offset += output_scale_bytes(c.columnwise, f, l);
   }
   // The size is exact for uniform dims.
   if (c.rep == Rep::kUniform) EXPECT_EQ(out_offset, bound);
@@ -412,6 +484,14 @@ std::vector<GroupedCase> grouped_cases() {
         d + "graph_replay_vlast", is_2d, Rep::kVaryingLast, {128, 256, 128, 0}, 384};
     replay_last.replay = {0, 128, 256, 128};
     cases.push_back(replay_last);
+  }
+  // Columnwise output
+  const size_t num_rowwise = cases.size();
+  for (size_t i = 0; i < num_rowwise; ++i) {
+    GroupedCase colwise = cases[i];
+    colwise.name += "_colwise";
+    colwise.columnwise = true;
+    cases.push_back(colwise);
   }
   return cases;
 }
