@@ -1105,6 +1105,98 @@ class TestQuantizedTensor:
             x.grad is not None and x.grad.norm().item() > 0
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
+    @pytest.mark.parametrize(
+        "kind", ["float8", "mxfp8", "nvfp4", "blockwise", "hybrid", "hybrid_internal"]
+    )
+    @pytest.mark.parametrize("use_torch_clone", [False, True], ids=["method", "torch_clone"])
+    def test_clone_isolates_buffers(self, kind: str, use_torch_clone: bool) -> None:
+        """Cloning copies data, scale, and amax buffers independently."""
+        device = torch.device("cuda", torch.cuda.current_device())
+        shape = (128, 128)
+        clone_fn = torch.clone if use_torch_clone else lambda t: t.clone()
+
+        def owned_buffers(tensor: QuantizedTensor) -> Dict[str, torch.Tensor]:
+            storages = (
+                {"row": tensor.rowwise_sub_storage, "col": tensor.columnwise_sub_storage}
+                if isinstance(tensor, te.HybridQuantizedTensor)
+                else {"": tensor}
+            )
+            return {
+                f"{prefix}{name}": val
+                for prefix, storage in storages.items()
+                for name, val in storage.get_metadata().items()
+                if isinstance(val, torch.Tensor)
+            }
+
+        def make(value: int) -> QuantizedTensor:
+            if kind in ("hybrid", "hybrid_internal"):
+                row_q = Float8BlockQuantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+                col_q = NVFP4Quantizer(with_random_sign_mask=False, rowwise=False, columnwise=True)
+                row_q.internal = col_q.internal = kind == "hybrid_internal"
+                tensor = te.HybridQuantizer(
+                    rowwise_quantizer=row_q, columnwise_quantizer=col_q
+                ).make_empty(shape, dtype=torch.float32, device=device)
+            else:
+                quantizers = {
+                    "float8": lambda: Float8Quantizer(
+                        torch.ones(1, device=device),
+                        torch.zeros(1, device=device),
+                        te.DType.kFloat8E4M3,
+                    ),
+                    "mxfp8": lambda: MXFP8Quantizer(te.DType.kFloat8E4M3),
+                    "nvfp4": lambda: NVFP4Quantizer(with_random_sign_mask=False),
+                    "blockwise": lambda: Float8BlockQuantizer(
+                        te.DType.kFloat8E4M3, rowwise=True, columnwise=True
+                    ),
+                }
+                tensor = quantizers[kind]().make_empty(shape, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                for buf in owned_buffers(tensor).values():
+                    buf.fill_(value)
+            return tensor
+
+        original = make(1)
+        before = {name: buf.clone() for name, buf in owned_buffers(original).items()}
+        copied = clone_fn(original)
+        assert type(copied) is type(original)
+
+        other = make(2)
+        if kind == "hybrid_internal":
+            assert copied.rowwise_sub_storage is not original.rowwise_sub_storage
+            assert copied.columnwise_sub_storage is not original.columnwise_sub_storage
+            copied.rowwise_sub_storage.copy_from_storage(other.rowwise_sub_storage)
+            copied.columnwise_sub_storage.copy_from_storage(other.columnwise_sub_storage)
+        else:
+            copied.copy_(other)
+        orig_bufs = owned_buffers(original)
+        copied_bufs = owned_buffers(copied)
+        for name, orig_buf in orig_bufs.items():
+            assert orig_buf.data_ptr() != copied_bufs[name].data_ptr(), name
+            assert torch.equal(orig_buf, before[name]), name
+
+        if kind == "float8":
+            stale = Float8Tensor(
+                shape=shape,
+                dtype=torch.float32,
+                data=torch.ones(shape, dtype=torch.uint8, device=device),
+                fp8_scale_inv=torch.ones(1, dtype=torch.float32, device=device),
+                fp8_dtype=te.DType.kFloat8E4M3,
+                data_transpose=torch.ones(shape, dtype=torch.uint8, device=device),
+                device=device,
+            )
+            stale._reset_caches()
+            assert clone_fn(stale)._transpose_invalid
+
+            if fp8_available:
+                q = Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device=device)
+                ones = torch.ones(shape, device=device)
+                twos = torch.full(shape, 2.0, device=device)
+                fp8 = q(ones)
+                fp8_copy = clone_fn(fp8)
+                fp8_copy.copy_(q(twos))
+                assert torch.equal(fp8.dequantize(), ones)
+                assert torch.equal(fp8_copy.dequantize(), twos)
+
 
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
 class TestNVFP4Tensor:

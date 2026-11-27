@@ -885,6 +885,22 @@ class QuantizedTensor(torch.Tensor):
         """
         return type(self).make_like(self)
 
+    def clone(self) -> QuantizedTensor:
+        # pylint: disable=missing-function-docstring
+        def _clone_value(value: Any) -> Any:
+            if isinstance(value, torch.Tensor):
+                return value.detach().clone()
+            if isinstance(value, QuantizedTensorStorage):
+                return type(value)(**{k: _clone_value(v) for k, v in value.get_metadata().items()})
+            return value
+
+        init_kwargs = {
+            name: _clone_value(value)
+            for name, value in self.get_metadata().items()
+            if isinstance(value, (torch.Tensor, QuantizedTensorStorage))
+        }
+        return _IdentityFunc.apply(self, init_kwargs)
+
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
         raise NotImplementedError(
@@ -943,6 +959,10 @@ class QuantizedTensor(torch.Tensor):
         # Detach op
         if func == torch.ops.aten.detach.default:
             return args[0].detach()
+
+        # Clone op
+        if func == torch.ops.aten.clone.default:
+            return args[0].clone()
 
         # In-place copy op
         if func == torch.ops.aten.copy_.default:

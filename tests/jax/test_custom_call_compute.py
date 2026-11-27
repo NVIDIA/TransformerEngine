@@ -59,6 +59,7 @@ import transformer_engine_jax
 
 _glu_adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
 _moe_module = importlib.import_module("transformer_engine.jax.moe")
+_gemm_module = importlib.import_module("transformer_engine.jax.cpp_extensions.gemm")
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -2157,6 +2158,21 @@ class TestTopK:
         prim_gathered = jnp.take_along_axis(x, prim_idx, axis=1)
         ref_gathered = jnp.take_along_axis(x, ref_idx, axis=1)
         assert_allclose(prim_gathered, ref_gathered, dtype=dtype)
+
+
+@pytest.mark.parametrize(
+    "capability,cublas_version,expected",
+    [(90, 130300, False), (90, 130400, True), (100, 130300, True)],
+)
+def test_v2_grouped_gemm_hopper_cublas(monkeypatch, capability, cublas_version, expected):
+    """BF16 grouped GEMM takes the V2 kernel on Hopper only with cuBLAS 13.4+."""
+    monkeypatch.setattr(_gemm_module, "_v2_grouped_gemm_available", True)
+    monkeypatch.setattr(_gemm_module, "get_min_device_compute_capability", lambda: capability)
+    monkeypatch.setattr(_gemm_module, "get_cublasLt_version", lambda: cublas_version)
+    supported, reason = _gemm_module._is_v2_grouped_gemm_supported(
+        ScalingMode.NO_SCALING, jnp.bfloat16, False
+    )
+    assert supported == expected, reason
 
 
 class TestGroupedGemmGluFallback:

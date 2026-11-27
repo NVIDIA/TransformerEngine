@@ -129,7 +129,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         prev_op_grad_output_quantizer,
         next_op_input_quantizer,
         basic_op_kwargs,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> ActivationFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("Activation forward does not expect keyword arguments")
