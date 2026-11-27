@@ -12,6 +12,7 @@ from functools import wraps
 import math
 
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -454,12 +455,27 @@ def _test_quantizer(input_dtype, fp8_dtype):
         )
 
 
+@run_distributed_test()
+def _test_grouped_nvfp4_amax_reduction():
+    splits = [128, 128]
+    x = torch.cat(
+        [
+            torch.full((n, 128), (i + 1) * (WORLD_RANK + 1), device="cuda", dtype=torch.bfloat16)
+            for i, n in enumerate(splits)
+        ]
+    )
+    qs = [NVFP4Quantizer(with_amax_reduction=True, amax_reduction_group=NCCL_WORLD) for _ in splits]
+    for i, out in enumerate(tex.split_quantize(x, splits, qs)):
+        expected = (i + 1) * WORLD_SIZE
+        assert out._amax_rowwise.item() == expected
+        assert out._amax_columnwise.item() == expected
+
+
 def test_quantizer():
-    """
-    Run quantizer tests with various configurations.
-    Currently only check fp8_cs because it needs to do amax reduction in the quantizer.
-    """
-    # skip this test for other quantization schemes
+    """Check amax reduction in distributed quantizers."""
+    if QUANTIZATION == "nvfp4":
+        _test_grouped_nvfp4_amax_reduction()
+        return
     if QUANTIZATION != "fp8_cs":
         return
 

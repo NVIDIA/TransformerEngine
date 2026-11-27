@@ -4614,6 +4614,42 @@ class TestHybridGroupedLinearValidation:
                 context=f"transient-row grouped split {index} columnwise",
             )
 
+    @requires_mxfp8
+    def test_offload_bulk_split_in_forward_and_backward(self, monkeypatch):
+        def qfactory(role):
+            return HybridQuantizer(
+                rowwise_quantizer=_mxfp8_factory(), columnwise_quantizer=_mxfp8_factory()
+            )
+
+        module = GroupedLinear(
+            2, 128, 128, bias=False, save_original_input=True, params_dtype=torch.bfloat16
+        )
+        monkeypatch.setattr(
+            "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
+        )
+        split = split_quantization._split_quantize
+        usages = []
+
+        def check_split(*args, **kwargs):
+            outputs, biases = split(*args, **kwargs)
+            directions = []
+            for direction in ("rowwise", "columnwise"):
+                parts = [getattr(out, f"{direction}_sub_storage") for out in outputs]
+                if parts[0] is not None:
+                    tensors = [getattr(part, f"_{direction}_data") for part in parts]
+                    assert len({t.untyped_storage().data_ptr() for t in tensors}) == 1
+                    directions.append(direction)
+            usages.append(tuple(directions))
+            return outputs, biases
+
+        monkeypatch.setattr(split_quantization, "_split_quantize", check_split)
+        x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=qfactory)):
+            y = module(x, [128, 128])
+        y.backward(torch.randn_like(y))
+        # Forward input, backward grad_output, then input requantization for wgrad.
+        assert usages == [("rowwise",), ("rowwise", "columnwise"), ("columnwise",)]
+
     @requires_mxfp8_and_nvfp4
     def test_nvfp4_2d_split_falls_back_only_for_columnwise(self):
         splits = [512, 512]
