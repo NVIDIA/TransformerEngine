@@ -80,11 +80,12 @@ void performGroupedFusedAmaxTest(const GroupedAmaxConfig& cfg) {
   auto outs = make_row_scaled_outputs("gout_", Ms, K);
   std::vector<NVTETensor> out_handles;
   for (auto& t : outs) out_handles.push_back(t->data());
-  nvte_group_amax(packed.data(), out_handles.data(), splits.data(), num_tensors, 0);
+  nvte_group_amax_host_split(packed.data(), out_handles.data(), splits.data(), num_tensors, 0);
 
   auto outs2 = make_row_scaled_outputs("gout2_", Ms, K);
   std::vector<NVTETensor> out_handles2;
   for (auto& t : outs2) out_handles2.push_back(t->data());
+  // The deprecated symbol must remain ABI-compatible and numerically identical.
   nvte_group_amax(packed.data(), out_handles2.data(), splits.data(), num_tensors, 0);
 
   cudaDeviceSynchronize();

@@ -2213,6 +2213,11 @@ def test_single_grouped_weight_rejects_host_m_splits(m_splits, exception):
             ),
             id="fp8-block-scaling",
         ),
+        pytest.param(
+            nvfp4_rht_and_2d_quantization(),
+            marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
+            id="nvfp4-2d-weight",
+        ),
     ],
 )
 def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
