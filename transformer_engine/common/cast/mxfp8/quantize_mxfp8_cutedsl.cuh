@@ -167,6 +167,25 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
+  if (!config.swizzled) {
+    const size_t padded_rows = DIVUP_TO_MULTIPLE(flat_m, 128);
+    const size_t padded_cols = DIVUP_TO_MULTIPLE(flat_n, 128);
+    if (config.rowwise) {
+      const auto &scales = output_tensor->scale_inv;
+      if (scales.shape.size() != 2 || scales.shape[0] != padded_rows ||
+          scales.shape[1] != padded_cols / 32 || !is_aligned_ptr(scales.dptr, 16)) {
+        return false;
+      }
+    }
+    if (config.colwise) {
+      const auto &scales = output_tensor->columnwise_scale_inv;
+      if (scales.shape.size() != 2 || scales.shape[0] != padded_rows / 32 ||
+          scales.shape[1] != padded_cols || !is_aligned_ptr(scales.dptr, 16)) {
+        return false;
+      }
+    }
+  }
+
   std::optional<tvm::ffi::Function> mxfp8_quant_func_opt = config.get_kernel();
   if (!mxfp8_quant_func_opt.has_value()) {
     return false;
