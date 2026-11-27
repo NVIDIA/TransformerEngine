@@ -28,6 +28,19 @@ namespace detail {
 namespace scaled_activation {
 
 constexpr int kThreads = unary_kernel_threads;
+
+// Launch bounds for the kThreads-wide kernels. A minimum of 4 resident 512-thread blocks needs
+// 2048 threads per SM, which SM 7.5 (1024) and SM 8.6/8.7/8.9/12.x (1536) cannot hold, so ptxas
+// ignores the minimum there with a warning. Leave it out on those targets; the generated code is
+// the same.
+#if defined(__CUDA_ARCH__) &&                                                \
+    (__CUDA_ARCH__ == 750 || __CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 870 || \
+     __CUDA_ARCH__ == 890 || __CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210)
+#define NVTE_SCALED_ACTIVATION_LAUNCH_BOUNDS __launch_bounds__(kThreads)
+#else
+#define NVTE_SCALED_ACTIVATION_LAUNCH_BOUNDS __launch_bounds__(kThreads, 4)
+#endif
+
 constexpr int kReductionThreads = 256;
 constexpr int kReductionWarps = kReductionThreads / THREADS_PER_WARP;
 
@@ -39,7 +52,7 @@ inline int choose_reduction_threads(const size_t row_vectors) {
   }
   const int needed = static_cast<int>(row_vectors);
   int rounded = (needed + THREADS_PER_WARP - 1) / THREADS_PER_WARP * THREADS_PER_WARP;
-  if (rounded < THREADS_PER_WARP) {
+  if (rounded < static_cast<int>(THREADS_PER_WARP)) {
     rounded = THREADS_PER_WARP;
   }
   return rounded;

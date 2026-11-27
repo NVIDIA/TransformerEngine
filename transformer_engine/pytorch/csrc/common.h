@@ -154,7 +154,7 @@ class NoneQuantizer : public Quantizer {
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
 
-  void set_quantization_params(TensorWrapper* tensor) const override {}
+  void set_quantization_params(TensorWrapper* /*tensor*/) const override {}
 
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,

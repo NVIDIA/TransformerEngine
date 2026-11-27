@@ -740,6 +740,8 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
     scaling_type = ScalingType::COLWISE;
   } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
     scaling_type = ScalingType::BIDIMENSIONAL;
+  } else {
+    NVTE_ERROR("Either rowwise or columnwise output data need to be allocated.");
   }
 
   const size_t rows = gated_input.flat_first_dim();

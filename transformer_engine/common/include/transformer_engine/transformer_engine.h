@@ -1490,7 +1490,7 @@ class QuantizationConfigWrapper {
   }
 
   /*! \warning Deprecated */
-  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {}
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat /*format*/) {}
 
   /*! \brief Set stochastic rounding state */
   void set_rng_state(NVTETensor rng_state) {

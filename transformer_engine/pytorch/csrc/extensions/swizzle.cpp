@@ -21,7 +21,7 @@ namespace pytorch {
 namespace {
 
 void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, bool columnwise) {
-  NVTEShape shape;
+  NVTEShape shape{};
   shape.ndim = 1;
   shape.data[0] = 0;
   const transformer_engine::DType dtype = transformer_engine::DType::kFloat32;
@@ -319,7 +319,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
     }
   }
 
-  return std::move(output_scales_pyt);
+  return output_scales_pyt;
 }
 
 }  // anonymous namespace

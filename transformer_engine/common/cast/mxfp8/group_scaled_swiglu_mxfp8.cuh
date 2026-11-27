@@ -400,7 +400,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
                          GroupedTensor *output, const ParamOP &p,
-                         const QuantizationConfig *quant_config, cudaStream_t stream) {
+                         const QuantizationConfig * /*quant_config*/, cudaStream_t stream) {
   using namespace group_scaled_swiglu_kernel;
 
   checkCuDriverContext(stream);

@@ -604,7 +604,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
 template <typename DataType>
 void fused_score_for_moe_aux_loss_backward_kernel_launcher(
     const CompType *intermediate_output, const float *grad_scores, int num_tokens, int num_experts,
-    int topk, int score_function, DataType *grad_logits, cudaStream_t stream) {
+    int /*topk*/, int score_function, DataType *grad_logits, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",

@@ -162,10 +162,10 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
   NVTE_CHECK(amax_rowwise.data.shape.size() == 2, "amax_rowwise must be a 2D tensor");
   NVTE_CHECK(amax_rowwise.data.shape[0] % rowwise_row_padding == 0,
              "Wrong padding of amax_rowwise's rows");
-  NVTE_CHECK(amax_rowwise.data.shape[0] >= rows, "Invalid rows");
+  NVTE_CHECK(amax_rowwise.data.shape[0] >= static_cast<size_t>(rows), "Invalid rows");
   NVTE_CHECK(amax_rowwise.data.shape[1] % rowwise_col_padding == 0,
              "Wrong padding of amax_rowwise's cols");
-  NVTE_CHECK(amax_rowwise.data.shape[1] >= cols / 32, "Invalid cols");
+  NVTE_CHECK(amax_rowwise.data.shape[1] >= static_cast<size_t>(cols / 32), "Invalid cols");
   NVTE_CHECK(amax_rowwise.dtype() == input.dtype(), "Wrong dtype of amax_rowwise");
 
   const bool with_columnwise = amax_colwise.has_data();
@@ -173,10 +173,10 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
     NVTE_CHECK(amax_colwise.data.shape.size() == 2, "amax_colwise must be a 2D tensor");
     NVTE_CHECK(amax_colwise.data.shape[0] % colwise_row_padding == 0,
                "Wrong padding of amax_colwise's rows");
-    NVTE_CHECK(amax_colwise.data.shape[0] >= rows / 32, "Invalid rows");
+    NVTE_CHECK(amax_colwise.data.shape[0] >= static_cast<size_t>(rows / 32), "Invalid rows");
     NVTE_CHECK(amax_colwise.data.shape[1] % colwise_col_padding == 0,
                "Wrong padding of amax_colwise's cols");
-    NVTE_CHECK(amax_colwise.data.shape[1] >= cols, "Invalid cols");
+    NVTE_CHECK(amax_colwise.data.shape[1] >= static_cast<size_t>(cols), "Invalid cols");
     NVTE_CHECK(amax_colwise.dtype() == input.dtype(), "Wrong dtype of amax_colwise");
   }
 
@@ -247,20 +247,20 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
   NVTE_CHECK(scale_inv_rowwise.data.shape.size() == 2, "scale_inv_rowwise must be a 2D tensor");
   NVTE_CHECK(scale_inv_rowwise.data.shape[0] % rowwise_row_padding == 0,
              "Wrong padding of scale_inv_rowwise's rows");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[0] >= rows, "Invalid rows");
+  NVTE_CHECK(scale_inv_rowwise.data.shape[0] >= static_cast<size_t>(rows), "Invalid rows");
   NVTE_CHECK(scale_inv_rowwise.data.shape[1] % rowwise_col_padding == 0,
              "Wrong padding of scale_inv_rowwise's cols");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[1] >= cols / 32, "Invalid cols");
+  NVTE_CHECK(scale_inv_rowwise.data.shape[1] >= static_cast<size_t>(cols / 32), "Invalid cols");
   NVTE_CHECK(scale_inv_rowwise.dtype() == DType::kByte, "Wrong dtype of scale_inv_rowwise");
 
   if (with_columnwise) {
     NVTE_CHECK(scale_inv_colwise.data.shape.size() == 2, "scale_inv_colwise must be a 2D tensor");
     NVTE_CHECK(scale_inv_colwise.data.shape[0] % colwise_row_padding == 0,
                "Wrong padding of scale_inv_colwise's rows");
-    NVTE_CHECK(scale_inv_colwise.data.shape[0] >= rows / 32, "Invalid rows");
+    NVTE_CHECK(scale_inv_colwise.data.shape[0] >= static_cast<size_t>(rows / 32), "Invalid rows");
     NVTE_CHECK(scale_inv_colwise.data.shape[1] % colwise_col_padding == 0,
                "Wrong padding of scale_inv_colwise's cols");
-    NVTE_CHECK(scale_inv_colwise.data.shape[1] >= cols, "Invalid cols");
+    NVTE_CHECK(scale_inv_colwise.data.shape[1] >= static_cast<size_t>(cols), "Invalid cols");
     NVTE_CHECK(scale_inv_colwise.dtype() == DType::kByte, "Wrong dtype of scale_inv_colwise");
   }
 

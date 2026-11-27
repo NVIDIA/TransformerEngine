@@ -225,7 +225,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
     NVTE_CHECK(output.data.dtype == type, "Output tensor types do not match.");
 
     NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions.");
-    NVTE_CHECK(output.data.shape[0] == padded_num_rows_list[tensor_id],
+    NVTE_CHECK(output.data.shape[0] == static_cast<size_t>(padded_num_rows_list[tensor_id]),
                "output tensor shape does not match padded input shape.");
   }
 
@@ -301,7 +301,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
     NVTE_CHECK(output.data.dtype == type, "Output tensor types do not match.");
 
     NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions.");
-    NVTE_CHECK(output.data.shape[0] == unpadded_num_rows_list[tensor_id],
+    NVTE_CHECK(output.data.shape[0] == static_cast<size_t>(unpadded_num_rows_list[tensor_id]),
                "output tensor shape does not match padded input shape.");
   }
 

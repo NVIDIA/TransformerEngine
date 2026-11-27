@@ -21,8 +21,9 @@ namespace transformer_engine::detail {
 
 cudaStream_t get_compute_stream(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
-  NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
-             ", but there are ", num_streams, " streams)");
+  NVTE_CHECK(0 <= idx && static_cast<size_t>(idx) < num_streams,
+             "Invalid compute stream (requested idx ", idx, ", but there are ", num_streams,
+             " streams)");
   static std::vector<cudaStream_t> streams(num_streams);
   static std::once_flag stream_init_flag;
   auto init = [&]() {
@@ -36,8 +37,9 @@ cudaStream_t get_compute_stream(int idx) {
 
 cudaEvent_t get_compute_stream_event(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
-  NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
-             ", but there are ", num_streams, " streams)");
+  NVTE_CHECK(0 <= idx && static_cast<size_t>(idx) < num_streams,
+             "Invalid compute stream (requested idx ", idx, ", but there are ", num_streams,
+             " streams)");
   static std::vector<cudaEvent_t> events(num_streams);
   static std::once_flag event_init_flag;
   auto init = [&]() {

@@ -72,7 +72,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
         cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
-  for (int i = 0; i < num_tensors; i++) {
+  for (size_t i = 0; i < num_tensors; i++) {
     dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(
         inputs[i], outputs[i], quant_configs, detail::get_compute_stream(i % num_streams));
   }

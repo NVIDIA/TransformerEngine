@@ -488,7 +488,8 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
 
   // This value must match the WARP_WIDTH constexpr
   // value computed inside scaled_aligned_causal_masked_softmax_warp_forward.
-  int warp_width = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
+  int warp_width = (next_power_of_two < static_cast<int>(THREADS_PER_WARP)) ? next_power_of_two
+                                                                            : THREADS_PER_WARP;
 
   // This value must match the WARP_ROWS constexpr
   // value computed inside scaled_aligned_causal_masked_softmax_warp_forward.
@@ -554,7 +555,8 @@ void dispatch_scaled_aligned_causal_masked_softmax_backward(
 
   // This value must match the WARP_WIDTH constexpr
   // value computed inside scaled_aligned_causal_masked_softmax_warp_forward.
-  int warp_width = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
+  int warp_width = (next_power_of_two < static_cast<int>(THREADS_PER_WARP)) ? next_power_of_two
+                                                                            : THREADS_PER_WARP;
 
   // This value must match the WARP_ROWS constexpr
   // value computed inside scaled_aligned_causal_masked_softmax_warp_forward.

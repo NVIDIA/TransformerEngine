@@ -315,6 +315,8 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_transpose_dim_idx] = 1;
       }
       break;
+    case NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET:
+      break;
   }
 
   if (matrix == NVTE_QKV_Matrix::NVTE_S_Matrix) {
@@ -408,6 +410,9 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
       offsets_qkvo[0] = num_attn_heads * head_dim_qk * max_seqlen_q;
       offsets_qkvo[1] = 2 * num_gqa_groups * head_dim_qk * max_seqlen_kv;
       offsets_qkvo[2] = offsets_qkvo[1];
+      break;
+    case NVTE_QKV_Layout_Group::NVTE_SD_SD_SD:
+      // Not used with ragged (THD) layouts.
       break;
   }
 

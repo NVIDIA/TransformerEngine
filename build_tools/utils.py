@@ -110,6 +110,19 @@ def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
     return compiler_flags, linker_flags
 
 
+def warnings_as_errors_enabled() -> bool:
+    """Whether compiler warnings in TE sources are treated as errors"""
+    return bool(int(os.getenv("NVTE_WARNINGS_AS_ERRORS", "1")))
+
+
+def get_warning_flags() -> List[str]:
+    """Host compiler warning flags for TE's own sources"""
+    flags = ["-Wall", "-Wextra"]
+    if warnings_as_errors_enabled():
+        flags.append("-Werror")
+    return flags
+
+
 @functools.lru_cache(maxsize=None)
 def get_max_jobs_for_parallel_build() -> int:
     """Number of parallel jobs for Nina build"""

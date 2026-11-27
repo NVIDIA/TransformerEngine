@@ -362,8 +362,8 @@ void amax_and_scale_update_after_reduction(const Tensor& amax_reduction_buffer,
                  dtype_name(scales[i]->data.dtype), ".");
       NVTE_CHECK(scales[i]->data.shape.size() == 1, "Found ", scales[i]->data.shape.size(),
                  " dims");
-      NVTE_CHECK(scales[i]->numel() == num_scale, "Expected ", num_scale, " elements, ", "Found ",
-                 scales[i]->numel(), ".");
+      NVTE_CHECK(scales[i]->numel() == static_cast<size_t>(num_scale), "Expected ", num_scale,
+                 " elements, ", "Found ", scales[i]->numel(), ".");
 
       // amax parameters
       kernel_num_scales += num_scale;

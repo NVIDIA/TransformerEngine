@@ -112,10 +112,9 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
 }
 
 template <>
-void TeNormalizationPlan<BackwardKernelParams>::execute(Tensor* z, void* x_dptr, void* gamma_dptr,
-                                                        void* beta_dptr, void* mean_dptr,
-                                                        void* eps_dptr, void* rsigma_dptr,
-                                                        void* workspace_dptr, cudaStream_t stream) {
+void TeNormalizationPlan<BackwardKernelParams>::execute(
+    Tensor* /*z*/, void* /*x_dptr*/, void* /*gamma_dptr*/, void* /*beta_dptr*/, void* /*mean_dptr*/,
+    void* /*eps_dptr*/, void* /*rsigma_dptr*/, void* /*workspace_dptr*/, cudaStream_t /*stream*/) {
   NVTE_ERROR(
       "Backward normalization should not call the forward execute function. "
       "Use the backward-specific execute overload instead.");
@@ -162,11 +161,10 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
 }
 
 template <>
-void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
-                                                       void* mean_dptr, void* rsigma_dptr,
-                                                       void* dx_dptr, void* dz_dptr, void* add_dptr,
-                                                       void* dbeta_dptr, void* dgamma_dptr,
-                                                       void* workspace_dptr, cudaStream_t stream) {
+void TeNormalizationPlan<ForwardKernelParams>::execute(
+    void* /*x_dptr*/, void* /*gamma_dptr*/, void* /*mean_dptr*/, void* /*rsigma_dptr*/,
+    void* /*dx_dptr*/, void* /*dz_dptr*/, void* /*add_dptr*/, void* /*dbeta_dptr*/,
+    void* /*dgamma_dptr*/, void* /*workspace_dptr*/, cudaStream_t /*stream*/) {
   NVTE_ERROR(
       "Forward normalization should not call the backward execute function. "
       "Use the forward-specific execute overload instead.");
@@ -206,11 +204,11 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                                                const size_t sm_count,
                                                const bool zero_centered_gamma,
                                                const NVTEScalingMode mode, bool training)
-    : _fp8_out(is_fp8_dtype(otype)),
-      _zero_centered(zero_centered_gamma),
-      _training(training),
+    : _zero_centered(zero_centered_gamma),
+      _fp8_out(is_fp8_dtype(otype)),
       _norm_stage(NormStage),
-      _norm_type(NormType) {
+      _norm_type(NormType),
+      _training(training) {
   static_assert(CUDNN_FRONTEND_VERSION >= 10601,
                 "CUDNN_FRONTEND_VERSION should be at least 1.6.1!");
 

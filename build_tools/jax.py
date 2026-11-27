@@ -86,7 +86,7 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
-    include_dirs = get_cuda_include_dirs()
+    include_dirs = list(get_cuda_include_dirs())
     if (discovered_nccl_include_path := nccl_include_path()) is not None:
         include_dirs.append(discovered_nccl_include_path)
     include_dirs.append(cudnn_frontend_include_path())

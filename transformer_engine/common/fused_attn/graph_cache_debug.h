@@ -432,7 +432,8 @@ inline void print_counters(Backend b, Pass p, const char *event) {
 }
 
 // The column a lookup lands in.
-inline std::atomic<uint64_t> EventCounters::*lookup_column(LookupResult result) {
+using EventCounterColumn = std::atomic<uint64_t> EventCounters::*;
+inline EventCounterColumn lookup_column(LookupResult result) {
   switch (result) {
     case LookupResult::Hit:
       return &EventCounters::hit;

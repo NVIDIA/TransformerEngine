@@ -518,7 +518,7 @@ void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
     lse_seqlen = lse_shape[1];
     second_half_lse_seqlen = lse_per_step_shape[1];
 
-    NVTE_CHECK(lse_per_step_shape[0] == num_heads);
+    NVTE_CHECK(lse_per_step_shape[0] == static_cast<size_t>(num_heads));
     NVTE_CHECK(second_half_lse_seqlen >= lse_seqlen / 2);
   } else {
     NVTE_CHECK(lse.dim() == 3);
@@ -529,10 +529,10 @@ void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
     lse_seqlen = lse_shape[2];
     second_half_lse_seqlen = lse_per_step_shape[2];
 
-    NVTE_CHECK(lse_per_step_shape[0] == batch);
-    NVTE_CHECK(lse_per_step_shape[1] == num_heads);
+    NVTE_CHECK(lse_per_step_shape[0] == static_cast<size_t>(batch));
+    NVTE_CHECK(lse_per_step_shape[1] == static_cast<size_t>(num_heads));
     NVTE_CHECK(second_half_lse_seqlen == lse_seqlen / 2);
-    NVTE_CHECK(cu_seqlens_shape[0] == batch + 1);
+    NVTE_CHECK(cu_seqlens_shape[0] == static_cast<size_t>(batch + 1));
   }
 
   constexpr unsigned int block = 256;
@@ -580,7 +580,7 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
     num_heads = lse_shape[1];
     lse_seqlen = lse_shape[2];
 
-    NVTE_CHECK(cu_seqlens_shape[0] == batch + 1);
+    NVTE_CHECK(cu_seqlens_shape[0] == static_cast<size_t>(batch + 1));
     NVTE_CHECK(second_half_lse_seqlen == lse_seqlen / 2);
   }
 
@@ -631,9 +631,9 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
   int num_heads = out_shape[1];
   int dim_per_head = out_shape[2];
 
-  NVTE_CHECK(out_per_step_shape[0] == total_tokens / (only_second_half + 1));
-  NVTE_CHECK(out_per_step_shape[1] == num_heads);
-  NVTE_CHECK(out_per_step_shape[2] == dim_per_head);
+  NVTE_CHECK(out_per_step_shape[0] == static_cast<size_t>(total_tokens / (only_second_half + 1)));
+  NVTE_CHECK(out_per_step_shape[1] == static_cast<size_t>(num_heads));
+  NVTE_CHECK(out_per_step_shape[2] == static_cast<size_t>(dim_per_head));
 
   int batch, lse_seqlen, lse_per_step_seqlen;
   if (lse_packed) {
@@ -641,20 +641,20 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
     lse_seqlen = lse_shape[1];
     lse_per_step_seqlen = lse_per_step_shape[1];
 
-    NVTE_CHECK(lse_shape[0] == num_heads);
+    NVTE_CHECK(lse_shape[0] == static_cast<size_t>(num_heads));
     NVTE_CHECK(lse_seqlen >= total_tokens);
-    NVTE_CHECK(lse_per_step_shape[0] == num_heads);
+    NVTE_CHECK(lse_per_step_shape[0] == static_cast<size_t>(num_heads));
     NVTE_CHECK(lse_per_step_seqlen >= lse_seqlen / (only_second_half + 1));
   } else {
     batch = lse_shape[0];
     lse_seqlen = lse_shape[2];
     lse_per_step_seqlen = lse_per_step_shape[2];
 
-    NVTE_CHECK(lse_shape[1] == num_heads);
-    NVTE_CHECK(lse_per_step_shape[0] == batch);
-    NVTE_CHECK(lse_per_step_shape[1] == num_heads);
+    NVTE_CHECK(lse_shape[1] == static_cast<size_t>(num_heads));
+    NVTE_CHECK(lse_per_step_shape[0] == static_cast<size_t>(batch));
+    NVTE_CHECK(lse_per_step_shape[1] == static_cast<size_t>(num_heads));
     NVTE_CHECK(lse_per_step_seqlen == lse_seqlen / (only_second_half + 1));
-    NVTE_CHECK(cu_seqlens_shape[0] == batch + 1);
+    NVTE_CHECK(cu_seqlens_shape[0] == static_cast<size_t>(batch + 1));
   }
 
   constexpr int tile = 16;
@@ -723,12 +723,12 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
   int batch = cu_seqlens_shape[0] - 1;
 
   if constexpr (functor_idx < 2) {
-    NVTE_CHECK(grad_per_step_shape[seq_dim] == total_tokens / 2);
+    NVTE_CHECK(grad_per_step_shape[seq_dim] == static_cast<size_t>(total_tokens / 2));
   } else {
-    NVTE_CHECK(grad_per_step_shape[seq_dim] == total_tokens);
+    NVTE_CHECK(grad_per_step_shape[seq_dim] == static_cast<size_t>(total_tokens));
   }
-  NVTE_CHECK(grad_per_step_shape[seq_dim + 1] == num_heads);
-  NVTE_CHECK(grad_per_step_shape[seq_dim + 2] == dim_per_head);
+  NVTE_CHECK(grad_per_step_shape[seq_dim + 1] == static_cast<size_t>(num_heads));
+  NVTE_CHECK(grad_per_step_shape[seq_dim + 2] == static_cast<size_t>(dim_per_head));
 
   size_t hidden_size = num_heads * dim_per_head;
   NVTE_CHECK(((hidden_size * typeToNumBits(grad.dtype())) / 8) % 16 == 0);
@@ -859,7 +859,7 @@ void thd_reorder_between_sequence_and_cp_rank_order(const Tensor &inp, const Ten
 
   auto inp_shape = inp.shape();
   size_t row_elems = 1;
-  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  for (size_t i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
   int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
   NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
 
@@ -891,7 +891,7 @@ void thd_copy_valid_tokens_from_per_split_to_rank_local(const Tensor &inp,
 
   auto inp_shape = inp.shape();
   size_t row_elems = 1;
-  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  for (size_t i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
   int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
   NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
 

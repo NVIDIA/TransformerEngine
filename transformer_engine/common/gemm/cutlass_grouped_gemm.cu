@@ -40,7 +40,7 @@ template void CutlassGroupedGemm<false, true, cutlass::bfloat16_t>(const NVTETen
 }  // namespace transformer_engine
 
 void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D, int num_gemms,
-                          bool transa, bool transb, bool grad, NVTETensor* workspace,
+                          bool transa, bool transb, bool /*grad*/, NVTETensor* workspace,
                           bool accumulate, int device, int math_sm_count, cudaStream_t stream) {
   using namespace transformer_engine;
   auto* inputA = convertNVTETensorCheck(A[0]);

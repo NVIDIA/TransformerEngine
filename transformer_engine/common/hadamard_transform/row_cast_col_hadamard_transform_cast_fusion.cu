@@ -1045,7 +1045,7 @@ void row_col_rht_gemm_ntt_w_sfc(
     float const* a_global_amax,
     float const* d_global_amax,
     const size_t* rng_state,
-    uint32_t sm_count,
+    uint32_t /*sm_count*/,
     cudaStream_t stream,
     int k_tile_size = 1024) {
   using namespace cute;
@@ -1180,7 +1180,6 @@ void row_col_rht_gemm_ntt_w_sfc(
 
   uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile_shape))));
   uint32_t tiles_in_n = uint32_t(size(ceil_div(N, k_tile_size)));
-  uint32_t tiles = tiles_in_m * tiles_in_n;
 
   dim3 dimBlock(512);
   dim3 dimCluster(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));

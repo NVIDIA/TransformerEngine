@@ -24,6 +24,12 @@ Build Configuration
    :Default: ``0``
    :Description: Enable debug build mode. When set to ``1``, the build includes debug symbols (``-g``) and disables optimizations.
 
+.. envvar:: NVTE_WARNINGS_AS_ERRORS
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Treat compiler warnings in Transformer Engine's own C++ and CUDA sources as errors. Set to ``0`` to report warnings without failing the build, e.g. when building with a newer compiler that emits new warnings. Third-party headers are excluded.
+
 .. envvar:: NVTE_BUILD_MAX_JOBS
 
    :Type: ``int``

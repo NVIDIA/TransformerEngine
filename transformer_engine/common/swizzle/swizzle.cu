@@ -1269,15 +1269,17 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   if (has_rowwise_scale_inv) {
     NVTE_CHECK(output->scale_inv.has_data(),
                "Output tensor does not have row-wise scaling factors.");
-    NVTE_CHECK(m * k == output->scale_inv.numel(), "Expected output tensor to have ", m * k,
+    NVTE_CHECK(static_cast<size_t>(m * k) == output->scale_inv.numel(),
+               "Expected output tensor to have ", m * k,
                " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
   }
   if (has_columnwise_scale_inv) {
     NVTE_CHECK(output->columnwise_scale_inv.has_data(),
                "Output tensor does not have column-wise scaling factors.");
-    NVTE_CHECK(
-        m * k == output->columnwise_scale_inv.numel(), "Expected output tensor to have ", m * k,
-        " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape, ".");
+    NVTE_CHECK(static_cast<size_t>(m * k) == output->columnwise_scale_inv.numel(),
+               "Expected output tensor to have ", m * k,
+               " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape,
+               ".");
   }
 
   // Return early if tensor has no entries
@@ -1446,7 +1448,7 @@ void launch_multi_tensor_row_scaling_swizzle(MultiSwizzleArgs& kernel_args, cons
 
   int n_tiles_in_tb = TB_DIM * vec_load_size;
   int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-  for (size_t j = 0; j < kernel_args.num_tensors; j++) {
+  for (int j = 0; j < kernel_args.num_tensors; j++) {
     const int num_tiles_m = kernel_args.m_list[j] / SF_TILE_DIM_M;
     const int num_tiles_k = kernel_args.k_list[j] / SF_TILE_DIM_K;
     kernel_args.block_range[j + 1] =
@@ -1488,7 +1490,7 @@ void launch_multi_tensor_unswizzle_scaling_factors(MultiSwizzleArgs& kernel_args
                                                    cudaStream_t stream) {
   int n_tiles_in_tb = TB_DIM * vec_load_size;
   int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-  for (size_t j = 0; j < kernel_args.num_tensors; j++) {
+  for (int j = 0; j < kernel_args.num_tensors; j++) {
     const int m = kernel_args.m_list[j];
     const int k = kernel_args.k_list[j];
     int num_tiles_m = m / SF_TILE_DIM_M;
@@ -1747,15 +1749,16 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       if (all_has_data) {
         NVTE_CHECK(output[i]->scale_inv.has_data(), "Output tensor ", i,
                    " does not have row-wise scaling factors.");
-        NVTE_CHECK(m * k == output[i]->scale_inv.numel(), "Expected output tensor ", i, " to have ",
-                   m * k, " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape,
-                   ".");
+        NVTE_CHECK(static_cast<size_t>(m * k) == output[i]->scale_inv.numel(),
+                   "Expected output tensor ", i, " to have ", m * k,
+                   " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape, ".");
       }
       if (all_has_columnwise_data) {
         NVTE_CHECK(output[i]->columnwise_scale_inv.has_data(), "Output tensor ", i,
                    " does not have column-wise scaling factors.");
-        NVTE_CHECK(m * k == output[i]->columnwise_scale_inv.numel(), "Expected output tensor ", i,
-                   " to have ", m * k, " column-wise scaling factors, but got shape=",
+        NVTE_CHECK(static_cast<size_t>(m * k) == output[i]->columnwise_scale_inv.numel(),
+                   "Expected output tensor ", i, " to have ", m * k,
+                   " column-wise scaling factors, but got shape=",
                    output[i]->columnwise_scale_inv.shape, ".");
       }
 
@@ -2021,9 +2024,9 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
                    " to have ", "2D scaling factors, got shape=", output[i]->scale_inv.shape, ".");
         m = output[i]->scale_inv.shape[0];
         k = output[i]->scale_inv.shape[1];
-        NVTE_CHECK(m * k == input[i]->scale_inv.numel(), "Expected input tensor ", i, " to have ",
-                   m * k, " row-wise scaling factors, but got shape=", input[i]->scale_inv.shape,
-                   ".");
+        NVTE_CHECK(static_cast<size_t>(m * k) == input[i]->scale_inv.numel(),
+                   "Expected input tensor ", i, " to have ", m * k,
+                   " row-wise scaling factors, but got shape=", input[i]->scale_inv.shape, ".");
       }
 
       if (all_has_columnwise_data) {
@@ -2036,8 +2039,9 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
                    "2D scaling factors, got shape=", output[i]->columnwise_scale_inv.shape, ".");
         m = output[i]->columnwise_scale_inv.shape[0];
         k = output[i]->columnwise_scale_inv.shape[1];
-        NVTE_CHECK(m * k == input[i]->columnwise_scale_inv.numel(), "Expected input tensor ", i,
-                   " to have ", m * k, " column-wise scaling factors, but got shape=",
+        NVTE_CHECK(static_cast<size_t>(m * k) == input[i]->columnwise_scale_inv.numel(),
+                   "Expected input tensor ", i, " to have ", m * k,
+                   " column-wise scaling factors, but got shape=",
                    input[i]->columnwise_scale_inv.shape, ".");
       }
 

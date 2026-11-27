@@ -29,6 +29,7 @@ from build_tools.utils import (
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
+    warnings_as_errors_enabled,
 )
 
 frameworks = get_frameworks()
@@ -85,6 +86,11 @@ def setup_common_extension() -> CMakeExtension:
             os.getenv("NVSHMEM_HOME") is not None
         ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
         cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
+    if warnings_as_errors_enabled():
+        cmake_flags.append("-DNVTE_WARNINGS_AS_ERRORS=ON")
+    else:
+        cmake_flags.append("-DNVTE_WARNINGS_AS_ERRORS=OFF")
 
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
