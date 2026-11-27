@@ -35,6 +35,10 @@ pip3 install pytest==8.4.2 || error_exit "Failed to install pytest"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_optional_flash_attn_import.xml $TE_PATH/tests/pytorch/test_optional_flash_attn_import.py || test_fail "test_optional_flash_attn_import.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_recipe.xml $TE_PATH/tests/pytorch/test_recipe.py || test_fail "test_recipe.py"
+for norm_backend in 0 1; do
+    NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE=0 NVTE_NORM_FWD_USE_CUDNN=$norm_backend NVTE_NORM_BWD_USE_CUDNN=$norm_backend python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_layernorm_linear_fp32_input_${norm_backend}.xml $TE_PATH/tests/pytorch/test_layernorm_linear_fp32_input.py || test_fail "test_layernorm_linear_fp32_input.py (cuDNN=$norm_backend)"
+done
+NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE=1 NVTE_NORM_FWD_USE_CUDNN=1 NVTE_NORM_BWD_USE_CUDNN=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_layernorm_linear_fp32_gamma.xml $TE_PATH/tests/pytorch/test_layernorm_linear_fp32_input.py -k zero_centered_gamma_in_weight_dtype || test_fail "test_layernorm_linear_fp32_input.py (weight-dtype gamma)"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_custom_recipe.xml $TE_PATH/tests/pytorch/test_custom_recipe.py || test_fail "test_custom_recipe.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_deferred_init.xml $TE_PATH/tests/pytorch/test_deferred_init.py || test_fail "test_deferred_init.py"
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FUSED_ATTN=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_numerics.xml $TE_PATH/tests/pytorch/test_numerics.py || test_fail "test_numerics.py"

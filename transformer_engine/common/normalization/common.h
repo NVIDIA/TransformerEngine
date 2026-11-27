@@ -310,6 +310,11 @@ bool use_cudnn_norm_bwd();
 bool& use_zero_centered_gamma_in_weight_dtype();
 bool use_cudnn_mxfp8_norm_output_in_input_dtype();
 
+// Use native centered statistics for FP32 LayerNorm unless cuDNN's weight-dtype
+// gamma addition is explicitly requested. RMSNorm does not require centering.
+bool use_native_layernorm_for_fp32_input(DType input_dtype, DType weight_dtype,
+                                         bool zero_centered_gamma);
+
 // RMSNorm forward with MXFP8 output by Transformer Engine's fused kernel
 // (rmsnorm/rmsnorm_fwd_mxfp8.cu), which also writes GEMM-swizzled scaling factors.
 bool is_supported_by_te_rmsnorm_fwd_mxfp8(const Tensor& x, const Tensor& gamma, const Tensor& z);

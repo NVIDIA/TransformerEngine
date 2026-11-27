@@ -70,6 +70,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+  // RMSNorm reduces mean(x * x) without centering. It does not need the FP32
+  // LayerNorm saved-variance fallback: cuDNN retains FP32 inputs and statistics.
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {

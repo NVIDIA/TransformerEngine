@@ -243,3 +243,27 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, fp16, fp16, fp16, fp32, 
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, fp32, fp32, fp16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, bf16, bf16, bf16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, fp32, fp32, bf16, fp32, 1, 4, 16);
+
+// Preserve FP32 residual inputs with FP16/BF16 norm parameters. Cast only the
+// normalized output, including the delayed-scaling FP8 path.
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 128, fp16, fp32, fp16, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 512, fp16, fp32, fp16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 1024, fp16, fp32, fp16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 2048, fp16, fp32, fp16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, fp16, fp32, fp16, fp32, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 128, bf16, fp32, bf16, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 512, bf16, fp32, bf16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 1024, bf16, fp32, bf16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 2048, bf16, fp32, bf16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, bf16, fp32, bf16, fp32, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 128, fp16, fp32, fp8e4m3, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 512, fp16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 1024, fp16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 2048, fp16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, fp16, fp32, fp8e4m3, fp32, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 128, bf16, fp32, fp8e4m3, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 512, bf16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 1024, bf16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 2048, bf16, fp32, fp8e4m3, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, general, 8192, bf16, fp32, fp8e4m3, fp32, 1, 4, 16);

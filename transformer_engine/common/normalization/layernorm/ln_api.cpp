@@ -69,7 +69,15 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
+  // Native LayerNorm uses centered statistics, preserving the small variation
+  // in nearly constant FP32 residuals. The cuDNN operation can lose accuracy
+  // for these inputs. Direct MXFP8 output still requires cuDNN; PyTorch
+  // LayerNormLinear normalizes FP32 inputs before quantizing them separately.
+  // Retain cuDNN when weight-dtype gamma addition is explicitly requested.
+  bool cudnn_backend =
+      (use_cudnn_norm_fwd() &&
+       !use_native_layernorm_for_fp32_input(x.data.dtype, gamma.data.dtype, zero_centered_gamma)) ||
+      is_mxfp8_scaling(z->scaling_mode);
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
     NVTE_CHECK(!cudnn_backend,
@@ -169,7 +177,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
   bool gamma_in_weight_dtype = false;
-  if (use_cudnn_norm_bwd()) {
+  if (use_cudnn_norm_bwd() &&
+      !use_native_layernorm_for_fp32_input(x.data.dtype, gamma.data.dtype, zero_centered_gamma)) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
