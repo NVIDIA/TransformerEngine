@@ -295,6 +295,13 @@ class GroupedLinearBwdArgs:
         self.biases = saved[3 * n : 3 * n + self.num_bias_args]
 
 
+def _disable_input_bulk_allocation(cpu_offloading, input_quantizer):
+    # Block-scaled FP8 data and scales use separate bulk allocations.
+    return cpu_offloading and not isinstance(
+        input_quantizer, (Float8BlockQuantizer, MXFP8Quantizer)
+    )
+
+
 def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
     """Configure per-expert quantizers for the split-quantize path after materialization.
 
@@ -380,7 +387,7 @@ def _grouped_linear_forward_impl(
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=cpu_offloading,
+        disable_bulk_allocation=_disable_input_bulk_allocation(cpu_offloading, input_quantizers[0]),
     )
 
     if cpu_offloading:
@@ -734,7 +741,9 @@ def _grouped_linear_backward_impl(
                 with_quantized_output=args.fp8 or args.debug,
                 quantizers=args.input_quantizers,
                 activation_dtype=args.activation_dtype,
-                disable_bulk_allocation=args.cpu_offloading,
+                disable_bulk_allocation=_disable_input_bulk_allocation(
+                    args.cpu_offloading, args.input_quantizers[0]
+                ),
             )
         elif args.backward_override == "dequantized":
             inputmats = [

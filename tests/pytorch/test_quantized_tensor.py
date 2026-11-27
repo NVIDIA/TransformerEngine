@@ -1649,3 +1649,22 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
                     atol=0,
                     rtol=0,
                 )
+
+
+@pytest.mark.parametrize(
+    "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8")]
+)
+def test_split_quantize_bulk_data_and_scale_storage(quantization):
+    quantizers = [make_quantizer(quantization) for _ in range(2)]
+    for quantizer in quantizers:
+        quantizer.set_usage(rowwise=True, columnwise=True)
+    x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
+    outputs = tex.split_quantize(x, [128, 128], quantizers)
+    allocations = set()
+    for orientation in ("rowwise", "columnwise"):
+        for field in ("data", "scale_inv"):
+            buffers = [getattr(output, f"_{orientation}_{field}") for output in outputs]
+            ptr = buffers[0].untyped_storage().data_ptr()
+            assert buffers[1].untyped_storage().data_ptr() == ptr
+            assert ptr not in allocations
+            allocations.add(ptr)

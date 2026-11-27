@@ -1310,6 +1310,13 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
 
 namespace {
 
+// Keep expert data and scales in separately releasable allocations.
+std::vector<at::Tensor> bulk_allocate_uniform(const std::vector<std::vector<size_t>> &shapes,
+                                              at::ScalarType dtype, size_t alignment) {
+  return bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), dtype), std::nullopt,
+                       std::vector<size_t>(shapes.size(), alignment));
+}
+
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp8_blockwise_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
@@ -1341,20 +1348,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
     }
 
-    // Bulk-allocate data and scale tensors
-    std::vector<std::vector<size_t>> shapes = rowwise_data_shapes;
-    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
-    std::vector<size_t> alignments(num_tensors, 256);
-    shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
-    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
-    alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
-
-    // Split data and scale tensors
-    for (size_t i = 0; i < num_tensors; ++i) {
-      rowwise_data_list.emplace_back(std::move(tensors[i]));
-      rowwise_scale_list.emplace_back(std::move(tensors[num_tensors + i]));
-    }
+    rowwise_data_list = bulk_allocate_uniform(rowwise_data_shapes, torch::kUInt8, 256);
+    rowwise_scale_list = bulk_allocate_uniform(rowwise_scale_shapes, torch::kFloat32, 16);
   }
 
   // Allocate column-wise data
@@ -1372,20 +1367,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
 
-    // Bulk-allocate data and scale tensors
-    std::vector<std::vector<size_t>> shapes = columnwise_data_shapes;
-    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
-    std::vector<size_t> alignments(num_tensors, 256);
-    shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
-    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
-    alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
-
-    // Split data and scale tensors
-    for (size_t i = 0; i < num_tensors; ++i) {
-      columnwise_data_list.push_back(tensors[i]);
-      columnwise_scale_list.push_back(tensors[num_tensors + i]);
-    }
+    columnwise_data_list = bulk_allocate_uniform(columnwise_data_shapes, torch::kUInt8, 256);
+    columnwise_scale_list = bulk_allocate_uniform(columnwise_scale_shapes, torch::kFloat32, 16);
   }
 
   // Construct FP8 block-wise tensors
@@ -1451,20 +1434,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
     }
 
-    // Bulk-allocate data and scale tensors
-    std::vector<std::vector<size_t>> shapes = rowwise_data_shapes;
-    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
-    std::vector<size_t> alignments(num_tensors, 256);
-    shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
-    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
-    alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
-
-    // Split data and scale tensors
-    for (size_t i = 0; i < num_tensors; ++i) {
-      rowwise_data_list.emplace_back(std::move(tensors[i]));
-      rowwise_scale_list.emplace_back(std::move(tensors[num_tensors + i]));
-    }
+    rowwise_data_list = bulk_allocate_uniform(rowwise_data_shapes, torch::kUInt8, 256);
+    rowwise_scale_list = bulk_allocate_uniform(rowwise_scale_shapes, torch::kUInt8, 16);
   }
 
   // Allocate column-wise data
@@ -1479,20 +1450,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
 
-    // Bulk-allocate data and scale tensors
-    std::vector<std::vector<size_t>> shapes = columnwise_data_shapes;
-    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
-    std::vector<size_t> alignments(num_tensors, 256);
-    shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
-    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
-    alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
-
-    // Split data and scale tensors
-    for (size_t i = 0; i < num_tensors; ++i) {
-      columnwise_data_list.push_back(tensors[i]);
-      columnwise_scale_list.push_back(tensors[num_tensors + i]);
-    }
+    columnwise_data_list = bulk_allocate_uniform(columnwise_data_shapes, torch::kUInt8, 256);
+    columnwise_scale_list = bulk_allocate_uniform(columnwise_scale_shapes, torch::kUInt8, 16);
   }
 
   // Construct mxfp8 tensors
