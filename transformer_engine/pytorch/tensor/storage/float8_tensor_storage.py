@@ -212,7 +212,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         if len(dims) == 2:
             shape = torch.Size((dims[1], dims[0]))
         else:
-            shape = torch.Size(tuple(dims[1:]) + (dims[0],))
+            shape = torch.Size(dims[1:] + dims[:1])
         dim = args[0] if args else kwargs.get("dim")
         return shape if dim is None else shape[dim]
 
