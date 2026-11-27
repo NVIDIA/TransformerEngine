@@ -329,8 +329,8 @@ def moe_permute_mask_map_forward(
             f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
             f"routing_map.size(0) ({routing_map.size(0)})."
         )
-    assert num_out_tokens > 0, (
-        f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
+    assert num_out_tokens >= 0, (
+        f"moe_permute (mask map) requires num_out_tokens >= 0, got {num_out_tokens}. "
         "Use int(routing_map.sum()) or num_tokens * top_k."
     )
     num_tokens, hidden_size = inp.size()
@@ -456,8 +456,8 @@ def _moe_permute_mask_map_forward_fake(  # pylint: disable=unused-argument
     hidden_size = inp.shape[1]
     num_experts = routing_map.shape[1]
     if num_tokens > 0:
-        assert num_out_tokens > 0, (
-            f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
+        assert num_out_tokens >= 0, (
+            f"moe_permute (mask map) requires num_out_tokens >= 0, got {num_out_tokens}. "
             "Use int(routing_map.sum()) or num_tokens * top_k."
         )
         out_rows = num_out_tokens
@@ -560,8 +560,9 @@ def _moe_permute_mask_map_backward_wrapper(
 
     row_id_map, pad_offsets = ctx.saved_tensors
 
-    # Pass permuted_probs_grad only if it has content
-    probs_grad_input = grad_permuted_probs if grad_permuted_probs.numel() > 0 else None
+    # Pass permuted_probs_grad only when probs need a gradient. Its size cannot tell:
+    # with num_out_tokens == 0 it is empty even though probs need a (zero) gradient.
+    probs_grad_input = grad_permuted_probs if ctx.needs_probs_grad else None
 
     act_grad, probs_grad = torch.ops.te_moe.permute_mask_map_bwd(
         grad_output,
@@ -600,7 +601,9 @@ def moe_unpermute_mask_map_forward(
 ) -> torch.Tensor:
     """Forward pass for MoE unpermute with mask router map."""
     if not inp.numel():
-        return inp.clone()
+        # No permuted rows (e.g. no token was routed to these experts): every
+        # token receives nothing, so the output is zero.
+        return torch.zeros((num_tokens, hidden_size), dtype=inp.dtype, device=inp.device)
     assert not isinstance(
         inp, QuantizedTensor
     ), "The forward of moe_unpermute does not support FP8."
@@ -828,11 +831,14 @@ def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):  # pylint: disab
 def _moe_unpermute_mask_map_backward_wrapper(ctx, unpermuted_act_grad):
     """Backward wrapper calling the appropriate custom backward op."""
     if ctx.empty_input:
+        # The forward input has no rows, so its gradient has none either, even when
+        # the unpermuted output (and thus unpermuted_act_grad) has num_tokens rows.
+        act_grad = unpermuted_act_grad.new_zeros((0, ctx.hidden_size))
         if ctx.with_probs:
             _, _, merging_probs, _ = ctx.saved_tensors
             probs_grad = torch.zeros_like(merging_probs) if ctx.needs_probs_grad else None
-            return unpermuted_act_grad, None, probs_grad, None, None, None, None
-        return unpermuted_act_grad, None, None, None, None, None, None
+            return act_grad, None, probs_grad, None, None, None, None
+        return act_grad, None, None, None, None, None, None
 
     act_grad = None
     probs_grad = None
@@ -913,7 +919,9 @@ def moe_permute(
         The values in it are the routed expert indices.
     num_out_tokens : int
         Number of output tokens (rows in the permuted buffer).
-        mask map: must be > 0, e.g. int(routing_map.sum()) or num_tokens * top_k.
+        mask map: must be >= 0, e.g. int(routing_map.sum()) or num_tokens * top_k.
+        Routed entries beyond the first num_out_tokens rows are dropped, so 0 yields
+        an empty output, e.g. when routing_map routes no token to any expert.
         index map: must be >= 0; 0 means infer as num_tokens * top_k.
     max_token_num : int, default = -1
         Workspace sizing hint, only used for map_type='index'. Ignored for 'mask'.
@@ -962,8 +970,9 @@ def moe_permute_with_probs(
         The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
         The values in it: 1 means the token is routed to this expert and 0 means not.
     num_out_tokens : int
-        Number of output tokens (rows in the permuted buffer). Must be > 0,
-        e.g. int(routing_map.sum()) or num_tokens * top_k.
+        Number of output tokens (rows in the permuted buffer). Must be >= 0,
+        e.g. int(routing_map.sum()) or num_tokens * top_k. Routed entries beyond
+        the first num_out_tokens rows are dropped, so 0 yields an empty output.
     """
     if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
         raise RuntimeError(

@@ -1800,6 +1800,33 @@ def test_permutation_mask_map_capacity_drop(torch_dtype, num_tokens):
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_permutation_mask_map_zero_out_tokens(te_dtype, use_torch_compile):
+    """Non-empty input whose routing map routes no token (num_out_tokens == 0), e.g. an
+    expert-parallel rank whose local experts were not selected."""
+    kwargs = dict(
+        te_dtype=te_dtype,
+        num_tokens=256,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        use_torch_compile=use_torch_compile,
+    )
+    _test_permutation_mask_map(with_probs=True, **kwargs)
+    _test_permutation_mask_map_alongside_probs(tp_size=1, **kwargs)
+    _test_permutation_and_padding_mask_map(with_merging_probs=True, **kwargs)
+
+
+def test_permutation_mask_map_rejects_negative_out_tokens():
+    """A negative num_out_tokens (such as a -1 'infer' sentinel) is not a valid size."""
+    routing_map = torch.ones(4, 2, dtype=torch.bool, device="cuda")
+    inp = torch.randn(4, 16, device="cuda")
+    with pytest.raises(AssertionError, match="num_out_tokens >= 0"):
+        te_permute(inp, routing_map, num_out_tokens=-1, map_type="mask")
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_out_tokens", [None])
 @pytest.mark.parametrize(
     "num_tokens, num_expert, hidden_size, topK",
@@ -1988,6 +2015,27 @@ def test_permutation_mask_map_fp8(
         num_out_tokens=num_out_tokens,
         recipe=recipe,
         use_torch_compile=False,  # FP8 permutation is not yet supported under torch.compile
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("te_dtype", [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_permutation_mask_map_fp8_zero_out_tokens(te_dtype, recipe):
+    """Quantized non-empty input whose routing map routes no token (num_out_tokens == 0)."""
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+
+    _test_permutation_mask_map_fp8(
+        te_dtype=te_dtype,
+        num_tokens=256,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        recipe=recipe,
     )
 
 
