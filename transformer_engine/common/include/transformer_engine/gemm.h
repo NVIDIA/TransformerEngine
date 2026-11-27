@@ -94,6 +94,11 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigSMCount = 3,
   /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
   kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
+  /*! Whether alpha and beta are in device memory. Default: true.
+   *
+   *  Host alpha and beta hold one value each and let cuBLAS specialize the GEMM epilogue on beta.
+   */
+  kNVTEGroupedMatmulConfigAlphaBetaOnDevice = 5,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -460,8 +465,12 @@ void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *off
  *  \param[in]  transb           Whether to transpose B matrices.
  *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
  *  \param[out] D                Output grouped tensor D.
- *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
- *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements,
+ *                               or one element in host memory, see
+ *                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements,
+ *                               or one element in host memory, see
+ *                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
  *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
  *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
  *  \param[in]  config           Additional configuration (can be NULL for defaults).
@@ -495,8 +504,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
  *  \param[in]  transb           Whether to transpose B matrices.
  *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
  *  \param[out] D                Output grouped tensor D.
- *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
- *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements,
+ *                               or one element in host memory, see
+ *                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements,
+ *                               or one element in host memory, see
+ *                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
  *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
  *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
  *  \param[in]  config           Additional configuration (can be NULL for defaults).
@@ -524,8 +537,12 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 *  \param[in]  num_c_tensors    Number of tensors in C_list (Can be 0 if C is not provided).
 *  \param[out] D_list           List of D tensors (length = num_d_tensors).
 *  \param[in]  num_d_tensors    Number of tensors in D_list.
-*  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
-*  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+*  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements,
+*                               or one element in host memory, see
+*                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
+*  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements,
+*                               or one element in host memory, see
+*                               kNVTEGroupedMatmulConfigAlphaBetaOnDevice).
 *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
 *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
 *  \param[in]  config           Additional configuration (can be NULL for defaults).
@@ -730,6 +747,13 @@ class GroupedMatmulConfigWrapper {
   void set_use_split_accumulator(bool use_split_accumulator) {
     const auto val = static_cast<uint8_t>(use_split_accumulator);
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &val, sizeof(val));
+  }
+
+  /*! \brief Set whether alpha and beta are in device memory. */
+  void set_alpha_beta_on_device(bool alpha_beta_on_device) {
+    const auto val = static_cast<uint8_t>(alpha_beta_on_device);
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigAlphaBetaOnDevice,
                                              &val, sizeof(val));
   }
 

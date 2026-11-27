@@ -742,21 +742,24 @@ def general_grouped_gemm_for_grouped_tensor(
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
 
-    # Hopper (SM90) uses a single shared alpha/beta scalar;
-    # Blackwell+ (SM100) supports per-group alpha/beta arrays.
-    per_group = get_device_compute_capability(device) >= (10, 0)
-    num_alphabeta = num_tensors if per_group else 1
+    # Without explicit alpha/beta, the binding passes alpha = 1 and beta = 0 (or 1 when
+    # accumulating) from host memory.
+    if alpha is not None or beta is not None:
+        # Hopper (SM90) uses a single shared alpha/beta scalar;
+        # Blackwell+ (SM100) supports per-group alpha/beta arrays.
+        per_group = get_device_compute_capability(device) >= (10, 0)
+        num_alphabeta = num_tensors if per_group else 1
 
-    if alpha is None:
-        alpha = _get_fp32_ones_tensor(num_alphabeta, device)
-    if beta is None:
-        if accumulate:
-            beta = _get_fp32_ones_tensor(num_alphabeta, device)
-        else:
-            beta = _get_fp32_zeros_tensor(num_alphabeta, device)
+        if alpha is None:
+            alpha = _get_fp32_ones_tensor(num_alphabeta, device)
+        if beta is None:
+            if accumulate:
+                beta = _get_fp32_ones_tensor(num_alphabeta, device)
+            else:
+                beta = _get_fp32_zeros_tensor(num_alphabeta, device)
 
-    if not alpha.is_cuda or not beta.is_cuda:
-        raise ValueError("alpha and beta must be CUDA tensors.")
+        if not alpha.is_cuda or not beta.is_cuda:
+            raise ValueError("alpha and beta must be CUDA tensors.")
 
     workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
     # Each grouped-GEMM layout gets its own persistent cuBLAS workspace: two grouped
@@ -782,6 +785,7 @@ def general_grouped_gemm_for_grouped_tensor(
         workspace_cublas,
         use_split_accumulator,
         sm_count,
+        accumulate,
     )
 
 
