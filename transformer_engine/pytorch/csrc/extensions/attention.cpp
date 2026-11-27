@@ -7,8 +7,33 @@
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
+#include "transformer_engine/linear_attention.h"
 
 namespace transformer_engine::pytorch {
+
+at::Tensor linear_attention_affine_prefix(const at::Tensor &initial_states,
+                                          const at::Tensor &additive, const at::Tensor &transitions,
+                                          const at::Tensor &descriptors) {
+  for (const auto &tensor : {initial_states, additive, transitions, descriptors}) {
+    NVTE_CHECK(tensor.is_cuda() && tensor.is_contiguous(),
+               "Affine prefix tensors must be contiguous CUDA tensors.");
+    NVTE_CHECK(tensor.device() == initial_states.device(), "Affine prefix devices must agree.");
+  }
+  NVTE_CHECK(initial_states.dim() == 4 && descriptors.dim() == 2, "Invalid affine prefix ranks.");
+  at::cuda::CUDAGuard device_guard(initial_states.device());
+  at::Tensor output = at::empty(
+      {descriptors.size(0), initial_states.size(1), initial_states.size(2), initial_states.size(3)},
+      initial_states.options());
+  auto initial_tensor = makeTransformerEngineTensor(initial_states);
+  auto additive_tensor = makeTransformerEngineTensor(additive);
+  auto transition_tensor = makeTransformerEngineTensor(transitions);
+  auto descriptor_tensor = makeTransformerEngineTensor(descriptors);
+  auto output_tensor = makeTransformerEngineTensor(output);
+  nvte_linear_attention_affine_prefix(initial_tensor.data(), additive_tensor.data(),
+                                      transition_tensor.data(), descriptor_tensor.data(),
+                                      output_tensor.data(), at::cuda::getCurrentCUDAStream());
+  return output;
+}
 
 // get the fused attention backend
 std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(const py::object &p) {

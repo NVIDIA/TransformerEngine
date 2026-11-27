@@ -9,4 +9,3 @@ Other optimizations
 .. toctree::
 
    cpu_offloading/cpu_offloading.rst
-

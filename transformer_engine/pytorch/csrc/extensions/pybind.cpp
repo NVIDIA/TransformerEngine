@@ -689,6 +689,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Copy valid THD token entries from a per-split tensor into a rank-local accumulator",
         py::call_guard<py::gil_scoped_release>());
 
+  // Linear attention context parallelism
+  m.def("linear_attention_affine_prefix",
+        &transformer_engine::pytorch::linear_attention_affine_prefix,
+        "Apply ordered linear-attention state summaries", py::call_guard<py::gil_scoped_release>());
+
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
         "Initialize nvshmem backend with Pytorch distributed process groups",
