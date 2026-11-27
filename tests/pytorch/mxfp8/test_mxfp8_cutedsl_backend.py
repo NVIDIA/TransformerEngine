@@ -115,10 +115,10 @@ METHOD_FUSION_CASES = [
 METHOD_FUSION_IDS = [f"{m}X{f['name']}" for m, f in METHOD_FUSION_CASES]
 
 IN_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
-FP8_DTYPES = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+FP8_DTYPES = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
 FP8_TO_KEY = {
-    tex.DType.kFloat8E4M3: "Float8E4M3",
-    tex.DType.kFloat8E5M2: "Float8E5M2",
+    te.DType.kFloat8E4M3: "Float8E4M3",
+    te.DType.kFloat8E5M2: "Float8E5M2",
 }
 
 SWIZZLE_MODES = [False, True]
@@ -131,7 +131,7 @@ DTYPE_TO_STR = {
     torch.float16: "Float16",
 }
 get_dtype_id = DTYPE_TO_STR.get
-FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}
+FP8_TO_STR = {te.DType.kFloat8E4M3: "e4m3", te.DType.kFloat8E5M2: "e5m2"}
 get_fp8_id = FP8_TO_STR.get
 get_swizzle_id = lambda s: "swizzled" if s else "non-swizzled"
 
@@ -385,7 +385,7 @@ def test_cast_only_rowwise_specialized_grid_y_overflow():
         (4 * 65536, 128),
         (1, 32),
         torch.float16,
-        tex.DType.kFloat8E4M3,
+        te.DType.kFloat8E4M3,
     )
 
 
@@ -399,7 +399,7 @@ def test_cast_only_bidimensional_specialized_grid_y_overflow():
         (32 * 65536, 32),
         (32, 32),
         torch.float16,
-        tex.DType.kFloat8E4M3,
+        te.DType.kFloat8E4M3,
     )
 
 
@@ -410,7 +410,7 @@ def test_cast_only_bidimensional_specialized_grid_y_overflow():
 @pytest.mark.parametrize("method,act", METHOD_FUSION_CASES, ids=METHOD_FUSION_IDS)
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_sizes(swizzled, method, act, block_size, shape):
-    run_test_case(method, act, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled)
+    run_test_case(method, act, shape, block_size, torch.bfloat16, te.DType.kFloat8E4M3, swizzled)
 
 
 # Test cases with varying dtypes (OperatorTest_FusedCastMXFP8_Dtypes).
@@ -468,7 +468,7 @@ def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset
         shape,
         block_size,
         in_dtype,
-        tex.DType.kFloat8E4M3,
+        te.DType.kFloat8E4M3,
         swizzled,
         input_offset,
     )
@@ -491,7 +491,7 @@ def test_silu_fast_reciprocal_rows(monkeypatch, swizzled, block_size, shape):
     x = x.masked_fill(cols % 16 == rows % 16, -100.0)
     silu = next(a for a in ACTIVATIONS if a["name"] == "SiLU")
     run_test_case(
-        "CAST_ACT", silu, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled, x=x
+        "CAST_ACT", silu, shape, block_size, torch.bfloat16, te.DType.kFloat8E4M3, swizzled, x=x
     )
 
 
@@ -605,7 +605,7 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
     run_gated_test_case(
-        act, is_bwd, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled
+        act, is_bwd, shape, block_size, torch.bfloat16, te.DType.kFloat8E4M3, swizzled
     )
 
 

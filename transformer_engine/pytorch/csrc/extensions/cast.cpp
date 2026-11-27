@@ -1401,9 +1401,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
     // Construct Python tensor.
-    tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, MakePythonDType(fp8_dtype),
-        quantizer_py_list[i], is_2D_scaled));
+    tensor_py_list.emplace_back(
+        Float8BlockwiseQTensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
+                                    py::cast(fp8_dtype), quantizer_py_list[i], is_2D_scaled));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -1508,7 +1508,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 
     // Construct Python tensor.
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
-                                                 columnwise_scale, MakePythonDType(fp8_dtype),
+                                                 columnwise_scale, py::cast(fp8_dtype),
                                                  quantizer_py_list[i], with_gemm_swizzled_scales));
 
     // Construct C++ tensor
@@ -1723,13 +1723,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                      : py::none();
 
     // Construct Python tensor.
-    tensor_py_list.emplace_back(
-        NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
-                         amax_rowwise, amax_columnwise, MakePythonDType(fp4_dtype),
-                         MakePythonDType(scale_dtype), quantizer_py_list[i],
-                         group_optimize_for_gemm, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
-                         py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
-                         py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
+    tensor_py_list.emplace_back(NVFP4TensorClass(
+        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
+        amax_columnwise, py::cast(fp4_dtype), py::cast(scale_dtype), quantizer_py_list[i],
+        group_optimize_for_gemm, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
+        py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
+        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,

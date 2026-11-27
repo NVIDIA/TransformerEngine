@@ -15,26 +15,6 @@
 #include "cuda_runtime.h"
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \
-  pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
-      .value("kByte", transformer_engine::DType::kByte)                                            \
-      .value("kInt32", transformer_engine::DType::kInt32)                                          \
-      .value("kFloat32", transformer_engine::DType::kFloat32)                                      \
-      .value("kFloat16", transformer_engine::DType::kFloat16)                                      \
-      .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
-      .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
-      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
-      .value("kFloat8E8M0", transformer_engine::DType::kFloat8E8M0)                                \
-      .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1)                                \
-      .value("kFloat8UE5M3", transformer_engine::DType::kFloat8UE5M3)                              \
-      .def("__reduce_ex__",                                                                        \
-           [](transformer_engine::DType self, pybind11::object /*protocol*/) {                     \
-             return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                 \
-                                         pybind11::make_tuple(static_cast<int>(self)));            \
-           })                                                                                      \
-      .def("__reduce__", [](transformer_engine::DType self) {                                      \
-        return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                      \
-                                    pybind11::make_tuple(static_cast<int>(self)));                 \
-      });                                                                                          \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \

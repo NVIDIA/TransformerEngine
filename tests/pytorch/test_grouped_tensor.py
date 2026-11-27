@@ -823,7 +823,7 @@ class TestGroupedTensor:
             else None
         )
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         rowwise = usage in ("rowwise", "both")
         columnwise = usage in ("columnwise", "both")
         quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
@@ -874,7 +874,7 @@ class TestGroupedTensor:
         ]
         grouped_input = torch.cat(input_tensors, dim=0)
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         split_sizes = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
         split_sizes, (tensor_offsets,) = tex.splits_to_offsets_multi(
@@ -1165,10 +1165,10 @@ class TestGroupedTensor:
             last_dims = None
 
         if quantization == "mxfp8":
-            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         else:
             quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
                 force_pow_2_scales=False,
                 amax_epsilon=0.0,
@@ -1232,7 +1232,7 @@ class TestGroupedTensor:
         first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
 
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
             force_pow_2_scales=_fp8bs_pow2_required,
@@ -1285,7 +1285,7 @@ class TestGroupedTensor:
         shape = (num_tensors * 256, 256)
         if quantization == "fp8_current_scaling":
             quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
                 force_pow_2_scales=False,
                 amax_epsilon=0.0,
@@ -1293,7 +1293,7 @@ class TestGroupedTensor:
             quantizer.set_usage(rowwise=True, columnwise=True)
         else:
             quantizer = Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 force_pow_2_scales=_fp8bs_pow2_required,
@@ -1514,7 +1514,7 @@ class TestGroupedTensor:
         columnwise = requested_columnwise and not is_non_tn_fp8_gemm_supported()
 
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device="cuda",
             force_pow_2_scales=False,
             amax_epsilon=0.0,
@@ -1587,7 +1587,7 @@ class TestGroupedTensor:
             if tensor.numel() == 0:
                 continue
             ref_quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
                 rowwise=True,
                 columnwise=False,
@@ -1642,7 +1642,7 @@ class TestGroupedTensor:
         if not force_pow_2_scales and _fp8bs_pow2_required:
             # Non-power-of-2 FP8 block scales cannot be emulated with MXFP8 on Blackwell+.
             quantizer = Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 force_pow_2_scales=False,
@@ -1685,7 +1685,7 @@ class TestGroupedTensor:
         )
 
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
             force_pow_2_scales=force_pow_2_scales,
@@ -1705,7 +1705,7 @@ class TestGroupedTensor:
         # be allocated even when only columnwise is consumed, and the columnwise data/scale it
         # emits are independent of whether rowwise is also computed.
         ref_quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
             force_pow_2_scales=force_pow_2_scales,
@@ -1981,7 +1981,7 @@ class TestGroupedTensor:
         grouped_input = torch.cat(input_tensors, dim=0)
 
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
             force_pow_2_scales=_fp8bs_pow2_required,
@@ -2051,7 +2051,7 @@ class TestGroupedTensor:
         grouped_input = torch.cat(input_tensors, dim=0)
 
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
             force_pow_2_scales=_fp8bs_pow2_required,

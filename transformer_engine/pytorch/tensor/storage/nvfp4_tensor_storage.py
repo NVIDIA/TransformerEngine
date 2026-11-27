@@ -115,8 +115,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: Union[DType, tex.DType],
-        scale_dtype: Union[DType, tex.DType],
+        fp4_dtype: DType,
+        scale_dtype: DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -134,8 +134,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._fp4_dtype = DType.cast(fp4_dtype)
-        instance._scale_dtype = DType.cast(scale_dtype)
+        instance._fp4_dtype = fp4_dtype
+        instance._scale_dtype = scale_dtype
         instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv

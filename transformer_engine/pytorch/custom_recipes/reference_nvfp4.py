@@ -14,7 +14,6 @@ from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
-
 NVFP4_FP4_MAX = 6.0
 NVFP4_E4M3_SCALE_MAX = 448.0
 NVFP4_UE5M3_SCALE_MAX = 114688.0
@@ -182,7 +181,6 @@ def _cast_to_ue5m3(decode_scale: torch.Tensor) -> torch.Tensor:
 
 
 def _cast_to_nvfp4_scale(decode_scale: torch.Tensor, scale_dtype: DType) -> torch.Tensor:
-    scale_dtype = DType.cast(scale_dtype)
     if scale_dtype == DType.kFloat8E4M3:
         scale_max = torch.tensor(
             NVFP4_E4M3_SCALE_MAX, device=decode_scale.device, dtype=torch.float32
@@ -210,7 +208,6 @@ def _ue5m3_to_float32(scale: torch.Tensor) -> torch.Tensor:
 
 
 def _nvfp4_scale_to_float32(scale: torch.Tensor, scale_dtype: DType) -> torch.Tensor:
-    scale_dtype = DType.cast(scale_dtype)
     if scale_dtype == DType.kFloat8E4M3:
         if scale.dtype == torch.uint8:
             return scale.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
@@ -221,7 +218,6 @@ def _nvfp4_scale_to_float32(scale: torch.Tensor, scale_dtype: DType) -> torch.Te
 
 
 def _nvfp4_scale_dtype_max(scale_dtype: DType) -> float:
-    scale_dtype = DType.cast(scale_dtype)
     if scale_dtype == DType.kFloat8E4M3:
         return NVFP4_E4M3_SCALE_MAX
     if scale_dtype == DType.kFloat8UE5M3:
@@ -379,7 +375,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
 
     @_scale_dtype.setter
     def _scale_dtype(self, value):
-        self.scale_dtype = DType.cast(value)
+        self.scale_dtype = value
 
     def __repr__(self):
         return (
@@ -470,7 +466,6 @@ class NVFP4QuantizerRef(Quantizer):
         with_random_sign_mask: bool = True,
     ):
         nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
-        scale_dtype = DType.cast(scale_dtype)
         if scale_dtype not in (DType.kFloat8E4M3, DType.kFloat8UE5M3):
             raise ValueError("scale_dtype must be DType.kFloat8E4M3 or DType.kFloat8UE5M3.")
         if row_scaled_nvfp4:
@@ -785,7 +780,6 @@ class NVFP4QuantizerRef(Quantizer):
                 f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape"
                 f" {x.shape}"
             )
-        scale_dtype = DType.cast(scale_dtype)
         if nvfp4_use_4over6 and scale_dtype == DType.kFloat8UE5M3:
             raise ValueError("4over6 is incompatible with UE5M3 scales.")
         _validate_nvfp4_scale_max(nvfp4_e4m3_max)
@@ -1270,19 +1264,15 @@ class NVFP4QuantizerRef(Quantizer):
                 "nvfp4_e4m3_max",
                 getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
             )
-            qresult_x_scale_dtype = DType.cast(
-                getattr(
-                    qresult_x,
-                    "scale_dtype",
-                    getattr(qresult_x, "_scale_dtype", self.scale_dtype),
-                )
+            qresult_x_scale_dtype = getattr(
+                qresult_x,
+                "scale_dtype",
+                getattr(qresult_x, "_scale_dtype", self.scale_dtype),
             )
-            qresult_w_scale_dtype = DType.cast(
-                getattr(
-                    qresult_w,
-                    "scale_dtype",
-                    getattr(qresult_w, "_scale_dtype", self.scale_dtype),
-                )
+            qresult_w_scale_dtype = getattr(
+                qresult_w,
+                "scale_dtype",
+                getattr(qresult_w, "_scale_dtype", self.scale_dtype),
             )
             sx = _nvfp4_scale_to_float32(sx, qresult_x_scale_dtype)
             sw = _nvfp4_scale_to_float32(sw, qresult_w_scale_dtype)

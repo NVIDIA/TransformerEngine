@@ -3418,7 +3418,7 @@ def fused_mla_kv_rope_mxfp8(
         (
             quantizer
             if quantizer is not None
-            else MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+            else MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3, rowwise=True, columnwise=True)
         )
         for quantizer in (key_quantizer, value_quantizer)
     ]

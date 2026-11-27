@@ -7,7 +7,6 @@ import torch
 
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.debug.pytorch.debug_quantization import (
     DebugQuantizedTensor,
     DebugQuantizer,
@@ -101,7 +100,7 @@ def test_wgrad_all_gather_usage_handles_debug_quantizer_without_parent():
 def test_wgrad_all_gather_usage_updates_debug_wrapper_and_blockwise_parent():
     """Usage changes must remain synchronized across the debug wrapper and parent."""
     parent_quantizer = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
         block_scaling_dim=1,

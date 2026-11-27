@@ -64,7 +64,7 @@ def _quantize(
         return tensor
     if quantization == "mxfp8":
         quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=not rowwise,
         )
@@ -77,16 +77,16 @@ def _quantize(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=tensor.device),
             amax=torch.zeros(1, dtype=torch.float32, device=tensor.device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
         )
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=tensor.device,
         )
     elif quantization == "fp8_block_scaling":
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
             block_scaling_dim=1,

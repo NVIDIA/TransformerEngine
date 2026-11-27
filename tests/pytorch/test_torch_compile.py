@@ -1420,13 +1420,13 @@ def test_get_attention_backend_traceable(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _mxfp8(dtype=tex.DType.kFloat8E4M3):
+def _mxfp8(dtype=te.DType.kFloat8E4M3):
     return MXFP8Quantizer(fp8_dtype=dtype)
 
 
 def _blockwise(force_pow_2_scales=True):
     return Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
         force_pow_2_scales=force_pow_2_scales,
@@ -1435,7 +1435,7 @@ def _blockwise(force_pow_2_scales=True):
 
 def _current_scaling(amax_epsilon=0.0):
     return Float8CurrentScalingQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         device=torch.device("cpu"),
         amax_epsilon=amax_epsilon,
     )
@@ -1447,7 +1447,7 @@ def _nvfp4(with_rht=True):
     # value-key reconstruction). Post-RHT amax is required by the kernel
     # whenever RHT is on (pre-RHT amax is unsupported).
     return NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=te.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_rht=with_rht,
@@ -1491,6 +1491,9 @@ def test_quantizer_value_object(factory):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
+    assert rebuilt.dtype is a.dtype
+    if hasattr(a, "scale_dtype"):
+        assert rebuilt.scale_dtype is a.scale_dtype
     # The deprecated amax-reduction group is never part of the value.
     assert getattr(rebuilt, "amax_reduction_group", None) is None
 
@@ -1513,7 +1516,7 @@ def test_value_quantizer_rejects_process_group():
     if created:
         dist.init_process_group(backend="gloo", store=dist.HashStore(), rank=0, world_size=1)
     try:
-        q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        q = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         q.amax_reduction_group = dist.group.WORLD
         # Every value-materialization path must reject it (hash, eq, __fx_repr__).
         with pytest.raises(TypeError):
@@ -2171,9 +2174,7 @@ def test_te_linear_compile_eager_fallback(case):
         torch.manual_seed(1)
         x = torch.randn(32, 64, dtype=dtype, device=device)
         if case == "quantized_input":
-            quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, device=device
-            )
+            quantizer = Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device=device)
             return quantizer(x)
         return x.requires_grad_(mode != "no_grad")
 
@@ -2871,7 +2872,7 @@ def test_te_ops_forward_kwargs_compile():
     model = te.ops.Sequential(_AffineOp())
     compiled, graphs = _compile_with_graphs(model)
     quantizer = Float8CurrentScalingQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda")
+        fp8_dtype=te.DType.kFloat8E4M3, device=torch.device("cuda")
     )
     x = torch.randn(8, 16, device="cuda", requires_grad=True)
     dy = torch.randn_like(x)
@@ -2894,7 +2895,7 @@ def test_te_ops_forward_kwargs_compile():
 def test_te_ops_bias_compile_with_fp8_input(backward):
     """A quantized tensor subclass must cross the Bias custom-op boundary."""
     torch._dynamo.reset()
-    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device="cuda")
     x = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
     model = te.ops.Bias(64, device="cuda", dtype=torch.bfloat16)
     compiled = torch.compile(lambda inp: model(inp), fullgraph=True)
@@ -3349,7 +3350,7 @@ def _check_te_ops_activation_compile(
         shape = (rows, 64) if dynamic else (2, 16, 64)
         x = torch.randn(shape, device="cuda", dtype=dtype)
         if layout == "fp8" or (cache_input and not eager_reference):
-            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+            quantizer = Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
             x = quantizer(x)
             if layout != "fp8":
                 x = x.dequantize()

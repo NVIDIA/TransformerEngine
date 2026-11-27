@@ -87,8 +87,24 @@ PyTorch
 Data types
 ----------
 
+``transformer_engine.pytorch.DType`` is the Python ``enum.IntEnum`` used for
+Transformer Engine dtype arguments and quantizer metadata. Its members correspond
+to ``transformer_engine::DType`` in C++. The extension checks all member names and
+integer values once at import, and raises an error if the Python sources and C++
+extension disagree. C++ return values reuse the Python enum members; conversions
+do not construct enum objects or call Python in steady state.
+
+For TE 3.0, replace ``transformer_engine_torch.DType`` with
+``transformer_engine.pytorch.DType``. The extension no longer exports a separate
+``DType`` enum, and dtype arguments typed as ``transformer_engine::DType`` require
+the Python enum. Convert integer tags explicitly with ``te.DType(tag)`` before
+calling these bindings. The compatibility helper ``DType.cast`` is removed.
+Checkpoints containing the old extension enum must be loaded and resaved using
+Python ``DType`` members before upgrading. Checkpoints containing the Python enum
+remain supported.
+
 .. autoapiclass:: transformer_engine.pytorch.DType()
-  :members: kByte, kInt32, kFloat32, kFloat16, kBFloat16, kFloat8E4M3, kFloat8E5M2, kFloat4E2M1
+  :members: kByte, kInt16, kInt32, kInt64, kFloat32, kFloat16, kBFloat16, kFloat8E4M3, kFloat8E5M2, kFloat8E8M0, kFloat4E2M1, kFloat8UE5M3
 
 Recipe availability
 -------------------

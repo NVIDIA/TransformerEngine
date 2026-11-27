@@ -453,15 +453,6 @@ std::vector<size_t> getTensorShape(const at::Tensor& t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
-/*! @brief Wrap a C++ ``transformer_engine::DType`` as the canonical Python
- *         ``transformer_engine.pytorch.DType`` ``IntEnum`` member.
- *
- * The returned object is cached per enum value (one ``py::object`` per
- * ``DType``), py::object corresponds to the python ``DType`` enum member
- * defined in transformer_engine.pytorch.
- */
-pybind11::object MakePythonDType(transformer_engine::DType dtype);
-
 inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt64:

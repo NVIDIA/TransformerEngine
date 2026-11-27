@@ -26,7 +26,7 @@ recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=Tru
 )
 @pytest.mark.parametrize("shape", [(128, 128), (256, 1024), (384, 7168)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("fp8_dtype", [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
 def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimize_for_gemm):
@@ -85,7 +85,7 @@ def test_rmsnorm_fwd_mxfp8_sm_margin(optimize_for_gemm):
 
     outputs = []
     for sm_margin in (0, sm_count - 1):
-        quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(te.DType.kFloat8E4M3)
         quantizer.optimize_for_gemm = optimize_for_gemm
         outputs.append(
             tex.rmsnorm_fwd(x, weight, 1e-5, None, quantizer, TE_DType[x.dtype], sm_margin, False)
@@ -112,11 +112,11 @@ def test_rmsnorm_fwd_mxfp8_2d_quantization(dtype):
     x = torch.randn(256, 1024, dtype=dtype, device="cuda")
     weight = torch.randn(1024, dtype=dtype, device="cuda")
 
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=True)
+    quantizer = MXFP8Quantizer(te.DType.kFloat8E4M3, with_2d_quantization=True)
     out, _, _ = tex.rmsnorm_fwd(x, weight, 1e-5, None, quantizer, TE_DType[dtype], 0, False)
 
     y, _, _ = tex.rmsnorm_fwd(x, weight, 1e-5, None, None, TE_DType[dtype], 0, False)
-    ref = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=True)(y)
+    ref = MXFP8Quantizer(te.DType.kFloat8E4M3, with_2d_quantization=True)(y)
     for attr in (
         "_rowwise_data",
         "_columnwise_data",

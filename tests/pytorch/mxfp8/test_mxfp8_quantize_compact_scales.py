@@ -6,7 +6,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer, MXFP8Tensor
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
@@ -17,7 +16,7 @@ GUARD = 256  # Bytes on each side of a scale view that quantization must leave u
 
 def _make_quantizer(rowwise, columnwise, with_2d_quantization):
     quantizer = MXFP8Quantizer(
-        tex.DType.kFloat8E4M3,
+        te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
         with_2d_quantization=with_2d_quantization,
@@ -48,7 +47,7 @@ def _make_output(shape, scale_shapes, rowwise, columnwise, with_2d_quantization,
         rowwise_scale_inv=scale_view("rowwise") if rowwise else None,
         columnwise_data=data() if columnwise else None,
         columnwise_scale_inv=scale_view("columnwise") if columnwise else None,
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         quantizer=_make_quantizer(rowwise, columnwise, with_2d_quantization),
         with_gemm_swizzled_scales=False,
     )

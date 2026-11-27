@@ -709,8 +709,8 @@ def _check_ue5m3_gemm_versus_dequantized(
     w = torch.randn(w_shape, dtype=dtype, device=device)
 
     common = dict(
-        fp4_dtype=tex.DType.kFloat4E2M1,
-        scale_dtype=tex.DType.kFloat8UE5M3,
+        fp4_dtype=te.DType.kFloat4E2M1,
+        scale_dtype=te.DType.kFloat8UE5M3,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,
@@ -821,8 +821,8 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
     x = torch.randn((M, K), dtype=dtype, device=device)
     w = torch.randn((N, K), dtype=dtype, device=device)
     quantizer = NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
-        scale_dtype=tex.DType.kFloat8UE5M3,
+        fp4_dtype=te.DType.kFloat4E2M1,
+        scale_dtype=te.DType.kFloat8UE5M3,
         rowwise=True,
         columnwise=True,
         with_rht=False,

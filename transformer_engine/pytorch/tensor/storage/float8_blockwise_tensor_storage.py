@@ -7,7 +7,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Annotated, Optional, Dict, Any, Tuple, Union
+from typing import Annotated, Optional, Dict, Any, Tuple
 import torch
 
 import transformer_engine_torch as tex
@@ -133,7 +133,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: Union[DType, tex.DType],
+        fp8_dtype: DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
@@ -148,7 +148,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = DType.cast(fp8_dtype)
+        instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled

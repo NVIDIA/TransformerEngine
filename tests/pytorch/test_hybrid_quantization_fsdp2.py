@@ -10,7 +10,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 
 from hybrid_quantization_utils import (
     as_data_tensor_tuple as _as_data_tensor_tuple,
@@ -118,7 +117,7 @@ def _get_dispatch_hybrid_param(config_name):
         return _make_hybrid_param_for_dispatch(
             _mxfp8_factory,
             _mxfp8_factory,
-            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
+            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E5M2),
         )
     else:
         raise ValueError(f"Unknown config: {config_name}")
@@ -145,7 +144,7 @@ class TestFloat8TransposeOnlySplit:
             data=None,
             data_transpose=data_transpose,
             fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             requires_grad=False,
             device="cuda",
         )
@@ -197,7 +196,7 @@ class TestFloat8TransposeOnlySplit:
             data=None,
             data_transpose=data_transpose,
             fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             fake_dtype=torch.bfloat16,
         )
 
@@ -254,14 +253,14 @@ class TestFloat8TransposeOnlySplit:
         """Build transpose-only storage with known, numerically valid FP8 bytes."""
         source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
         rowwise_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             device="cuda",
             rowwise=True,
             columnwise=False,
         )
         rowwise = rowwise_quantizer(source)
         columnwise_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             device="cuda",
             rowwise=False,
             columnwise=True,
@@ -272,7 +271,7 @@ class TestFloat8TransposeOnlySplit:
             data=None,
             data_transpose=rowwise._data.movedim(-1, 0).contiguous(),
             fp8_scale_inv=rowwise._scale_inv.detach().clone(),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             quantizer=columnwise_quantizer,
             requires_grad=False,
             device="cuda",
@@ -520,13 +519,13 @@ class TestHybridNewZeros:
     def test_initializes_float8_block_data_and_scale_buffers(self):
         quantizer = HybridQuantizer(
             rowwise_quantizer=Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 block_scaling_dim=2,
             ),
             columnwise_quantizer=Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 block_scaling_dim=2,
@@ -622,8 +621,8 @@ class TestHybridTorchDispatchFSDP2Ops:
     def test_split_rejects_mxfp8_high_precision_fallback(self):
         """Fail before wrapping unquantizable MXFP8 shards for Hybrid FSDP2."""
         quantizer = HybridQuantizer(
-            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
+            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
         )
         tensor = quantizer(torch.randn(64, 64, dtype=torch.bfloat16, device="cuda"))
 
@@ -1265,14 +1264,14 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         byte_quantizer = Float8Quantizer(
             scale=torch.ones(1, device="cuda", dtype=torch.float32),
             amax=torch.zeros(1, device="cuda", dtype=torch.float32),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
         )
         rowwise = byte_quantizer(source)
         if quantizer is None:
             quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
                 rowwise=False,
                 columnwise=True,
@@ -1283,7 +1282,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
             data=None,
             data_transpose=rowwise._data.movedim(-1, 0).contiguous(),
             fp8_scale_inv=rowwise._scale_inv.clone(),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             quantizer=quantizer,
             requires_grad=False,
             device="cuda",
@@ -1295,7 +1294,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         quantizer = HybridQuantizer(
             rowwise_quantizer=IdentityQuantizer(),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
             ),
         )
@@ -1387,7 +1386,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
 
     def test_fsdp_buffer_fields_falls_back_to_data_when_both_present(self):
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device="cuda",
         )
         out = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
@@ -1412,7 +1411,7 @@ class TestPerTensorFloat8ColumnwiseOnlyGuard:
     def _make_quantizer(scaling):
         if scaling == "current":
             return Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 device="cuda",
                 rowwise=False,
                 columnwise=True,
@@ -1420,7 +1419,7 @@ class TestPerTensorFloat8ColumnwiseOnlyGuard:
         return Float8Quantizer(
             scale=torch.ones(1, device="cuda", dtype=torch.float32),
             amax=torch.zeros(1, device="cuda", dtype=torch.float32),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=False,
             columnwise=True,
         )

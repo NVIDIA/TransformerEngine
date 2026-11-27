@@ -1786,7 +1786,7 @@ def _fused_attn_forward_impl(
         # q, k, v:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
         # q_fp8, k_fp8, v_fp8: Float8Tensor/MXFP8Tensor;
         #                      dtype = torch.float16 or torch.bfloat16
-        #                      fp8_dtype = tex.DType.kFloat8E4M3
+        #                      fp8_dtype = DType.kFloat8E4M3
         if is_input_fp8:
             q_fp8, k_fp8, v_fp8 = q, k, v
 
@@ -1818,7 +1818,7 @@ def _fused_attn_forward_impl(
 
         # out_:
         # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
-        #                                     fp8_dtype = tex.DType.kFloat8E4M3
+        #                                     fp8_dtype = DType.kFloat8E4M3
         # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
         # MXFP8BlockScaling:    torch.Tensor; dtype = torch.float16 or torch.bfloat16
         out_, aux_ctx_tensors, *_ = fused_attn_fwd(
@@ -1856,7 +1856,7 @@ def _fused_attn_forward_impl(
         )
 
         # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
-        #                        fp8_dtype = tex.DType.kFloat8E4M3
+        #                        fp8_dtype = DType.kFloat8E4M3
         # out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
         out_fp8 = out_
         out_f16 = out_
@@ -2164,7 +2164,7 @@ def _fused_attn_backward_impl(
     d_out = args.grad_output
     # d_out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
     # d_out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
-    #                          fp8_dtype = tex.DType.kFloat8E5M2
+    #                          fp8_dtype = DType.kFloat8E5M2
     if not isinstance(d_out, QuantizedTensorStorage) and not args.use_FAv2_bwd:
         d_out = d_out.contiguous()
     d_out_fp8 = None
@@ -2259,20 +2259,20 @@ def _fused_attn_backward_impl(
 
                 # DelayedScaling/Float8CurrentScaling/MXFP8BlockScaling:
                 #   q_fp8, k_fp8, v_fp8:        Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16,
-                #                               fp8_dtype = tex.DType.kFloat8E4M3
+                #                               fp8_dtype = DType.kFloat8E4M3
                 #   d_out_fp8:                  Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
-                #                               fp8_dtype = tex.DType.kFloat8E5M2
+                #                               fp8_dtype = DType.kFloat8E5M2
                 # DelayedScaling:
                 #   out_:                       Float8Tensor; dtype = torch.float16 or torch.bfloat16
-                #                               fp8_dtype = tex.DType.kFloat8E4M3
+                #                               fp8_dtype = DType.kFloat8E4M3
                 #   dq_, dk_, dv_:              Float8Tensor; dtype = torch.float16 or torch.bfloat16
-                #                               fp8_dtype = tex.DType.kFloat8E5M2
+                #                               fp8_dtype = DType.kFloat8E5M2
                 # Float8CurrentScaling:
                 #   out_:                       NVTE_DPA_FP8CS_O_in_F16=1:
                 #                               torch.Tensor; dtype = torch.float16 or torch.bfloat16
                 #                               NVTE_DPA_FP8CS_O_in_F16=0:
                 #                               Float8Tensor; dtype = torch.float16 or torch.bfloat16
-                #                               fp8_dtype = tex.DType.kFloat8E4M3
+                #                               fp8_dtype = DType.kFloat8E4M3
                 #   dq_, dk_, dv_:              torch.Tensor; dtype = torch.float16 or torch.bfloat16
                 # MXFP8BlockScaling:
                 #   out_, dq_, dk_, dv_, d_out: torch.Tensor; dtype = torch.float16 or torch.bfloat16

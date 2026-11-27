@@ -40,14 +40,14 @@ class MXFP8Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: Union[DType, tex.DType],
+        fp8_dtype: DType,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
         with_2d_quantization: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = DType.cast(fp8_dtype)
+        self.dtype = fp8_dtype
         self.with_2d_quantization = with_2d_quantization
 
     def copy(self) -> MXFP8Quantizer:
@@ -245,9 +245,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     ----------
     data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
-                optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
-                is accepted for backward compatibility.
+    fp8_dtype : transformer_engine.pytorch.DType,
+                optional, default = kFloat8E4M3 FP8 format.
     fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must

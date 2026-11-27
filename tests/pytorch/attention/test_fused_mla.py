@@ -115,7 +115,7 @@ def _reference_q_uproj(
     """Unfused bf16 reference: dequantize-then-GEMM + RoPE. Returns [s, b, nh, head_dim] bf16."""
     if isinstance(w, MXFP8Tensor):
         x_dq = (
-            MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(x)
+            MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)(x)
             .dequantize()
             .to(torch.bfloat16)
         )
@@ -172,8 +172,8 @@ def test_fused_mla_q_uproj(tokens: int, fp8_weight: bool) -> None:
     x = torch.randn(tokens, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
     w_raw = torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
     if fp8_weight:
-        w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(w_raw)
-        x_run = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(x)
+        w = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)(w_raw)
+        x_run = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)(x)
     else:
         w = w_raw
         x_run = x
@@ -223,7 +223,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
     w_bf16 = torch.randn(
         PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True
     )
-    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
+    w = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
     eps = 1.0e-6
     normalization = "RMSNorm"
     zero_centered_gamma = False
@@ -234,7 +234,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
     from transformer_engine.pytorch.module._common import apply_normalization
 
     x2d = x.detach().reshape(tokens, Q_LORA_RANK).contiguous()
-    x_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    x_quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
     ln_out, _, rsigma = apply_normalization(
         x2d,
         None,
@@ -300,7 +300,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
         REMOVE_INTERLEAVING=False,
     )
     dq2d = dq3.reshape(tokens, PROJ_DIM).contiguous()
-    gy_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    gy_quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
     gy_quantizer.optimize_for_gemm = True
     gy = gy_quantizer(dq2d)
 
@@ -351,7 +351,7 @@ MXFP8_BUFFERS = ("_rowwise_data", "_rowwise_scale_inv", "_columnwise_data", "_co
 
 
 def _kv_quantizer():
-    return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
 
 
 def _kv_rope_inputs(s, b, h, cos_dtype, seed=1234):
@@ -447,7 +447,7 @@ def test_2d_quantizer_rejected():
     """The kernel quantizes 1D blocks, so 2D MXFP8 quantizers are rejected."""
     kv, k_rope, cos, sin = _kv_rope_inputs(128, 1, 4, torch.bfloat16)
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True, with_2d_quantization=True
+        fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True, with_2d_quantization=True
     )
     with pytest.raises(RuntimeError, match="2D MXFP8 quantization"):
         fused_mla_kv_rope_mxfp8(kv, k_rope, cos, sin, HEAD_DIM_V, quantizer, quantizer)

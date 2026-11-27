@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch import MXFP8Quantizer
 from transformer_engine.pytorch.quantization import (
@@ -199,7 +198,7 @@ def test_mxfp8_2d_quantize_scales_match_known_block_amax(columnwise: bool) -> No
             x[row_start, col_start] = amax
 
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=columnwise,
         with_2d_quantization=True,
@@ -250,7 +249,7 @@ def test_mxfp8_2d_quantize_matches_torch_reference(
     x = torch.randn(shape, dtype=dtype, device="cuda")
 
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=columnwise,
         with_2d_quantization=True,
@@ -314,13 +313,13 @@ def test_mxfp8_2d_quantize_rowwise_only_matches_bidirectional(
     x = torch.randn(shape, dtype=dtype, device="cuda")
 
     rowwise_only_quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=False,
         with_2d_quantization=True,
     )
     bidirectional_quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
         with_2d_quantization=True,
@@ -368,7 +367,7 @@ def test_mxfp8_2d_quantize_bidirectional_scales_match(
     x = torch.randn(shape, dtype=dtype, device="cuda")
 
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
         with_2d_quantization=True,
@@ -471,7 +470,7 @@ def test_mxfp8_recipe_state_2d_ignores_unsupported_roles() -> None:
 def test_mxfp8_quantizer_copy_preserves_2d_flag() -> None:
     """MXFP8Quantizer.copy should preserve the 2D quantization setting."""
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=True,
         columnwise=False,
         with_2d_quantization=True,
