@@ -399,6 +399,22 @@ class MXFP8BlockScaling(Recipe):
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     enable_2d_quantization : bool, default = False
                 If set to `True`, 2D block scaling is used for weight tensors.
+    fp8_dpa_causal_own_block : bool, default = False
+                With `fp8_dpa=True` and a causal mask, keep each query's attention independent
+                of future tokens. A columnwise MXFP8 V scale is shared by 32 consecutive tokens,
+                so ordinary causal MXFP8 attention lets a later token in a query's own 32-token
+                block change how earlier, visible values are rounded. With this option, cuDNN
+                computes MXFP8 attention over completed 32-token blocks only, a Triton kernel
+                adds each query's own block using V scaled per token, and the backward runs in
+                high precision on the decoded MXFP8 Q/K and the per-token-scaled V (the
+                completed-block forward read V with its columnwise MXFP8 scales, so, as with
+                `NVTE_FP8_DPA_BWD=0`, the backward differentiates slightly different operands).
+                Requires SM100/SM103, a cuDNN Frontend whose `sdpa_mxfp8` accepts
+                `causal_exclude_own_block`, separate BSHD or SBHD Q/K/V with head dimension 128,
+                sequence lengths that are equal and divisible by 128, no dropout, bias, softmax
+                offset or context parallelism. Only FusedAttention runs it: when it cannot, no
+                other backend is used and DotProductAttention raises an error. Defaults to the
+                environment variable `NVTE_FP8_DPA_CAUSAL_OWN_BLOCK`.
     """
 
     margin: int = 0
@@ -407,6 +423,7 @@ class MXFP8BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     enable_2d_quantization: bool = False
+    fp8_dpa_causal_own_block: bool = os.getenv("NVTE_FP8_DPA_CAUSAL_OWN_BLOCK", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
@@ -420,7 +437,8 @@ class MXFP8BlockScaling(Recipe):
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"backward_override={self.backward_override}, "
-            f"enable_2d_quantization={self.enable_2d_quantization}"
+            f"enable_2d_quantization={self.enable_2d_quantization}, "
+            f"fp8_dpa_causal_own_block={self.fp8_dpa_causal_own_block}"
         )
 
 

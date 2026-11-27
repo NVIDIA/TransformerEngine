@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Union, List
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
+from transformer_engine.pytorch.constants import QKVFormat
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import canonicalize_device
 

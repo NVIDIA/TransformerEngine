@@ -5,5 +5,5 @@
 """Python interface for c++ extensions"""
 from transformer_engine_torch import *
 
-from .fused_attn import *
+from .cudnn_fused_attn import fused_attn_fwd, fused_attn_bwd
 from .gemm import *

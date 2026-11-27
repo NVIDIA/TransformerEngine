@@ -13,9 +13,58 @@
 #include <gtest/gtest.h>
 
 #include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/utils.h>
 #include "../test_common.h"
 
 class SplitsToOffsetsTestSuite : public ::testing::TestWithParam<std::tuple<size_t, int64_t>> {};
+
+TEST(SequenceLengthsTest, ConvertAndPad) {
+  using namespace transformer_engine;
+  for (const size_t batch : {0, 3, 129, 513}) {
+    for (const size_t padding : {0, 7}) {
+      const size_t capacity = batch + padding;
+      SCOPED_TRACE(::testing::Message() << "batch=" << batch << ", capacity=" << capacity);
+      test::Tensor cu_q("cu_q", std::vector<size_t>{batch + 1}, DType::kInt32);
+      test::Tensor cu_kv("cu_kv", std::vector<size_t>{batch + 1}, DType::kInt32);
+      test::Tensor seq_q("seq_q", std::vector<size_t>{capacity}, DType::kInt32);
+      test::Tensor seq_kv("seq_kv", std::vector<size_t>{capacity}, DType::kInt32);
+      auto *q = cu_q.rowwise_cpu_dptr<int32_t>();
+      auto *kv = cu_kv.rowwise_cpu_dptr<int32_t>();
+      q[0] = kv[0] = 0;
+      for (size_t i = 0; i < batch; ++i) {
+        q[i + 1] = q[i] + i % 7;
+        kv[i + 1] = kv[i] + i % 11;
+      }
+      cu_q.from_cpu();
+      cu_kv.from_cpu();
+      nvte_cu_seqlens_to_actual_seqlens(cu_q.data(), cu_kv.data(), seq_q.data(), seq_kv.data(),
+                                      nullptr);
+      seq_q.to_cpu();
+      seq_kv.to_cpu();
+      for (size_t i = 0; i < capacity; ++i) {
+        EXPECT_EQ(seq_q.rowwise_cpu_dptr<int32_t>()[i], i < batch ? i % 7 : 0);
+        EXPECT_EQ(seq_kv.rowwise_cpu_dptr<int32_t>()[i], i < batch ? i % 11 : 0);
+      }
+    }
+  }
+}
+
+TEST(SequenceLengthsTest, RejectInvalidMetadata) {
+  using namespace transformer_engine;
+  test::Tensor cu("cu", std::vector<size_t>{3}, DType::kInt32);
+  test::Tensor lengths("lengths", std::vector<size_t>{2}, DType::kInt32);
+  test::Tensor small("small", std::vector<size_t>{1}, DType::kInt32);
+  test::Tensor wrong_type("wrong_type", std::vector<size_t>{2}, DType::kInt64);
+  test::Tensor wrong_rank("wrong_rank", std::vector<size_t>{1, 2}, DType::kInt32);
+  EXPECT_ANY_THROW(nvte_cu_seqlens_to_actual_seqlens(cu.data(), small.data(), lengths.data(),
+                                                  lengths.data(), nullptr));
+  EXPECT_ANY_THROW(nvte_cu_seqlens_to_actual_seqlens(cu.data(), cu.data(), small.data(),
+                                                  small.data(), nullptr));
+  EXPECT_ANY_THROW(nvte_cu_seqlens_to_actual_seqlens(cu.data(), cu.data(), wrong_type.data(),
+                                                  wrong_type.data(), nullptr));
+  EXPECT_ANY_THROW(nvte_cu_seqlens_to_actual_seqlens(cu.data(), cu.data(), wrong_rank.data(),
+                                                  wrong_rank.data(), nullptr));
+}
 
 TEST_P(SplitsToOffsetsTestSuite, TestSplitsToOffsets) {
   const size_t num_tensors = std::get<0>(GetParam());
