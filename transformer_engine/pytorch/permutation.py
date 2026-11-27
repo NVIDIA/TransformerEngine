@@ -560,8 +560,9 @@ def _moe_permute_mask_map_backward_wrapper(
 
     row_id_map, pad_offsets = ctx.saved_tensors
 
-    # Pass permuted_probs_grad only if it has content
-    probs_grad_input = grad_permuted_probs if grad_permuted_probs.numel() > 0 else None
+    # Pass permuted_probs_grad only when probs need a gradient. Its size cannot tell:
+    # with num_out_tokens == 0 it is empty even though probs need a (zero) gradient.
+    probs_grad_input = grad_permuted_probs if ctx.needs_probs_grad else None
 
     act_grad, probs_grad = torch.ops.te_moe.permute_mask_map_bwd(
         grad_output,
@@ -600,8 +601,6 @@ def moe_unpermute_mask_map_forward(
 ) -> torch.Tensor:
     """Forward pass for MoE unpermute with mask router map."""
     if not inp.numel():
-        if num_tokens == 0:
-            return inp.clone()
         # No permuted rows (e.g. no token was routed to these experts): every
         # token receives nothing, so the output is zero.
         return torch.zeros((num_tokens, hidden_size), dtype=inp.dtype, device=inp.device)

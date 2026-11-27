@@ -1799,83 +1799,23 @@ def test_permutation_mask_map_capacity_drop(torch_dtype, num_tokens):
     assert_close(unperm, ref_unperm)
 
 
-@pytest.mark.parametrize("torch_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize(
-    "op, routed",
-    [
-        ("permute", False),
-        ("permute", True),
-        ("permute_with_probs", False),
-        ("permute_with_probs", True),
-        ("permute_and_pad_with_probs", False),
-    ],
-)
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("use_torch_compile", [False, True])
-def test_permutation_mask_map_zero_out_tokens(torch_dtype, op, routed, use_torch_compile):
-    """Non-empty input with num_out_tokens == 0.
-
-    routed=False: no token is routed to any expert, e.g. an expert-parallel rank whose
-    local experts were not selected. routed=True: tokens are routed but the capacity is
-    zero, so every entry is dropped. Both must give an empty permuted buffer, a zero
-    unpermuted output and zero gradients."""
-    if use_torch_compile and op == "permute_and_pad_with_probs":
-        pytest.skip("moe_permute_and_pad_with_probs reads tokens_per_expert on the host")
-    num_tokens, num_expert, hidden_size = 64, 8, 128
-    torch.manual_seed(1234)
-    if routed:
-        routing_map = (torch.rand(num_tokens, num_expert) > 0.5).bool().cuda()
-        assert int(routing_map.sum()) > 0
-    else:
-        routing_map = torch.zeros(num_tokens, num_expert, dtype=torch.bool, device="cuda")
-    inp = torch.randn(num_tokens, hidden_size, device="cuda", dtype=torch_dtype)
-    inp.requires_grad_(True)
-    probs = torch.rand(num_tokens, num_expert, device="cuda", requires_grad=True)
-
-    def fn(inp, probs):
-        permuted_probs = None
-        if op == "permute":
-            out, row_id_map = te_permute(inp, routing_map, num_out_tokens=0, map_type="mask")
-            merging_probs = None
-        elif op == "permute_with_probs":
-            out, permuted_probs, row_id_map = te_permute_with_probs(
-                inp, probs, routing_map, num_out_tokens=0
-            )
-            merging_probs = probs
-        else:
-            tokens_per_expert = torch.zeros(num_expert, dtype=torch.int64, device="cuda")
-            out, permuted_probs, row_id_map, _, padded_tokens_per_expert = (
-                te_permute_and_pad_with_probs(
-                    inp, probs, routing_map, tokens_per_expert, align_size=16
-                )
-            )
-            assert int(padded_tokens_per_expert.sum()) == 0
-            merging_probs = None
-        restored = te_unpermute(
-            out,
-            row_id_map,
-            merging_probs=merging_probs,
-            restore_shape=inp.shape,
-            map_type="mask",
-        )
-        return out, permuted_probs, restored
-
-    out, permuted_probs, restored = _maybe_compile(fn, use_torch_compile)(inp, probs)
-    assert out.shape == (0, hidden_size)
-    if permuted_probs is not None:
-        assert permuted_probs.shape == (0,)
-    assert restored.shape == (num_tokens, hidden_size)
-    torch.testing.assert_close(restored, torch.zeros_like(restored), atol=0, rtol=0)
-
-    loss = (restored.float() * torch.randn_like(restored, dtype=torch.float32)).sum()
-    if permuted_probs is not None:
-        loss = loss + permuted_probs.sum()
-    loss.backward()
-    torch.testing.assert_close(inp.grad, torch.zeros_like(inp), atol=0, rtol=0)
-    if op == "permute_with_probs":
-        # merging_probs feeds the unpermute, so probs must receive a (zero) gradient.
-        assert probs.grad is not None
-    if probs.grad is not None:
-        torch.testing.assert_close(probs.grad, torch.zeros_like(probs), atol=0, rtol=0)
+def test_permutation_mask_map_zero_out_tokens(te_dtype, use_torch_compile):
+    """Non-empty input whose routing map routes no token (num_out_tokens == 0), e.g. an
+    expert-parallel rank whose local experts were not selected."""
+    kwargs = dict(
+        te_dtype=te_dtype,
+        num_tokens=256,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        use_torch_compile=use_torch_compile,
+    )
+    _test_permutation_mask_map(with_probs=True, **kwargs)
+    _test_permutation_mask_map_alongside_probs(tp_size=1, **kwargs)
+    _test_permutation_and_padding_mask_map(with_merging_probs=True, **kwargs)
 
 
 def test_permutation_mask_map_rejects_negative_out_tokens():
