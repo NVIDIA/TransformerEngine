@@ -438,11 +438,44 @@ requirements, while the implementation contains the current checks. For example,
 see the `fusion eligibility checks in Transformer Engine v2.19
 <https://github.com/NVIDIA/TransformerEngine/blob/5e52befd5262c06289106338c308079d6adb391f/transformer_engine/pytorch/ops/fused/grouped_mlp.py#L789-L868>`_.
 
-For GLU fusion, use ``glu_interleave_size=32``: FC1 must produce alternating
-blocks of 32 gate features and 32 value features. When loading a checkpoint
-whose FC1 outputs store all gate features before all value features, convert
-each expert's FC1 weight and bias with ``te.interleave_glu_tensor(tensor, 32)``.
-``ScaledClampedQGeGLU`` uses the same layout. For ``ScaledSReLU``, FC1 instead
+SwiGLU fusion supports two FC1 parameter layouts:
+
+* With ``glu_interleave_size=32``, gate and up features alternate in blocks of
+  32. To load weights stored with all gate features before all up features,
+  convert each expert's FC1 weight and bias with
+  ``te.interleave_glu_tensor(tensor, 32)``.
+* With ``glu_interleave_size=None``, gate features precede up features. FC1
+  weights and biases in this conventional ``[gate | up]`` order can be loaded
+  without interleaving.
+
+The activation setting must match the FC1 parameter layout. Changing the setting
+does not convert an existing checkpoint: the training framework must keep model
+parameters and optimizer state consistent when switching layouts.
+
+The uninterleaved fused path supports BF16, MXFP8 with E8M0 scales, and NVFP4
+with E4M3 scales on SM100, SM103, and SM107. It requires an FFN dimension
+divisible by 128. SM107 additionally requires cuDNN Frontend kernels that
+explicitly advertise support for this layout on that architecture; a version
+number alone is not sufficient. TE uses each kernel's architecture-specific
+preferred tile when available. When the installed cuDNN Frontend lacks the
+required capabilities, TE uses separate operations. Custom recipes must
+explicitly enable grouped MLP fusion and use compatible quantizers.
+NVFP4 with UE5M3 scales is additionally supported on SM107 when the GLU and
+dGLU wrappers advertise ``supports_gate_then_up_sf_fp8_dtype_overrides=("e5m3",)``.
+The RHT+quant wrapper must advertise that capability separately. With
+second-level activation scaling enabled, UE5M3 uses ordinary GLU followed
+by separate RHT and quantization: the RHT+amax wrapper has no UE5M3 override.
+TE does not disable second-level scaling to select a fusion. Deterministic
+block-scaled fusion on SM107 remains unsupported. The cuBLAS UE5M3 version
+requirement still applies to paths that use cuBLAS rather than these FE kernels.
+
+FC1 can fuse GEMM with SwiGLU; MXFP8 also fuses quantization. Depending on the
+recipe, NVFP4 can additionally fuse a randomized Hadamard transform (RHT) with
+amax computation or quantization. Both GLU layouts support these fusions.
+For non-distributed parameters, BF16 and MXFP8 support separate per-expert
+weights or a single grouped weight; NVFP4 requires separate per-expert weights.
+
+``ScaledClampedQGeGLU`` uses the interleaved layout. For ``ScaledSReLU``, FC1
 produces ``ffn_hidden_size`` features, without the GLU's doubled width.
 
 ``ScaledSwiGLU`` multiplies the activation output by the routing weights before

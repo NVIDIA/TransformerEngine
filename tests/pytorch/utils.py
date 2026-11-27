@@ -43,6 +43,7 @@ nvfp4_variant_names: Tuple[str, ...] = (
     "nvfp4_row_scaled",
     "nvfp4_4over6",
     "nvfp4_rht",
+    "nvfp4_rht_e4m3_input_unit_scale",
     "nvfp4_ue5m3",
     "nvfp4_rht_ue5m3",
 )
@@ -163,16 +164,21 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3"):
+    if name in ("nvfp4_rht_e4m3_input_unit_scale", "nvfp4_ue5m3", "nvfp4_rht_ue5m3"):
 
-        def make_nvfp4_ue5m3_quantizer(role: QuantizerRole) -> NVFP4Quantizer:
-            """Quantizer factory for NVFP4-UE5M3 recipe."""
+        def make_nvfp4_quantizer(role: QuantizerRole) -> NVFP4Quantizer:
+            """NVFP4 with unit second-level scales for inputs, retaining gradient scaling."""
             tensor_type = role.tensor_type if role is not None else None
             if not tensor_type:
                 tensor_type = "input"
-            with_rht = name == "nvfp4_rht_ue5m3" and tensor_type != "weight"
+            with_rht = name != "nvfp4_ue5m3" and tensor_type != "weight"
+            scale_dtype = (
+                DType.kFloat8E4M3
+                if name == "nvfp4_rht_e4m3_input_unit_scale"
+                else DType.kFloat8UE5M3
+            )
             return NVFP4Quantizer(
-                scale_dtype=DType.kFloat8UE5M3,
+                scale_dtype=scale_dtype,
                 with_rht=with_rht,
                 with_post_rht_amax=with_rht,
                 with_2d_quantization=False,
@@ -182,7 +188,7 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             )
 
         recipe = transformer_engine.common.recipe.CustomRecipe(
-            qfactory=make_nvfp4_ue5m3_quantizer,
+            qfactory=make_nvfp4_quantizer,
             **recipe_kwargs,
         )
         recipe.enable_cutedsl_fused_grouped_mlp = True
