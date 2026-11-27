@@ -499,7 +499,7 @@ class TestFloat8Tensor:
             data=data,
             data_transpose=transpose,
             fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device="cuda",
         )
 
