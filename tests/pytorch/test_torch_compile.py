@@ -6,6 +6,7 @@ import abc
 import contextlib
 import copy
 import dataclasses
+import logging
 import os
 import re
 import subprocess
@@ -2993,6 +2994,43 @@ def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
         inner = getattr(expected_dx, name)
         assert inner.shape == inner_shape
         assert inner.dtype == inner_dtype
+
+
+@pytest.mark.parametrize(
+    "quantizer_type",
+    [
+        pytest.param(
+            "mxfp8", marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+        ),
+        pytest.param(
+            "nvfp4", marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+        ),
+    ],
+)
+def test_te_ops_bias_quantized_dynamic_with_trace_log(quantizer_type, monkeypatch):
+    """A structured-trace handler (TORCH_TRACE, pytest log capture) makes AOTAutograd
+    repr the fake quantized output; the repr must not specialize dynamic dims."""
+    if quantizer_type == "mxfp8":
+        quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    else:
+        quantizer = NVFP4Quantizer(columnwise=True, with_random_sign_mask=False)
+
+    def bgrad(inp):
+        dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
+        return dx, db
+
+    trace_log = logging.getLogger("torch.__trace")
+    monkeypatch.setattr(trace_log, "handlers", [*trace_log.handlers, logging.NullHandler()])
+    torch._dynamo.reset()
+    compiled, graphs = _compile_with_graphs(bgrad)
+    for shape in ((128, 128), (256, 256)):
+        inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(inp, (0, 1))
+        dx, db = compiled(inp)
+        expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+        torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+    assert len(graphs) == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

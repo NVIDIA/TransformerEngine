@@ -497,6 +497,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
+        # Data-free repr for fake/meta data (exact class check: fake /
+        # functional tensors subclass Tensor); dequantizing under tracing
+        # would add guards that specialize dynamic dims.
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None and (data.__class__ is not torch.Tensor or data.is_meta):
+            return safe_quantized_repr(self, "NVFP4Tensor")
         try:
             return f"NVFP4Tensor, data={self.dequantize()})"
         except Exception as exc:  # pylint: disable=broad-except
