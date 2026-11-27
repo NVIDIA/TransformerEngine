@@ -380,6 +380,15 @@ struct AdamFunctor {
   }
 };
 
+// 1 - beta^step for the capturable kernels, which read step from device memory.
+// Computed in FP32 as -expm1(step * log(beta)): pow() on a float and an int promotes to
+// FP64, which is slow on GPUs with reduced FP64 throughput, while 1 - powf(beta, step)
+// loses precision to cancellation for beta close to 1. This stays within ~2 ulp of the
+// FP64 result for beta in [0.9, 0.9999] and step up to 1e6.
+__device__ __forceinline__ float bias_correction_factor(const float beta, const int step) {
+  return -expm1f(static_cast<float>(step) * logf(beta));
+}
+
 template <typename PARAM_T, typename GRAD_T, typename MOMENT_T, typename index_t>
 struct AdamCapturableFunctor {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
@@ -394,8 +403,8 @@ struct AdamCapturableFunctor {
       bias_corrections[0] = 1.0f;
       bias_corrections[1] = 1.0f;
       if (bias_correction == 1) {
-        bias_corrections[0] = 1 - pow(beta1, *step);
-        bias_corrections[1] = 1 - pow(beta2, *step);
+        bias_corrections[0] = bias_correction_factor(beta1, *step);
+        bias_corrections[1] = bias_correction_factor(beta2, *step);
       }
     }
     __syncthreads();
@@ -510,8 +519,8 @@ struct AdamCapturableMasterFunctor {
       bias_corrections[0] = 1.0f;
       bias_corrections[1] = 1.0f;
       if (bias_correction == 1) {
-        bias_corrections[0] = 1 - pow(beta1, *step);
-        bias_corrections[1] = 1 - pow(beta2, *step);
+        bias_corrections[0] = bias_correction_factor(beta1, *step);
+        bias_corrections[1] = bias_correction_factor(beta2, *step);
       }
     }
     __syncthreads();
