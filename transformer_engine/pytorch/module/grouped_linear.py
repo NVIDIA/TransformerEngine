@@ -296,18 +296,6 @@ class GroupedLinearBwdArgs:
         self.biases = saved[3 * n : 3 * n + self.num_bias_args]
 
 
-def _disable_input_bulk_allocation(args: GroupedLinearFwdArgs) -> bool:
-    if not args.cpu_offloading:
-        return False
-    if args.min_offloaded_tensor_size is None or not isinstance(
-        args.input_quantizers[0], (Float8BlockQuantizer, MXFP8Quantizer)
-    ):
-        return True
-    # A retained nonempty expert view would pin the other experts' data.
-    width = args.inp.size(-1)
-    return any(0 < rows * width < args.min_offloaded_tensor_size for rows in args.m_splits)
-
-
 def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
     """Configure per-expert quantizers for the split-quantize path after materialization.
 
@@ -387,17 +375,30 @@ def _grouped_linear_forward_impl(
         )
 
     inp_view = inp.reshape(-1, in_features)
+    offload_fp8_data = (
+        cpu_offloading
+        and args.min_offloaded_tensor_size is not None
+        and type(input_quantizers[0]) in (Float8BlockQuantizer, MXFP8Quantizer)
+    )
+    # A retained nonempty expert view would pin the other experts' data.
+    disable_bulk = cpu_offloading and (
+        not offload_fp8_data
+        or any(0 < rows * in_features < args.min_offloaded_tensor_size for rows in m_splits)
+    )
     inputmats, _ = _split_quantization._split_quantize(
         inp_view,
         m_splits,
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=_disable_input_bulk_allocation(args),
+        disable_bulk_allocation=disable_bulk,
     )
 
     if cpu_offloading:
         start_offload(*inputmats)
+        if offload_fp8_data:
+            for mat in inputmats:
+                mark_not_offload(mat._rowwise_scale_inv, mat._columnwise_scale_inv)
 
     # Initialize weights
     weights_fp8: list
