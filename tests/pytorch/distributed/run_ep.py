@@ -42,8 +42,6 @@ OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
 # that exercise it only run when the same env var is set so they match the active dispatch path.
 FUSED_COUNT = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
 
-# Must come after the transformer_engine import so libtransformer_engine.so is loaded.
-import transformer_engine_torch as tex  # noqa: F401
 
 NUM_LOCAL_EXPERTS = 2
 # MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0. Defaults
@@ -527,7 +525,7 @@ class TestEP(_EpTestCase):
     def _mxfp8_quantizer(self):
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
-        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+        return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
 
     def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
         """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens, per expert. Row

@@ -44,7 +44,7 @@ class Float8BlockQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: Union[DType, tex.DType],
+        fp8_dtype: DType,
         *,
         rowwise: bool,
         columnwise: bool,
@@ -53,7 +53,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = DType.cast(fp8_dtype)
+        self.dtype = fp8_dtype
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
@@ -276,9 +276,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     columnwise_scale_inv : Optional[torch.Tensor]
           FP32 dequantization scales in GEMM format for dequantizing columnwise_data.
 
-    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
-                optional, default = kFloat8E4M3. FP8 format. transformer_engine_torch.DType
-                is accepted for backward compatibility.
+    fp8_dtype : transformer_engine.pytorch.DType,
+                optional, default = kFloat8E4M3. FP8 format.
     quantizer : Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
     """

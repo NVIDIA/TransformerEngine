@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import pytest
 import torch
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import reference_utils
@@ -125,7 +124,6 @@ def check_quantization_nvfp4_versus_reference(
     scale_dtype: te.DType = te.DType.kFloat8E4M3,
     check_amax_reset: bool = False,
 ) -> None:
-    scale_dtype = te.DType.cast(scale_dtype)
     if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
         raise ValueError("nvfp4_e4m3_max must be 0, 256, 448, or 114688.")
     if use_4over6 and scale_dtype == te.DType.kFloat8UE5M3:
@@ -866,7 +864,7 @@ def test_nvfp4_columnwise_only_matches_both_directions(
     - non-bf16, or cols % 32 != 0, falls back to the columnwise-only 2D-amax-only
       pass in ``quantize_transpose_vector_blockwise_fp4.cu``.
     """
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
 
     torch.manual_seed(0)

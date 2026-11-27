@@ -14,7 +14,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import CustomRecipe
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
@@ -62,20 +61,20 @@ def identity_all_factory(role):  # pylint: disable=unused-argument
     return IdentityQuantizer()
 
 
-def _fp8_cs(fp8_dtype=tex.DType.kFloat8E4M3):
+def _fp8_cs(fp8_dtype=te.DType.kFloat8E4M3):
     return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
 
 
-def _mxfp8(fp8_dtype=tex.DType.kFloat8E4M3):
+def _mxfp8(fp8_dtype=te.DType.kFloat8E4M3):
     return MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
 
-def _float8_blockwise(fp8_dtype=tex.DType.kFloat8E4M3):
+def _float8_blockwise(fp8_dtype=te.DType.kFloat8E4M3):
     return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
 
 
 def _nvfp4():
-    return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    return NVFP4Quantizer(fp4_dtype=te.DType.kFloat4E2M1)
 
 
 _HYBRID_IDENTITY_FORMATS = [
@@ -124,11 +123,11 @@ _HYBRID_IDENTITY_RECOMPUTE_FORMATS = [
 
 def _format_quantizer(format_name):
     if format_name == "fp8_current":
-        return _fp8_cs(tex.DType.kFloat8E4M3)
+        return _fp8_cs(te.DType.kFloat8E4M3)
     if format_name == "mxfp8":
-        return _mxfp8(tex.DType.kFloat8E4M3)
+        return _mxfp8(te.DType.kFloat8E4M3)
     if format_name == "float8_blockwise":
-        return _float8_blockwise(tex.DType.kFloat8E4M3)
+        return _float8_blockwise(te.DType.kFloat8E4M3)
     if format_name == "nvfp4":
         return _nvfp4()
     raise ValueError(format_name)
@@ -151,10 +150,10 @@ def fwd_hp_bwd_fp8_factory(role):
     """High-precision forward, FP8 backward (per-direction via hybrid)."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _fp8_cs(tex.DType.kFloat8E5M2)
+        return _fp8_cs(te.DType.kFloat8E5M2)
     return HybridQuantizer(
         rowwise_quantizer=IdentityQuantizer(),
-        columnwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+        columnwise_quantizer=_fp8_cs(te.DType.kFloat8E4M3),
     )
 
 
@@ -164,7 +163,7 @@ def fwd_fp8_bwd_hp_factory(role):
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return IdentityQuantizer()
     return HybridQuantizer(
-        rowwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+        rowwise_quantizer=_fp8_cs(te.DType.kFloat8E4M3),
         columnwise_quantizer=IdentityQuantizer(),
     )
 
@@ -175,7 +174,7 @@ def fwd_fp8_bwd_rowwise_dequantized_hp_factory(role):
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return IdentityQuantizer()
     return HybridQuantizer(
-        rowwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+        rowwise_quantizer=_fp8_cs(te.DType.kFloat8E4M3),
         columnwise_quantizer=IdentityQuantizer(),
         columnwise_source="rowwise_dequantized",
     )
@@ -206,8 +205,8 @@ def fp8_fwd_factory(role):
     """
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _fp8_cs(tex.DType.kFloat8E5M2)
-    return _fp8_cs(tex.DType.kFloat8E4M3)
+        return _fp8_cs(te.DType.kFloat8E5M2)
+    return _fp8_cs(te.DType.kFloat8E4M3)
 
 
 def _offload_roundtrip(tensor):
@@ -323,14 +322,14 @@ class TestIdentityQuantizerUnit:
 
     def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
         cases = [
-            [IdentityQuantizer(), _mxfp8(tex.DType.kFloat8E4M3)],
+            [IdentityQuantizer(), _mxfp8(te.DType.kFloat8E4M3)],
             [
                 HybridQuantizer(
                     rowwise_quantizer=IdentityQuantizer(),
                     columnwise_quantizer=IdentityQuantizer(),
                 ),
                 HybridQuantizer(
-                    rowwise_quantizer=_mxfp8(tex.DType.kFloat8E4M3),
+                    rowwise_quantizer=_mxfp8(te.DType.kFloat8E4M3),
                     columnwise_quantizer=IdentityQuantizer(),
                 ),
             ],
@@ -392,10 +391,10 @@ class TestIdentityQuantizerUnit:
         def qfactory(role):
             if role is not None and role.module_type == "grouped_linear":
                 return HybridQuantizer(
-                    rowwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
-                    columnwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+                    rowwise_quantizer=_fp8_cs(te.DType.kFloat8E4M3),
+                    columnwise_quantizer=_fp8_cs(te.DType.kFloat8E4M3),
                 )
-            return _fp8_cs(tex.DType.kFloat8E4M3)
+            return _fp8_cs(te.DType.kFloat8E4M3)
 
         calls = []
 
@@ -440,8 +439,8 @@ class TestIdentityQuantizerUnit:
                     weight_count += 1
                     if weight_count == 1:
                         return IdentityQuantizer()
-                return _mxfp8(tex.DType.kFloat8E4M3)
-            return _mxfp8(tex.DType.kFloat8E4M3)
+                return _mxfp8(te.DType.kFloat8E4M3)
+            return _mxfp8(te.DType.kFloat8E4M3)
 
         model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
         x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
@@ -945,7 +944,7 @@ class TestIdentityQuantizerUnit:
     def test_torch_weights_only_load_preserves_hybrid_mxfp8_identity_tensor(self):
         x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
         q = HybridQuantizer(
-            rowwise_quantizer=_mxfp8(tex.DType.kFloat8E4M3),
+            rowwise_quantizer=_mxfp8(te.DType.kFloat8E4M3),
             columnwise_quantizer=IdentityQuantizer(),
         )
         t = q(x)
@@ -1215,7 +1214,7 @@ class TestIdentityTEModuleCoverage:
     @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
     def test_grouped_linear_mxfp8_forward_identity_backward_matches_override(self):
         def mxfp8_all_factory(role):  # pylint: disable=unused-argument
-            return _mxfp8(tex.DType.kFloat8E4M3)
+            return _mxfp8(te.DType.kFloat8E4M3)
 
         def run(model, x, recipe):
             x = x.detach().clone().requires_grad_(True)
@@ -1454,7 +1453,7 @@ def _fwd_bwd_zoo_dequantized_module(module_name, module, inp, recipe):
 
 
 def _mxfp8_all_qfactory(role):  # pylint: disable=unused-argument
-    return _mxfp8(tex.DType.kFloat8E4M3)
+    return _mxfp8(te.DType.kFloat8E4M3)
 
 
 def _zoo_dequantized_qfactory(case_name):

@@ -69,7 +69,7 @@ from typing import Callable, List, Optional, Tuple
 # IMPORTANT: import transformer_engine before torch to avoid cublasLt symbol-resolution
 # issues caused by torch's bundled CUDA libs.
 import transformer_engine.pytorch  # noqa: F401  - registers extension
-from transformer_engine.pytorch import MXFP8Quantizer
+from transformer_engine.pytorch import DType, MXFP8Quantizer
 import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_torch as tex
 import torch
@@ -176,7 +176,7 @@ def _make_first_dims(
 
 
 def _make_quantizer(swizzled_scales: bool) -> MXFP8Quantizer:
-    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+    quantizer = MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3)
     # The FC2 wgrad GEMM only consumes the columnwise operand.
     quantizer.set_usage(rowwise=False, columnwise=True)
     quantizer.optimize_for_gemm = swizzled_scales

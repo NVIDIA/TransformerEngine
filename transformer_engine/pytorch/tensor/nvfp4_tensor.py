@@ -148,8 +148,8 @@ class NVFP4Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp4_dtype: Union[DType, tex.DType] = DType.kFloat4E2M1,
-        scale_dtype: Union[DType, tex.DType] = DType.kFloat8E4M3,
+        fp4_dtype: DType = DType.kFloat4E2M1,
+        scale_dtype: DType = DType.kFloat8E4M3,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,
@@ -166,8 +166,8 @@ class NVFP4Quantizer(Quantizer):
         disable_second_level_scale: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = DType.cast(fp4_dtype)
-        self.scale_dtype = DType.cast(scale_dtype)
+        self.dtype = fp4_dtype
+        self.scale_dtype = scale_dtype
         if self.scale_dtype not in (DType.kFloat8E4M3, DType.kFloat8UE5M3):
             raise ValueError("scale_dtype must be DType.kFloat8E4M3 or DType.kFloat8UE5M3.")
         self.with_rht = with_rht

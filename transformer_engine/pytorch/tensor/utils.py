@@ -858,9 +858,7 @@ def _cast_master_weights_to_nvfp4_2d(
             "quantize_master_weights requires a single NVFP4 scale dtype per call, "
             f"but got {scale_dtypes}."
         )
-    # NVFP4Quantizer.scale_dtype is the pure-python constants.DType; the pybind
-    # entry points want tex.DType. The enum values are shared, so map by value.
-    scale_dtype = tex.DType(int(scale_dtypes.pop()))
+    scale_dtype = scale_dtypes.pop()
     tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor, scale_dtype=scale_dtype)
     global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 

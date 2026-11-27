@@ -24,7 +24,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex  # noqa: F401
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
     NVFP4TensorStorage,
@@ -68,7 +67,7 @@ def _unpack_quantized_tensor(
 
 def _make_quantizer(return_rowwise: bool, return_transpose: bool) -> NVFP4Quantizer:
     return NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=te.DType.kFloat4E2M1,
         rowwise=return_rowwise,
         columnwise=return_transpose,
         with_amax_reduction=False,

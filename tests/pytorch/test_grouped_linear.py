@@ -1571,7 +1571,7 @@ def _make_grouped_tensor_quantized_mxfp8(
     if not tensors:
         raise ValueError("Expected non-empty tensor list for grouped quantization.")
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -1594,7 +1594,7 @@ def _per_tensor_quantize_mxfp8(
     Used to build reference discrete inputs for grouped GEMM.
     """
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -1727,7 +1727,7 @@ def _tile_scaled_randn(shape, dtype) -> torch.Tensor:
 
 def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped, is_weight):
     quantizer = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
         force_pow_2_scales=True,
@@ -1912,11 +1912,11 @@ def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layou
     def _make_quantizer(*, rowwise, columnwise, is_weight, optimize_for_gemm=True):
         if quant_type == "mxfp8":
             quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
+                fp8_dtype=te.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
             )
         else:
             quantizer = Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=rowwise,
                 columnwise=columnwise,
                 force_pow_2_scales=True,
@@ -2060,7 +2060,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         Float8Quantizer(
             scale.clone(),
             amax.clone(),
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
         )
         for _ in range(z)
     ]
@@ -2068,7 +2068,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         Float8Quantizer(
             scale.clone(),
             amax.clone(),
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
         )
         for _ in range(z)
     ]
@@ -3799,7 +3799,7 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
     quantizer = None
     if swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
         quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=swizzle_type == "mxfp8_rowwise",
             columnwise=swizzle_type == "mxfp8_columnwise",
         )

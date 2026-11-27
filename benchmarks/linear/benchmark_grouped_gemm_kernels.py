@@ -73,6 +73,7 @@ from transformer_engine.pytorch.module.base import (
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor import GroupedTensor, GroupedTensorStorage
 import transformer_engine_torch as tex
+from transformer_engine.pytorch import DType
 
 
 QWEN_NUM_EXPERTS = 512
@@ -143,7 +144,7 @@ def _make_grouped_bf16(
 def _new_mxfp8_quantizer(*, rowwise: bool, columnwise: bool) -> MXFP8Quantizer:
     """Construct a quantizer that emits GEMM-ready scales before timing."""
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )

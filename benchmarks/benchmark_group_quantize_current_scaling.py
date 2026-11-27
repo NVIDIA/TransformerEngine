@@ -26,7 +26,7 @@ from typing import List, Optional
 # IMPORTANT: import transformer_engine before torch to avoid cublasLt symbol-resolution
 # issues caused by torch's bundled CUDA libs.
 import transformer_engine.pytorch  # noqa: F401  - registers extension
-from transformer_engine.pytorch import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch import DType, Float8CurrentScalingQuantizer
 import transformer_engine_torch as tex
 import torch
 
@@ -92,7 +92,7 @@ class CaseResult:
 
 def _make_quantizer(mode: str) -> Float8CurrentScalingQuantizer:
     q = Float8CurrentScalingQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=DType.kFloat8E4M3,
         device="cuda",
         force_pow_2_scales=False,
         amax_epsilon=0.0,

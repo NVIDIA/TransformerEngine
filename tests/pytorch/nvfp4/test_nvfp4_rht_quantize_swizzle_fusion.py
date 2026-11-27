@@ -19,7 +19,6 @@ layout, not the FP4 data itself).
 """
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex  # noqa: F401
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
     NVFP4TensorStorage,
@@ -78,7 +77,7 @@ def _check_nvfp4_rht_quantize_swizzle_fusion(
     return_transpose: bool,
     with_random_sign_mask: bool,
 ) -> None:
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     device = "cuda"
     seed = 0
@@ -193,7 +192,7 @@ def test_nvfp4_rht_quantize_swizzle_fusion(
 def _make_swizzle_fusion_quantizer() -> NVFP4Quantizer:
     """RHT NVFP4 quantizer configured to request GEMM-swizzled SF output."""
     quantizer = NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=te.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,

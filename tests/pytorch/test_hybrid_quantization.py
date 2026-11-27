@@ -11,7 +11,6 @@ import torch
 
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.module._split_quantization as split_quantization
-import transformer_engine_torch as tex
 
 from hybrid_quantization_utils import (
     as_data_tensor_tuple as _as_data_tensor_tuple,
@@ -501,8 +500,8 @@ class TestHybridQuantizerConstruction:
         if not mxfp8_available:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
         hq = HybridQuantizer(
-            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
+            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
         )
         assert hq.supports_only_rowwise_all_gather() is False
 
@@ -1720,8 +1719,8 @@ class TestHybridUsageFlagsRespected:
         both directions.
         """
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
         )
         torch.manual_seed(2026)
         model = Linear(128, 256, bias=False, params_dtype=torch.bfloat16).cuda()
@@ -1864,11 +1863,11 @@ class TestHybridGemmBitwiseIdentical:
             ):
                 return HybridQuantizer(
                     rowwise_quantizer=Float8CurrentScalingQuantizer(
-                        tex.DType.kFloat8E4M3,
+                        te.DType.kFloat8E4M3,
                         device="cuda",
                     ),
                     columnwise_quantizer=Float8CurrentScalingQuantizer(
-                        tex.DType.kFloat8E4M3,
+                        te.DType.kFloat8E4M3,
                         device="cuda",
                     ),
                 )
@@ -1878,11 +1877,11 @@ class TestHybridGemmBitwiseIdentical:
                 and role.tensor_type in ("grad_output", "grad_input")
             ):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2,
+                    te.DType.kFloat8E5M2,
                     device="cuda",
                 )
             return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3,
+                te.DType.kFloat8E4M3,
                 device="cuda",
             )
 
@@ -1946,10 +1945,10 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
                 and role.module_type in ("linear", "grouped_linear")
                 and role.tensor_type in ("grad_output", "grad_input")
             ):
-                return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+                return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
             return HybridQuantizer(
-                rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-                columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+                rowwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
+                columnwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
             )
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_mxfp8_factory)
@@ -2801,20 +2800,20 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
             dim = 2 if is_weight else 1
             if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return Float8BlockQuantizer(
-                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_dtype=te.DType.kFloat8E4M3,
                     rowwise=True,
                     columnwise=True,
                     block_scaling_dim=dim,
                 )
             return HybridQuantizer(
                 rowwise_quantizer=Float8BlockQuantizer(
-                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_dtype=te.DType.kFloat8E4M3,
                     rowwise=True,
                     columnwise=True,
                     block_scaling_dim=dim,
                 ),
                 columnwise_quantizer=Float8BlockQuantizer(
-                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_dtype=te.DType.kFloat8E4M3,
                     rowwise=True,
                     columnwise=True,
                     block_scaling_dim=dim,
@@ -3161,16 +3160,16 @@ class TestHybridBiasGradient:
                 and role.tensor_type in ("grad_output", "grad_input")
             ):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2,
+                    te.DType.kFloat8E5M2,
                     device="cuda",
                 )
             return HybridQuantizer(
                 rowwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
+                    te.DType.kFloat8E4M3,
                     device="cuda",
                 ),
                 columnwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
+                    te.DType.kFloat8E4M3,
                     device="cuda",
                 ),
             )
@@ -3293,7 +3292,7 @@ class TestHybridScalingModeCompatibility:
                 and role.tensor_type in ("grad_output", "grad_input")
             ):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2,
+                    te.DType.kFloat8E5M2,
                     device="cuda",
                 )
             return _make_fp8_quantizer()
@@ -3420,8 +3419,8 @@ class TestHybridMixedWithNonHybrid:
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
             if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+                return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
         hybrid_result = _run_linear_forward_backward(
             model_hybrid,
@@ -3464,7 +3463,7 @@ class TestHybridMixedWithNonHybrid:
 
 def _make_mxfp8_quantizer(*, rowwise=True, columnwise=True):
     return MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3472,7 +3471,7 @@ def _make_mxfp8_quantizer(*, rowwise=True, columnwise=True):
 
 def _make_mxfp8_quantizer_e5m2(*, rowwise=True, columnwise=True):
     return MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
+        fp8_dtype=te.DType.kFloat8E5M2,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3480,7 +3479,7 @@ def _make_mxfp8_quantizer_e5m2(*, rowwise=True, columnwise=True):
 
 def _make_block_quantizer(*, rowwise=True, columnwise=True):
     return Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=te.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3488,7 +3487,7 @@ def _make_block_quantizer(*, rowwise=True, columnwise=True):
 
 def _make_block_quantizer_e5m2(*, rowwise=True, columnwise=True):
     return Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
+        fp8_dtype=te.DType.kFloat8E5M2,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3498,7 +3497,7 @@ def _make_block_quantizer_e5m2(*, rowwise=True, columnwise=True):
 _QUANTIZER_CONFIGS = {
     "fp8_current": (
         _make_fp8_quantizer,
-        lambda **kw: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda", **kw),
+        lambda **kw: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda", **kw),
         not fp8_available,
         f"FP8: {reason_for_no_fp8}",
     ),
@@ -4014,21 +4013,21 @@ def _make_hybrid_fp8_factory():
         if is_linear and role.tensor_type in ("input", "weight", "output"):
             return HybridQuantizer(
                 rowwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
+                    te.DType.kFloat8E4M3,
                     device="cuda",
                 ),
                 columnwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
+                    te.DType.kFloat8E4M3,
                     device="cuda",
                 ),
             )
         if is_linear and role.tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2,
+                te.DType.kFloat8E5M2,
                 device="cuda",
             )
         return Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             device="cuda",
         )
 
@@ -4043,7 +4042,7 @@ def test_fusible_norm_hybrid_output_falls_back_to_explicit_quantize(norm_cls):
     def qfactory(_role):
         return HybridQuantizer(
             rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3,
+                te.DType.kFloat8E4M3,
                 device="cuda",
             ),
             columnwise_quantizer=IdentityQuantizer(),
@@ -4976,11 +4975,9 @@ class TestHybridQuantizedModelInit:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
 
     def test_linear_weight_is_hybrid_quantized_tensor(self):
@@ -5079,11 +5076,9 @@ class TestHybridWeightWorkspaceCache:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
@@ -5184,11 +5179,9 @@ class TestHybridUpdateWeightQuantizers:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
 
     def test_quantized_param_survives_multiple_forward_passes(self):
@@ -5252,9 +5245,9 @@ def _ensure_single_rank_dp_group():
 def _hybrid_recipe_fp8_current():
     """Same-format Float8CurrentScaling on both directions (supported)."""
     return _hybrid_custom_recipe(
-        row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+        col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+        grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
     )
 
 
@@ -5271,7 +5264,7 @@ def _make_delayed_quantizer(fp8_dtype=None, *, rowwise=True, columnwise=True):
     initialize for the first iteration.
     """
     if fp8_dtype is None:
-        fp8_dtype = tex.DType.kFloat8E4M3
+        fp8_dtype = te.DType.kFloat8E4M3
     return Float8Quantizer(
         scale=torch.ones(1, dtype=torch.float32, device="cuda"),
         amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
@@ -5284,9 +5277,9 @@ def _make_delayed_quantizer(fp8_dtype=None, *, rowwise=True, columnwise=True):
 def _hybrid_recipe_fp8_delayed():
     """Same-format Float8 delayed scaling on both directions (supported)."""
     return _hybrid_custom_recipe(
-        row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
-        col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
-        grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+        row_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E4M3),
+        col_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E4M3),
+        grad_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E5M2),
     )
 
 
@@ -5298,11 +5291,11 @@ def _hybrid_recipe_fp8_delayed_row_current_col():
     so each direction's scale is computed via its own scaling lifecycle.
     """
     return _hybrid_custom_recipe(
-        row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
-        col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+        row_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E4M3),
+        col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
         # grad_factory matches the columnwise direction so the wgrad GEMM's
         # grad_output sub-quantizer pairs with the input/weight col format.
-        grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
     )
 
 
@@ -5313,18 +5306,18 @@ def _hybrid_recipe_fp8_current_row_delayed_col():
     sub-storage -> current bucket, col sub-storage -> delayed bucket.
     """
     return _hybrid_custom_recipe(
-        row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
-        grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+        row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+        col_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E4M3),
+        grad_factory=lambda: _make_delayed_quantizer(te.DType.kFloat8E5M2),
     )
 
 
 def _hybrid_recipe_mxfp8():
     """Same-format MXFP8 on both directions (rejected today; TODO #3158)."""
     return _hybrid_custom_recipe(
-        row_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
-        col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
-        grad_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E5M2),
+        row_factory=lambda: MXFP8Quantizer(te.DType.kFloat8E4M3),
+        col_factory=lambda: MXFP8Quantizer(te.DType.kFloat8E4M3),
+        grad_factory=lambda: MXFP8Quantizer(te.DType.kFloat8E5M2),
     )
 
 
@@ -5332,13 +5325,13 @@ def _hybrid_recipe_blockwise():
     """Same-format Float8Blockwise on both directions (rejected today; TODO #3158)."""
     return _hybrid_custom_recipe(
         row_factory=lambda: Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True
         ),
         col_factory=lambda: Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True
         ),
         grad_factory=lambda: Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True
+            fp8_dtype=te.DType.kFloat8E5M2, rowwise=True, columnwise=True
         ),
     )
 
@@ -5422,7 +5415,7 @@ class TestHybridQuantizeMasterWeights:
             data=None,
             data_transpose=torch.full((cols, rows), fill_value, dtype=torch.uint8, device="cuda"),
             fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             quantizer=quantizer,
             requires_grad=False,
             device="cuda",
@@ -5451,7 +5444,7 @@ class TestHybridQuantizeMasterWeights:
         quantizer = Float8Quantizer(
             scale=scale,
             amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
         )
@@ -5472,7 +5465,7 @@ class TestHybridQuantizeMasterWeights:
         shape = (4, 8)
         quantizer = HybridQuantizer(
             rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3,
+                te.DType.kFloat8E4M3,
                 device="cuda",
             ),
             columnwise_quantizer=IdentityQuantizer(),
@@ -5530,13 +5523,13 @@ class TestHybridQuantizeMasterWeights:
 
         shape = (4, 8)
         row_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             device="cuda",
             rowwise=True,
             columnwise=False,
         )
         col_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             device="cuda",
             rowwise=False,
             columnwise=True,
@@ -5585,13 +5578,13 @@ class TestHybridQuantizeMasterWeights:
         shard_shape = (2, 8)
         if scaling == "current":
             row_quantizer = Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3,
+                te.DType.kFloat8E4M3,
                 device="cuda",
                 rowwise=True,
                 columnwise=False,
             )
             col_quantizer = Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3,
+                te.DType.kFloat8E4M3,
                 device="cuda",
                 rowwise=False,
                 columnwise=True,
@@ -5673,7 +5666,7 @@ class TestHybridQuantizeMasterWeights:
         start_offset = 5
         master = torch.linspace(-2.0, 2.0, steps=17, dtype=torch.float32, device="cuda")
         quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda", rowwise=False, columnwise=True
+            te.DType.kFloat8E4M3, device="cuda", rowwise=False, columnwise=True
         )
         weight = self._make_transpose_only_float8_weight(shape, quantizer)
         initial = weight._transpose.clone()
@@ -5699,7 +5692,7 @@ class TestHybridQuantizeMasterWeights:
         shape = (4, 8)
         start_offset = 6
         master = torch.linspace(-3.0, 1.0, steps=15, dtype=torch.float32, device="cuda")
-        quantizer = _make_delayed_quantizer(tex.DType.kFloat8E4M3)
+        quantizer = _make_delayed_quantizer(te.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=False, columnwise=True)
         weight = self._make_transpose_only_float8_weight(shape, quantizer)
         initial = weight._transpose.clone()
@@ -5894,11 +5887,9 @@ class TestHybridQuantizeMasterWeights:
 
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: MXFP8Quantizer(te.DType.kFloat8E4M3),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
         # Shape must be a multiple of MXFP8 block size (32) on both axes.
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
@@ -5924,13 +5915,13 @@ class TestHybridQuantizeMasterWeights:
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
             row_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
+                fp4_dtype=te.DType.kFloat4E2M1, with_2d_quantization=True
             ),
             col_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
+                fp4_dtype=te.DType.kFloat4E2M1, with_2d_quantization=True
             ),
             grad_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+                fp4_dtype=te.DType.kFloat4E2M1, with_2d_quantization=False
             ),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
@@ -5946,13 +5937,11 @@ class TestHybridQuantizeMasterWeights:
 
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
             col_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
+                fp4_dtype=te.DType.kFloat4E2M1, with_2d_quantization=True
             ),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5988,16 +5977,14 @@ class TestHybridQuantizeMasterWeights:
 
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
             col_factory=lambda: Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 block_scaling_dim=2,
             ),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
         weight, hp_master = _build_hybrid_linear_weight(128, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -6151,11 +6138,9 @@ class TestHybridRecipeCorrespondence:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
 
     def test_hybrid_param_with_matching_recipe_does_not_raise(self):
@@ -6202,10 +6187,8 @@ class TestHybridQuantizeInPlace:
         """quantize_() should re-quantize both sub-storages from new BF16 data."""
         torch.manual_seed(42)
         hq = HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            columnwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
         )
         original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         tensor = hq.quantize(original)
@@ -6221,10 +6204,8 @@ class TestHybridQuantizeInPlace:
     def test_quantize_inplace_preserves_tensor_identity(self):
         """quantize_() should update in-place, not create a new tensor."""
         hq = HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            columnwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
         )
         original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         tensor = hq.quantize(original)
@@ -6250,11 +6231,9 @@ class TestHybridFusedAdam:
 
     def _build_hybrid_model(self):
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6353,11 +6332,9 @@ class TestHybridQuantizedParamsEndToEnd:
 
     def _build_model_and_recipe(self):
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            grad_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda"),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6474,12 +6451,12 @@ class TestHybridMixedFormatQuantizedParams:
             is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
             if is_linear and role.tensor_type in ("input", "weight", "output"):
                 return HybridQuantizer(
-                    rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+                    rowwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
                     columnwise_quantizer=nvfp4_factory(role),
                 )
             if is_linear and role.tensor_type == "grad_output":
                 return nvfp4_factory(role)
-            return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=qfactory)
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
@@ -6583,10 +6560,10 @@ def _hybrid_mxfp8_qfactory(role):
     """Hybrid MXFP8 (E4M3 both dirs)."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
     return HybridQuantizer(
-        rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-        columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        rowwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
+        columnwise_quantizer=MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
     )
 
 
@@ -7128,7 +7105,7 @@ class TestHybridActivationRecompute:
         return _hybrid_custom_recipe(
             row_factory=_mxfp8_factory,
             col_factory=_mxfp8_factory,
-            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
+            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E5M2),
         )
 
     def _cross_format_fp8_mxfp8_recipe(self):

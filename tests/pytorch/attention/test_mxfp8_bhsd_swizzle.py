@@ -13,7 +13,6 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
@@ -40,7 +39,7 @@ def _quantize(src_format, S, B, H, dims, rowwise=True, columnwise=True, seed=0):
         x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         x = x * torch.rand(shape[:-1] + (1,), device="cuda") * 10
         quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
+            fp8_dtype=te.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
         )
         pairs.append((x, quantizer))
     return dpa_utils.mxfp8_quantize_only(pairs, src_format)

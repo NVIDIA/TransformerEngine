@@ -27,7 +27,7 @@ except ImportError:
     triton = None
     rotary_bwd_q_kernel = None
 
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import DType, MXFP8_BLOCK_SCALING_SIZE
 from ..distributed import get_distributed_world_size
 from ..quantized_tensor import QuantizedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
@@ -190,7 +190,7 @@ class FusedMLAQUpProjRopeQuant:
         grad_output_quantizer = None
         if fp8:
             grad_output_quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+                fp8_dtype=DType.kFloat8E4M3, rowwise=True, columnwise=True
             )
             grad_output_quantizer.optimize_for_gemm = True
 
@@ -242,7 +242,7 @@ class FusedMLAQUpProjRopeQuant:
         # Both rowwise and columnwise Q are required:
         # - Forward QK^T uses rowwise
         # - cuDNN backward (fused_attn_fp8_bwd_impl) requires columnwise for dK gradient
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+        quantizer = MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3, rowwise=True, columnwise=True)
         return MXFP8Tensor(
             shape=(s, b, nh, d),
             dtype=torch.bfloat16,
@@ -252,7 +252,7 @@ class FusedMLAQUpProjRopeQuant:
             columnwise_scale_inv=scales_col.view(s // blk, b, nh, d),
             quantizer=quantizer,
             requires_grad=False,
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             with_gemm_swizzled_scales=False,
         )
 
@@ -306,9 +306,7 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         # plain [tokens, K//32] array.
         x_quantizer = None
         if fp8:
-            x_quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-            )
+            x_quantizer = MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3, rowwise=True, columnwise=True)
 
         ln_out, _, rsigma = apply_normalization(
             x2d,

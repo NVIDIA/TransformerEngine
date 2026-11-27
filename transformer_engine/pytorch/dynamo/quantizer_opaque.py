@@ -42,8 +42,8 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
     # and the constructors have heterogeneous signatures / side effects.
     obj = cls.__new__(cls)
     for name, value in items:
-        if name == "dtype":
-            value = DType.cast(value)
+        if name in ("dtype", "scale_dtype"):
+            value = DType(value)
         object.__setattr__(obj, name, value)
     # Restore non-value derived state that ``__init__`` would normally build but
     # that cannot live in the value key (e.g. NVFP4's ``rht_matrix`` tensor).

@@ -26,7 +26,7 @@ from transformer_engine.pytorch import NVFP4Quantizer
 
 def make_quantizer(optimize_for_gemm: bool) -> NVFP4Quantizer:
     q = NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=te.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,

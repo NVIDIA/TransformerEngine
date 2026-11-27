@@ -309,7 +309,7 @@ def benchmark_fp8_current_prequantized(
     flops = compute_gemm_flops(M, K, N)
 
     try:
-        quantizer = te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=device)
+        quantizer = te.Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device=device)
 
         A_q = quantizer.quantize(torch.randn(K, M, dtype=torch.bfloat16, device=device))
         B_q = quantizer.quantize(torch.randn(K, N, dtype=torch.bfloat16, device=device))
@@ -325,9 +325,9 @@ def benchmark_fp8_current_prequantized(
                 True,
                 D,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 False,
                 None,
                 False,
@@ -360,9 +360,9 @@ def benchmark_fp8_current_prequantized(
                     True,
                     D_lg,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     False,
                     None,
                     False,
@@ -485,7 +485,7 @@ def benchmark_fp8_prequantized(
     flops = compute_gemm_flops(M, K, N)
 
     try:
-        quantizer = te.MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        quantizer = te.MXFP8Quantizer(te.DType.kFloat8E4M3)
 
         # tex.generic_gemm uses column-major convention: A=(K,M), B=(K,N),
         # D=(N,M) with transa=False, transb=True for a logical C(M,N) GEMM.
@@ -503,9 +503,9 @@ def benchmark_fp8_prequantized(
                 True,
                 D,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 False,
                 None,
                 False,
@@ -538,9 +538,9 @@ def benchmark_fp8_prequantized(
                     True,
                     D_lg,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     False,
                     None,
                     False,
@@ -621,7 +621,7 @@ def benchmark_fp8_block_prequantized(
 
     try:
         quantizer = te.Float8BlockQuantizer(
-            tex.DType.kFloat8E4M3,
+            te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
         )
@@ -640,9 +640,9 @@ def benchmark_fp8_block_prequantized(
                 True,
                 D,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 False,
                 None,
                 False,
@@ -675,9 +675,9 @@ def benchmark_fp8_block_prequantized(
                     True,
                     D_lg,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     False,
                     None,
                     False,
@@ -757,7 +757,7 @@ def benchmark_fp4_prequantized(
     flops = compute_gemm_flops(M, K, N)
 
     try:
-        quantizer = te.NVFP4Quantizer(tex.DType.kFloat4E2M1)
+        quantizer = te.NVFP4Quantizer(te.DType.kFloat4E2M1)
 
         # tex.generic_gemm uses column-major convention: A=(K,M), B=(K,N),
         # D=(N,M) with transa=False, transb=True for a logical C(M,N) GEMM.
@@ -775,9 +775,9 @@ def benchmark_fp4_prequantized(
                 True,
                 D,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 None,
-                tex.DType.kBFloat16,
+                te.DType.kBFloat16,
                 False,
                 None,
                 False,
@@ -810,9 +810,9 @@ def benchmark_fp4_prequantized(
                     True,
                     D_lg,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     None,
-                    tex.DType.kBFloat16,
+                    te.DType.kBFloat16,
                     False,
                     None,
                     False,
