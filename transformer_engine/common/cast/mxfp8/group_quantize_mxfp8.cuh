@@ -934,7 +934,9 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
     int buff_in = 0;
     size_t chunk_rows = CHUNK_DIM_Y;
-    if constexpr (CHUNK_DIM_Y > TILE_DIM_Y) {
+    // SAME_BOTH_DIMS tensors may end mid-chunk, so stop there instead of running into the next
+    // tensor or past the end of the group.
+    if constexpr (use_direct_same_both_mapper || (CHUNK_DIM_Y > TILE_DIM_Y)) {
       chunk_rows = min(static_cast<size_t>(CHUNK_DIM_Y), rows - tensor_offset_Y);
     }
     const size_t chunk_cols = min(static_cast<size_t>(CHUNK_DIM_X), cols - block_offset_X);
@@ -1190,6 +1192,19 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(first_logical_dim % tile_dim_y == 0,
                "First logical dimension of a grouped tensor must be divisible by ", tile_dim_y,
                ".");
+  }
+  // SAME_BOTH_DIMS processes each tensor separately, so a tensor boundary must fall on an MXFP8
+  // scaling block. The dbias reduction and GEMM-swizzled scales also work on whole tiles of each
+  // tensor.
+  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+    const size_t rows_alignment =
+        (IS_DBIAS || with_gemm_swizzled_scales)
+            ? tile_dim_y
+            : CastTraits<ShapeRepresentation::SAME_BOTH_DIMS>::SCALE_DIM_Y;
+    NVTE_CHECK(first_logical_dim % num_tensors == 0 &&
+                   (first_logical_dim / num_tensors) % rows_alignment == 0,
+               "First dimension of each tensor in a group must be divisible by ", rows_alignment,
+               ", got ", first_logical_dim, " rows split across ", num_tensors, " tensors.");
   }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
