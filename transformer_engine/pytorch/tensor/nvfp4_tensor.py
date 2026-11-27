@@ -27,7 +27,7 @@ from ..utils import (
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -547,21 +547,6 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
-
-    def clone(self) -> NVFP4Tensor:
-        # pylint: disable=missing-function-docstring
-        assert self._rowwise_data is not None
-        rowwise_data = self._rowwise_data.detach().clone()
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
 
     def view(self, *shape: Tuple[int]) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
