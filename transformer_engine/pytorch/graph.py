@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+
 from collections.abc import Iterable
 import contextlib
 import gc
@@ -85,9 +86,11 @@ def _none_grad_context_wrapper(inputs):
     for input_tensor in inputs:
         original_input_grads.append(input_tensor.grad)
         input_tensor.grad = None
-    yield
-    for input_tensor, original_grad in zip(inputs, original_input_grads):
-        input_tensor.grad = original_grad
+    try:
+        yield
+    finally:
+        for input_tensor, original_grad in zip(inputs, original_input_grads):
+            input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
@@ -103,10 +106,12 @@ def _graph_context_wrapper(*args, **kwargs):
     gc_is_enabled = gc.isenabled()
     if gc_is_enabled:
         gc.disable()
-    with torch.cuda.graph(*args, **kwargs):
-        yield
-    if gc_is_enabled:
-        gc.enable()
+    try:
+        with torch.cuda.graph(*args, **kwargs):
+            yield
+    finally:
+        if gc_is_enabled:
+            gc.enable()
 
 
 def _canonicalize_capture_time_hooks(
@@ -576,11 +581,13 @@ def _make_graphed_callables(
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_pre_hooks", func)
 
         hooks = []
-        for module in func.modules():
-            hooks.append(module.register_forward_hook(hook_fn))
-        outputs = func(*args, **kwargs)
-        for hook in hooks:
-            hook.remove()
+        try:
+            for module in func.modules():
+                hooks.append(module.register_forward_hook(hook_fn))
+            outputs = func(*args, **kwargs)
+        finally:
+            for hook in hooks:
+                hook.remove()
 
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_hooks", func)
 
@@ -648,7 +655,11 @@ def _make_graphed_callables(
         need_bwd_dw_graph[func_idx] = need_backward_dw
 
     # Run warmup and do the above filtering.
-    with torch.cuda.stream(torch.cuda.Stream()):
+    warmup_stream = torch.cuda.Stream()
+    caller_stream = torch.cuda.current_stream()
+    with contextlib.ExitStack() as warmup_cleanup:
+        warmup_cleanup.callback(caller_stream.wait_stream, warmup_stream)
+        warmup_cleanup.enter_context(torch.cuda.stream(warmup_stream))
         if pre_warmup_hook is not None:
             pre_warmup_hook()
 
@@ -1640,8 +1651,6 @@ def make_graphed_callables(
     if cache_quantized_params is None:
         cache_quantized_params = False
 
-    set_capture_start()
-
     # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
@@ -1671,80 +1680,65 @@ def make_graphed_callables(
         capture_time_hooks,
     )
 
-    # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
-
-    # FP8 wrapper.
-    old_call_funcs = {}
-
-    def wrap_autocast(block):
-        block_cls = type(block)
-        if block_cls in old_call_funcs:
-            return
-
-        old_call_funcs[block_cls] = block_cls.__call__
-
-        # Wrap the original call function of the module class.
-        def call_func(self, *args, **kwargs):
-            with autocast(
-                enabled=module_uses_fp8.get(id(self), False),
-                calibrating=calibrating,
-                recipe=recipe,
-                amax_reduction_group=amax_reduction_group,
-                _graph=True,
-            ):
-                outputs = old_call_funcs[block_cls](self, *args, **kwargs)
-            return outputs
-
-        block_cls.__call__ = call_func
-
-    forward_funcs = []
+    # Validate every module before installing any class-wide wrappers.
     for module in modules:
         if not isinstance(module, torch.nn.Module):
             raise TypeError(f"Graphing for {type(module)} is not supported.")
-        wrap_autocast(module)
-        forward_funcs.append(module)
 
-    if just_one_callable:
-        forward_funcs = forward_funcs[0]
-    else:
-        forward_funcs = tuple(forward_funcs)
+    # Resolve inherited calls before any class is patched.
+    classes = dict.fromkeys(type(module) for module in modules)
+    original_calls = {cls: cls.__call__ for cls in classes}
 
-    # Save RNG state.
-    generators = [
-        torch.cuda.default_generators[torch.cuda.current_device()],
-        *get_all_rng_states().values(),
-    ]
-    original_rng_states = [state.get_state() for state in generators]
+    with contextlib.ExitStack() as cleanup:
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        cache_quantized_params=cache_quantized_params,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        _num_layers_per_chunk=_num_layers_per_chunk,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        clone_param_grads_on_return=clone_param_grads_on_return,
-        pre_warmup_hook=pre_warmup_hook,
-        post_warmup_hook=post_warmup_hook,
-        capture_time_hooks=capture_time_hooks,
-    )
+        def wrap_autocast(block_cls, original_call):
+            # Wrap the original call function of the module class.
+            def call_func(self, *args, **kwargs):
+                with autocast(
+                    enabled=module_uses_fp8.get(id(self), False),
+                    calibrating=calibrating,
+                    recipe=recipe,
+                    amax_reduction_group=amax_reduction_group,
+                    _graph=True,
+                ):
+                    return original_call(self, *args, **kwargs)
 
-    # Ensures warmup does not affect numerics for ops such as dropout.
-    for gen, state in zip(generators, original_rng_states):
-        gen.set_state(state)
+            if "__call__" in block_cls.__dict__:
+                restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
+            else:
+                restore_call = (delattr, block_cls, "__call__")
+            block_cls.__call__ = call_func
+            cleanup.callback(*restore_call)
 
-    # Remove FP8 wrapper.
-    for module_cls, old_call in old_call_funcs.items():
-        module_cls.__call__ = old_call
+        set_capture_start()
+        cleanup.callback(set_capture_end)
+        saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
+        cleanup.callback(restore_fp8_tensors, modules, saved_fp8_tensors)
+        for block_cls, original_call in original_calls.items():
+            wrap_autocast(block_cls, original_call)
 
-    # Restore FP8 state.
-    restore_fp8_tensors(modules, saved_fp8_tensors)
+        # Ensures warmup does not affect numerics for ops such as dropout.
+        generators = [
+            torch.cuda.default_generators[torch.cuda.current_device()],
+            *get_all_rng_states().values(),
+        ]
+        for gen in reversed(generators):
+            cleanup.callback(gen.set_state, gen.get_state())
 
-    set_capture_end()
-    return graphed_callables
+        return _make_graphed_callables(
+            modules[0] if just_one_callable else modules,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            cache_quantized_params=cache_quantized_params,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
+            pre_warmup_hook=pre_warmup_hook,
+            post_warmup_hook=post_warmup_hook,
+            capture_time_hooks=capture_time_hooks,
+        )
