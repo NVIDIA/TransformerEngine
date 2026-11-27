@@ -375,7 +375,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Quantize weights to row-scaled NVFP4 in the ``NVFP4BlockScaling`` recipe (equivalent to ``NVFP4BlockScaling(row_scaled_weight=True)``). Requires ``NVTE_NVFP4_DISABLE_2D_QUANTIZATION=1`` and BF16 weights with both dimensions divisible by 32. The restrictions of :envvar:`NVTE_NVFP4_ROW_SCALED_ACTIVATION` apply, and 4over6 on weights and quantized primary weights are not supported.
+   :Description: Quantize weights to row-scaled NVFP4 in the ``NVFP4BlockScaling`` recipe (equivalent to ``NVFP4BlockScaling(row_scaled_weight=True)``). Requires ``NVTE_NVFP4_DISABLE_2D_QUANTIZATION=1`` and BF16 weights with both dimensions divisible by 32. The restrictions of :envvar:`NVTE_NVFP4_ROW_SCALED_ACTIVATION` apply. 4over6 on weights and casting master weights with ``quantize_master_weights`` are not supported.
 
 .. envvar:: NVTE_NVFP4_4OVER6
 

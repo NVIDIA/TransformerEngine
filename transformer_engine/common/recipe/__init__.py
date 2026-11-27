@@ -585,8 +585,8 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, weights are quantized to row-scaled NVFP4.
              Requires ``disable_2d_quantization=True`` and BF16 weights with
              both dimensions divisible by 32. The restrictions of
-             ``row_scaled_activation`` apply, and 4over6 on weights and
-             quantized primary weights are not supported.
+             ``row_scaled_activation`` apply. 4over6 on weights and casting
+             master weights with ``quantize_master_weights`` are not supported.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares
