@@ -102,5 +102,5 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
 void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, const size_t num_tensors,
                                    cudaStream_t stream) {
-  nvte_group_amax(input, outputs, split_sections, num_tensors, stream);
+  nvte_group_amax_host_split(input, outputs, split_sections, num_tensors, stream);
 }

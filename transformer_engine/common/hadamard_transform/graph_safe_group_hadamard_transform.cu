@@ -14,6 +14,7 @@
 
 #include <cuda/barrier>
 
+#include "common/cast/nvfp4/group_quantize_2d_nvfp4.h"
 #include "common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/ptx.cuh"
@@ -188,7 +189,8 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
 }
 
 __global__ void GraphSafeMultiZeroAmaxKernel(const size_t num_tensors, float* amax_rowwise_ptr,
-                                             float* amax_colwise_ptr) {
+                                             float* amax_colwise_ptr, const float* noop) {
+  if (noop && *noop == 1.0f) return;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
@@ -207,7 +209,9 @@ __global__ void GraphSafeMultiZeroAmaxKernel(const size_t num_tensors, float* am
 
 __global__ void GraphSafeMultiAmaxMemcpyD2DKernelPreRHT(const size_t num_tensors,
                                                         float* amax_rowwise_ptr,
-                                                        float* amax_colwise_ptr) {
+                                                        float* amax_colwise_ptr,
+                                                        const float* noop) {
+  if (noop && *noop == 1.0f) return;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
@@ -228,15 +232,20 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
     uint16_t random_sign_mask_t, const ShapeRepresentation shape_rep, const size_t num_tensors,
     const size_t first_logical_dim, const size_t last_logical_dim,
     const int64_t* const __restrict__ offsets_ptr, const int64_t* const __restrict__ first_dims_ptr,
-    float* const __restrict__ amax_rowwise_ptr, float* const __restrict__ amax_colwise_ptr) {
+    float* const __restrict__ amax_rowwise_ptr, float* const __restrict__ amax_colwise_ptr,
+    const float* noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop && *noop == 1.0f) return;
 
   float* output_pre_rht_amax_ptr;
   float* output_identity_amax_ptr = nullptr;
   float* output_transpose_amax_ptr;
 
   // calculate the global offset to get tensor id
-  size_t global_offset = blockIdx.y * CHUNK_DIM_Y * last_logical_dim;
+  const size_t tiles_x = DIVUP(last_logical_dim, size_t{CHUNK_DIM_X});
+  const size_t tile_x = blockIdx.x % tiles_x;
+  const size_t tile_y = blockIdx.x / tiles_x;
+  size_t global_offset = tile_y * CHUNK_DIM_Y * last_logical_dim;
   // paged stashing: will have input buffer [M, N], where M is larger than sum(first_dims)
   // also need to early return if this CTA is processing a region larger than the last offsets[num_tensors]
   if (global_offset >= offsets_ptr[num_tensors]) {
@@ -244,8 +253,8 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
   }
   int tensor_id = get_current_tensor_id(shape_rep, num_tensors, global_offset, first_logical_dim,
                                         last_logical_dim, offsets_ptr);
-  output_pre_rht_amax_ptr = static_cast<float*>(amax_rowwise_ptr) + tensor_id;
-  output_transpose_amax_ptr = static_cast<float*>(amax_colwise_ptr) + tensor_id;
+  output_pre_rht_amax_ptr = amax_rowwise_ptr ? amax_rowwise_ptr + tensor_id : nullptr;
+  output_transpose_amax_ptr = amax_colwise_ptr ? amax_colwise_ptr + tensor_id : nullptr;
 
   static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y && CHUNK_DIM_Y % BUFF_DIM_Y == 0);
   static_assert(CHUNK_DIM_X >= BUFF_DIM_X && CHUNK_DIM_X % BUFF_DIM_X == 0);
@@ -255,8 +264,8 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 
   constexpr int kNumWarps = (THREADS_PER_CHUNK * THREADS_PER_Y) / kThreadsPerWarp;
 
-  const int input_block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-  const int input_block_offset_X = blockIdx.x * CHUNK_DIM_X;
+  const int input_block_offset_Y = tile_y * CHUNK_DIM_Y;
+  const int input_block_offset_X = tile_x * CHUNK_DIM_X;
 
   extern __shared__ __align__(128) char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -398,20 +407,23 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, GroupedTensor* output,
                                               uint16_t random_sign_mask,
                                               uint16_t random_sign_mask_t,
-                                              bool broadcast_pre_rht_amax, cudaStream_t stream) {
+                                              bool broadcast_pre_rht_amax, cudaStream_t stream,
+                                              const float* noop) {
   NVTE_API_CALL(group_hadamard_transform_amax_graph_safe);
 #if CUDA_VERSION >= 12080
 
   NVTE_CHECK(input->num_tensors == output->num_tensors,
              "Number of input and output tensors must be same.");
-  NVTE_CHECK(input->has_data(), "Cannot quantize tensor without rowwise data.");
+  NVTE_CHECK(input->has_data() || input->logical_shape.data[0] == 0,
+             "Cannot quantize tensor without rowwise data.");
 
   checkCuDriverContext(stream);
 
-  bool all_return_pre_rht_amax = output->has_data();
+  bool all_return_pre_rht_amax = output->has_data() || broadcast_pre_rht_amax;
   // there is no rowwise RHT transform in current recipe
   bool all_return_identity_amax = false;
-  bool all_return_transposed_amax = output->has_columnwise_data();
+  bool all_return_transposed_amax =
+      broadcast_pre_rht_amax ? output->columnwise_amax.has_data() : output->has_columnwise_data();
 
   NVTE_CHECK(all_return_pre_rht_amax || all_return_identity_amax || all_return_transposed_amax,
              "At least one of return_pre_rht_amax, return_identity_amax, or return_transposed_amax "
@@ -433,7 +445,9 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   NVTE_CHECK(last_logical_dim % 128 == 0,
              "Last dimension of a grouped tensor should be divisible by 128.");
 
-  float* const amax_rowwise_ptr = reinterpret_cast<float*>(output->amax.dptr);
+  float* const amax_rowwise_ptr = reinterpret_cast<float*>(
+      broadcast_pre_rht_amax && output->amax.dptr == nullptr ? output->columnwise_amax.dptr
+                                                             : output->amax.dptr);
   float* const amax_colwise_ptr = reinterpret_cast<float*>(output->columnwise_amax.dptr);
 
   const int64_t* const offsets_ptr = reinterpret_cast<const int64_t*>(output->tensor_offsets.dptr);
@@ -451,8 +465,9 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   dim3 block_setup_amax(kMaxTensorsPerKernel);
   dim3 grid_setup_amax(1);
   GraphSafeMultiZeroAmaxKernel<<<grid_setup_amax, block_setup_amax, 0, stream>>>(
-      num_tensors, amax_rowwise_ptr, amax_colwise_ptr);
+      num_tensors, amax_rowwise_ptr, amax_colwise_ptr, noop);
   NVTE_CHECK_CUDA(cudaGetLastError());
+  if (first_logical_dim == 0 || num_tensors == 0) return;
 
   using IType = bf16;
   constexpr int kHadamardDimension = 16;
@@ -482,7 +497,7 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   constexpr uint64_t kNumWarps = kThreadBlockX * kThreadBlockY;
 
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
-  dim3 grid(DIVUP(last_logical_dim, kChunkBlockXSmall),
+  dim3 grid(DIVUP(last_logical_dim, kChunkBlockXSmall) *
             DIVUP(first_logical_dim, kChunkBlockYSmall));
 
   ShapeRepresentation shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
@@ -529,11 +544,11 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
               kernel<<<grid, block, shmem_bytes, stream>>>(
                   tensor_map_input, random_sign_mask, random_sign_mask_t, shape_rep, num_tensors,
                   first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                  amax_rowwise_ptr, amax_colwise_ptr);
-              if (broadcast_pre_rht_amax) {
+                  amax_rowwise_ptr, broadcast_pre_rht_amax ? nullptr : amax_colwise_ptr, noop);
+              if (broadcast_pre_rht_amax && amax_rowwise_ptr != amax_colwise_ptr) {
                 GraphSafeMultiAmaxMemcpyD2DKernelPreRHT<<<grid_setup_amax, block_setup_amax, 0,
                                                           stream>>>(num_tensors, amax_rowwise_ptr,
-                                                                    amax_colwise_ptr);
+                                                                    amax_colwise_ptr, noop);
               })));
 
   NVTE_CHECK_CUDA(cudaGetLastError());

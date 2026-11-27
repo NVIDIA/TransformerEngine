@@ -27,6 +27,7 @@
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/group_scaled_swiglu_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
+#include "../nvfp4/group_quantize_2d_nvfp4.h"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
@@ -582,8 +583,17 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
-      NVTE_CHECK(output_tensor->row_scaled_nvfp4,
-                 "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
+      // 2D quantization replicates each 16x16 block scale into the 1x16
+      // scale layout consumed by GEMM. The 1D scaling enum describes that storage
+      // format; nvfp4_2d_quantization selects how the scales are computed.
+      // Both quantization algorithms therefore use this scaling-mode branch.
+      if (!output_tensor->row_scaled_nvfp4) {
+        NVTE_CHECK(quant_config_cpp.nvfp4_2d_quantization,
+                   "Per-tensor amax with 1D grouped NVFP4 quantization is not implemented.");
+        nvfp4::group_quantize_2d(input_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                 stream);
+        break;
+      }
       NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
                  "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,

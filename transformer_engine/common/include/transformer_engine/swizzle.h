@@ -206,12 +206,15 @@ size_t nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(const NVTEGroupedT
  *  \param[in,out] output       Output grouped tensor which hosts swizzled scale_inv.
  *  \param[in]     stream       CUDA stream used for the operation.
  *
- *  Requirements(for now, more features will be added later):
- *  - scaling mode must be MXFP8 1D scaling.
- *  - scale_inv is stored in row-major per group.
- *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
- *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
- *  - all tensors in the grouped tensor must have the same shape.
+ *  Requirements:
+ *  - scaling mode must be MXFP8 or NVFP4.
+ *  - compact scale_inv is stored in row-major per group.
+ *  - MXFP8 compact scales use 128x4 padding for rowwise and 4x128 for columnwise.
+ *  - NVFP4 compact scales use 128x4 padding in both orientations; columnwise scales
+ *    describe the transposed matrix. Both 1D and 2D NVFP4 quantization use this layout.
+ *  - output scales are padded to 128x4 per group in GEMM orientation.
+ *  - variable shapes are read from device metadata; their scale buffers concatenate
+ *    per-group padded regions. Zero-sized groups contribute no scale elements.
  */
 void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                           cudaStream_t stream);

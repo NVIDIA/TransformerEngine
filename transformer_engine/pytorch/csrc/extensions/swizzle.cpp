@@ -517,7 +517,8 @@ at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper &i
 std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper &input,
                                                                   bool rowwise_usage,
                                                                   bool columnwise_usage) {
-  if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
+  if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING &&
+      input.scaling_mode() != NVTE_NVFP4_1D_SCALING) {
     return std::nullopt;
   }
   const auto row_scales = input.get_rowwise_scale_inv();
@@ -575,9 +576,19 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
              "Grouped GEMM swizzle expects logical_shape with ndim >= 2.");
   const size_t per_tensor_first_dim = logical_shape_nvte.data[0] / num_tensors;
   const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
-  constexpr size_t kMxfp8BlockSize = 32;
+  const size_t scaling_block_size = input.scaling_mode() == NVTE_NVFP4_1D_SCALING ? 16 : 32;
 
   const bool variable_shape = first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr;
+
+  // PyTorch FP4 buffers count packed bytes, but common validates logical element counts.
+  // These scale-only wrappers have no data pointer and must describe the logical extent.
+  auto logical_data_shape = [](const NVTEBasicTensor &data) {
+    auto shape = data.shape;
+    if (static_cast<DType>(data.dtype) == DType::kFloat4E2M1) {
+      shape.data[0] *= 2;
+    }
+    return shape;
+  };
 
   // Output is allocated in the layout the swizzle kernel writes so its consumer sees the
   // correct stride between experts.
@@ -595,7 +606,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
     const size_t m = rowwise ? per_tensor_first_dim : per_tensor_last_dim;
     const size_t k = rowwise ? per_tensor_last_dim : per_tensor_first_dim;
     const size_t padded_m = ceildiv(m, size_t{128}) * 128;
-    const size_t padded_k = ceildiv(ceildiv(k, kMxfp8BlockSize), size_t{4}) * 4;
+    const size_t padded_k = ceildiv(ceildiv(k, scaling_block_size), size_t{4}) * 4;
     return std::vector<size_t>{num_tensors * padded_m, padded_k};
   };
 
@@ -603,12 +614,13 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
     const auto data = input.get_rowwise_data();
     const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
-    swizzle_input.set_rowwise_data(nullptr, data_dtype, data.shape);
+    const auto data_shape = logical_data_shape(data);
+    swizzle_input.set_rowwise_data(nullptr, data_dtype, data_shape);
     swizzle_input.set_rowwise_scale_inv(row_scales.data_ptr, scales_dtype, row_scales.shape);
     const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/true);
     rowwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
     NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
-    swizzle_output.set_rowwise_data(nullptr, data_dtype, data.shape);
+    swizzle_output.set_rowwise_data(nullptr, data_dtype, data_shape);
     swizzle_output.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
                                          padded_shape_nvte);
   }
@@ -616,12 +628,13 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
     const auto data = input.get_columnwise_data();
     const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
-    swizzle_input.set_columnwise_data(nullptr, data_dtype, data.shape);
+    const auto data_shape = logical_data_shape(data);
+    swizzle_input.set_columnwise_data(nullptr, data_dtype, data_shape);
     swizzle_input.set_columnwise_scale_inv(col_scales.data_ptr, scales_dtype, col_scales.shape);
     const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/false);
     columnwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
     NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
-    swizzle_output.set_columnwise_data(nullptr, data_dtype, data.shape);
+    swizzle_output.set_columnwise_data(nullptr, data_dtype, data_shape);
     swizzle_output.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
                                             padded_shape_nvte);
   }

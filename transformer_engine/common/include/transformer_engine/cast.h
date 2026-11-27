@@ -99,7 +99,14 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *         The type of quantized tensor in the output depends on the scaling mode of the output
  *         tensor. See file level comments.
  *         For grouped tensors with a varying last dimension, the last dimension must be a multiple of 128.
- *         NVFP4 output requires row scaling, BF16 input, and dimensions that are multiples of 128.
+ *         NVFP4 output supports row-scaled 1D quantization, or per-expert scalar amax with
+ *         nvfp4_2d_quantization enabled (16x16 blocks). Both require BF16 input, a common
+ *         hidden dimension divisible by 128, and each expert's row count divisible by 128.
+ *         Zero-row experts and unused capacity tails are allowed. The per-tensor 2D path
+ *         computes amax internally, supports either output direction and GEMM-swizzled scales,
+ *         and honors noop across both amax and quantization. It requires device int64
+ *         first_dims and tensor_offsets; stochastic rounding and 4over6 are not supported.
+ *         Per-tensor amax with ordinary 1D grouped NVFP4 is not implemented.
  *
  *  \param[in]     input            Input grouped tensor to be cast.
  *  \param[in,out] output           Output grouped tensor.
@@ -474,6 +481,10 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 
 /*! \brief Casts grouped input tensor to quantized output tensors.
  *
+ *  \deprecated Legacy host-split rowwise-only NVFP4 quantization with supplied amax.
+ *              Retained for compatibility. Use single-tensor nvte_quantize_v2 for ordinary
+ *              1D quantization; ordinary grouped 2D quantization is not a replacement.
+ *
  *  \param[in]      input           Input tensor to be cast.
  *  \param[in,out]  outputs         Output quantized tensors.
  *  \param[in]      split_sections  Split sections of the input tensor.
@@ -486,7 +497,7 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
 
-/*! \deprecated Use nvte_group_amax instead. */
+/*! \deprecated Use nvte_group_amax_host_split instead. */
 void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, size_t num_tensors,
                                    cudaStream_t stream);
