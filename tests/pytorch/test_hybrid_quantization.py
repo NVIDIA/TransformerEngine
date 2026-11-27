@@ -4614,6 +4614,26 @@ class TestHybridGroupedLinearValidation:
                 context=f"transient-row grouped split {index} columnwise",
             )
 
+    @requires_mxfp8_and_nvfp4
+    def test_nvfp4_2d_split_falls_back_only_for_columnwise(self):
+        splits = [512, 512]
+        x = torch.randn(sum(splits), 512, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3),
+                columnwise_quantizer=NVFP4Quantizer(with_2d_quantization=True),
+            )
+            for _ in splits
+        ]
+        outputs, _ = split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+        rows = [out.rowwise_sub_storage._rowwise_data for out in outputs]
+        cols = [out.columnwise_sub_storage._columnwise_data for out in outputs]
+        assert rows[0].untyped_storage().data_ptr() == rows[1].untyped_storage().data_ptr()
+        assert cols[0].untyped_storage().data_ptr() != cols[1].untyped_storage().data_ptr()
+        for out, part, quantizer in zip(outputs, x.split(splits), quantizers):
+            reference = quantizer.columnwise_quantizer(part)
+            _assert_storage_data_exact(out.columnwise_sub_storage, reference, context="2D NVFP4")
+
     @requires_nvfp4
     @pytest.mark.parametrize("m_splits", ([128, 128], [0, 128]))
     def test_nvfp4_rowwise_dequantized_preserves_source_dtype(self, monkeypatch, m_splits):

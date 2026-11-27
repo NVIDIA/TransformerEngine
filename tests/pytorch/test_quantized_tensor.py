@@ -1502,12 +1502,7 @@ def test_native_quantization_scale_layout(
         if operation == "multi_tensor_quantize":
             return tex.multi_tensor_quantize([inp], [quantizer])[0]
         if operation == "split_quantize":
-            return tex.split_quantize(
-                inp,
-                [shape[0]],
-                [quantizer],
-                disable_bulk_allocation=shape[0] % 64 != 0 or quantization == "nvfp4-2d",
-            )[0]
+            return tex.split_quantize(inp, [shape[0]], [quantizer])[0]
         if operation == "gelu":
             return tex.gelu(inp, quantizer)
         if operation == "dgelu":
@@ -1652,7 +1647,7 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
 
 
 @pytest.mark.parametrize(
-    "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8")]
+    "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8", "nvfp4")]
 )
 def test_split_quantize_bulk_data_and_scale_storage(quantization, monkeypatch):
     module = te.GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
@@ -1676,16 +1671,21 @@ def test_split_quantize_bulk_data_and_scale_storage(quantization, monkeypatch):
                 assert all(t.data_ptr() % alignment == 0 for t in tensors)
                 if field == "scale_inv":
                     scales.extend(tensors)
+                    if quantization == "nvfp4":
+                        for out in outputs:
+                            amax = getattr(out, f"_amax_{orientation}")
+                            assert amax.untyped_storage().data_ptr() in pointers
+                            assert amax.data_ptr() % 16 == 0
         return outputs
 
     monkeypatch.setattr(tex, "split_quantize", check_split)
     recipe = transformer_engine.common.recipe
-    fp8_recipe = (
-        recipe.Float8BlockScaling()
-        if quantization == "fp8_blockwise"
-        else recipe.MXFP8BlockScaling()
-    )
+    recipe_type = {
+        "fp8_blockwise": recipe.Float8BlockScaling,
+        "mxfp8": recipe.MXFP8BlockScaling,
+        "nvfp4": recipe.NVFP4BlockScaling,
+    }[quantization]
     x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
-    with te.autocast(enabled=True, recipe=fp8_recipe):
+    with te.autocast(enabled=True, recipe=recipe_type()):
         module(x, [128, 128])
     assert scales and all(not getattr(scale, "_TE_do_not_offload", False) for scale in scales)
