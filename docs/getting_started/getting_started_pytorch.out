@@ -39,4 +39,4 @@ Mean time: 21.670 ms
 # BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END
 
 
-Summary written to getting_started_pytorch_summary.csv
+Summary CSV not written; pass --write-reference-csv to refresh the reference table

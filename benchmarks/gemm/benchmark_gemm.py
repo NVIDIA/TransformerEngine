@@ -1553,6 +1553,8 @@ def create_plot(
     plt.tight_layout()
 
     out = Path(output_path)
+    # The documented commands write into ./_plots/; create it if missing.
+    out.parent.mkdir(parents=True, exist_ok=True)
     supported = set(fig.canvas.get_supported_filetypes().keys())
     suffix = out.suffix.lower().lstrip(".")
     if suffix not in supported:
@@ -1685,6 +1687,8 @@ def create_model_config_plot(
     plt.tight_layout()
 
     out = Path(output_path)
+    # The documented commands write into ./_plots/; create it if missing.
+    out.parent.mkdir(parents=True, exist_ok=True)
     supported = set(fig.canvas.get_supported_filetypes().keys())
     suffix = out.suffix.lower().lstrip(".")
     if suffix not in supported:

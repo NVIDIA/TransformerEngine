@@ -43,3 +43,6 @@ tensor_dumps/
 artifacts/
 .DS_Store
 .claude/
+
+# Generated GEMM benchmark plots (see docs/examples/gemm_profiling)
+_plots/
