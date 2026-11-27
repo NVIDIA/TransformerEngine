@@ -281,9 +281,11 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         x_aval, scale_aval, amax_aval, _, _, _ = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == amax_aval.dtype == jnp.float32
+        # MXFP8 never writes amax, so skip the alias (alias adds a copy per quantize and blocks CSE).
+        is_mxfp8 = ScalingMode(scaling_mode).is_mxfp8_scaling
         return ffi.ffi_lowering(
             BaseDBiasQuantizePrimitive.name,
-            operand_output_aliases={2: 4},  # donate amax buffer to updated_amax
+            operand_output_aliases={} if is_mxfp8 else {2: 4},  # donate amax buffer to updated_amax
         )(
             ctx,
             x,
@@ -350,6 +352,8 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             use_rht=use_rht,
             mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
+        if ScalingMode(scaling_mode).is_mxfp8_scaling:
+            updated_amax = amax  # Not written by the FFI for MXFP8 (no alias), so pass it through.
         # Compute the colwise scale shape only when a colwise output is requested so that a
         # rowwise-only quantize does not inherit the colwise axis alignment constraint.
         rowwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape(
@@ -847,9 +851,10 @@ def _quantize_dbias_impl(
 
     use_rht = False
 
-    scale = jnp.empty((1,), jnp.float32)
+    # Constant placeholders (jnp.empty would give each quantize its own buffer and block CSE).
+    scale = jnp.zeros((1,), jnp.float32)
+    rht_matrix = jnp.zeros((1, 1), jnp.bfloat16)
     post_rht_amax = None
-    rht_matrix = jnp.empty((1, 1), jnp.bfloat16)
     amax = x.amax
 
     if hasattr(quantizer, "use_rht") and quantizer.use_rht:
