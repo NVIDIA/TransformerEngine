@@ -3475,46 +3475,62 @@ def test_te_ops_clamped_swiglu_parameters_compile(limit, alpha, glu_linear_offse
     )
 
 
-@pytest.mark.parametrize("quantization", [None, "fp8", "nvfp4", "nvfp4_no_rht"])
 @pytest.mark.parametrize(
-    "activation,training,mode",
+    "normalization,activation,quantization,training,mode",
     [
-        ("GELU", True, "default"),
-        ("ReLU", True, "default"),
-        ("GEGLU", True, "default"),
-        ("SwiGLU", True, "default"),
-        ("SiTUGLU", True, "default"),
-        ("ClampedSwiGLU", True, "default"),
-        ("GELU", False, "default"),
-        ("SwiGLU", False, "default"),
-        ("GELU", True, "reduce-overhead"),
-        ("SwiGLU", True, "reduce-overhead"),
+        (norm, act, quant, training, mode)
+        for quant in (None, "fp8", "nvfp4", "nvfp4_no_rht")
+        for norm, act, training, mode in (
+            ("LayerNorm", "GELU", True, "default"),
+            (None, "ReLU", True, "default"),
+            (None, "GEGLU", True, "default"),
+            ("RMSNorm", "SwiGLU", True, "default"),
+            (None, "SiTUGLU", True, "default"),
+            (None, "ClampedSwiGLU", True, "default"),
+            ("LayerNorm", "GELU", False, "default"),
+            ("RMSNorm", "SwiGLU", False, "default"),
+            ("LayerNorm", "GELU", True, "reduce-overhead"),
+            ("RMSNorm", "SwiGLU", True, "reduce-overhead"),
+        )
+    ]
+    + [
+        ("LayerNorm", "GELU", "mxfp8", True, "default"),
+        ("RMSNorm", "SwiGLU", "mxfp8", True, "default"),
+        ("LayerNorm", "GELU", "mxfp8", False, "default"),
+        ("LayerNorm", "GELU", "mxfp8", True, "reduce-overhead"),
+        ("RMSNorm", "SwiGLU", "mxfp8", True, "reduce-overhead"),
     ],
 )
-def test_te_ops_activation_mlp_compile(activation, quantization, training, mode, monkeypatch):
+def test_te_ops_mlp_compile(normalization, activation, quantization, training, mode, monkeypatch):
     nvfp4 = quantization in ("nvfp4", "nvfp4_no_rht")
     if nvfp4 and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     dtype = torch.float16 if quantization is None else torch.bfloat16
     tols = {"rtol": 0, "atol": 0} if nvfp4 or not training else {}
     torch._dynamo.reset()
     counters.clear()
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
-    in_features, hidden = (128, 128) if nvfp4 else (32, 64)
+    in_features, hidden = (128, 128) if nvfp4 or quantization == "mxfp8" else (32, 64)
     gated = activation in ("GEGLU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU")
     cache_input = training and activation == "GELU" and quantization == "fp8"
-    rows = 64 if activation == "GELU" and quantization == "nvfp4" else 32
-    model = (
-        te.ops.Sequential(
-            te.ops.Linear(in_features, hidden * (2 if gated else 1), device="cuda", dtype=dtype),
-            getattr(te.ops, activation)(cache_quantized_input=cache_input),
-            te.ops.Linear(hidden, in_features, device="cuda", dtype=dtype),
-        )
-        .train(training)
-        .requires_grad_(training)
-    )
+    if quantization == "mxfp8":
+        rows = 128
+    elif quantization == "nvfp4" and (activation == "GELU" or normalization is not None):
+        rows = 64
+    else:
+        rows = 32
+    ops = [
+        te.ops.Linear(in_features, hidden * (2 if gated else 1), device="cuda", dtype=dtype),
+        getattr(te.ops, activation)(cache_quantized_input=cache_input),
+        te.ops.Linear(hidden, in_features, device="cuda", dtype=dtype),
+    ]
+    if normalization is not None:
+        ops.insert(0, getattr(te.ops, normalization)(in_features, device="cuda", dtype=dtype))
+    model = te.ops.Sequential(*ops).train(training).requires_grad_(training)
     if training:
         with torch.no_grad():
             for param in model.parameters():
@@ -3524,6 +3540,8 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
         quant_recipe = recipe.NVFP4BlockScaling(
             disable_rht=quantization == "nvfp4_no_rht", disable_stochastic_rounding=True
         )
+    elif quantization == "mxfp8":
+        quant_recipe = recipe.MXFP8BlockScaling()
     else:
         quant_recipe = recipe.Float8CurrentScaling(backward_override=None) if quantization else None
 
@@ -3562,7 +3580,7 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
         torch.testing.assert_close(x.grad, eager_x.grad, **tols)
         for param, reference in zip(model.parameters(), eager_model.parameters()):
             torch.testing.assert_close(param.grad, reference.grad, **tols)
-        if quantization is None and step == 0:
+        if quantization is None and normalization is None and step == 0:
             ref_x = x.detach().clone().requires_grad_()
             params = [p.detach().clone().requires_grad_() for p in model.parameters()]
             ref = torch.nn.functional.linear(ref_x.float(), *[p.float() for p in params[:2]])
@@ -3583,9 +3601,186 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
             assert len(graphs) == graph_count
         del actual, expected, x, eager_x
     if mode == "default":
+        if normalization is not None:
+            _assert_custom_ops(graphs, normalization.lower(), backward=training)
         fused = training and quantization is not None and activation in ("GELU", "ReLU")
         _assert_custom_ops(graphs, activation.lower(), backward=training and not fused)
         _assert_custom_ops(graphs, "backwardactivationbias", forward=False, backward=fused)
     else:
         assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
         assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0
+
+
+def _ops_normalization_reference(normalization, x, params, *, eps, zero_centered_gamma):
+    if normalization == "L2Normalization":
+        return x * torch.rsqrt(x.square().sum(-1, keepdim=True) + eps)
+    weight = params[0] + 1 if zero_centered_gamma else params[0]
+    if normalization == "RMSNorm":
+        return x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps) * weight
+    return torch.nn.functional.layer_norm(x, weight.shape, weight, params[1], eps)
+
+
+def _check_te_ops_normalization_compile(
+    normalization,
+    *,
+    dtype=torch.float32,
+    layout="contiguous",
+    zero_centered_gamma=False,
+    autocast=False,
+    training=True,
+    dynamic=False,
+    use_module=False,
+):
+    if layout == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    torch._dynamo.reset()
+    eps = 1e-5
+    if normalization == "L2Normalization":
+        model = te.ops.Sequential(te.ops.L2Normalization(eps=eps))
+    elif use_module:
+        model = getattr(te, normalization)(
+            64, eps=eps, zero_centered_gamma=zero_centered_gamma, device="cuda", dtype=dtype
+        )
+    else:
+        model = te.ops.Sequential(
+            getattr(te.ops, normalization)(
+                64, eps=eps, zero_centered_gamma=zero_centered_gamma, device="cuda", dtype=dtype
+            )
+        )
+    params = tuple(model.parameters())
+    with torch.no_grad():
+        for param in params:
+            param.copy_(torch.randn_like(param))
+
+    def run(x):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            return model(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    eager_reference = autocast or dynamic
+    tols = {} if eager_reference else dtype_tols(dtype)
+    for step, rows in enumerate((16, 16, 32, 48) if dynamic else (32,)):
+        shape = (rows, 64) if dynamic else (2, 16, 64)
+        x = torch.randn(shape, device="cuda", dtype=dtype)
+        if layout == "fp8":
+            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+            x = quantizer(x)
+        if layout == "strided":
+            x = x.transpose(0, 1)
+        x = x.detach().requires_grad_(training)
+        if dynamic:
+            torch._dynamo.mark_dynamic(x, 0)
+        if eager_reference:
+            ref_x = x.detach().clone().requires_grad_(training)
+            ref_params = params
+        else:
+            ref_x = (x.dequantize() if layout == "fp8" else x).detach().double()
+            ref_x.requires_grad_(training)
+            ref_params = tuple(p.detach().double().requires_grad_(training) for p in params)
+        with torch.set_grad_enabled(training):
+            if layout == "strided":
+                with pytest.raises(
+                    Exception, match="requires contiguous inputs under torch.compile"
+                ):
+                    compiled(x)
+                actual = run(x)
+            else:
+                actual = compiled(x)
+            expected = (
+                run(ref_x)
+                if eager_reference
+                else _ops_normalization_reference(
+                    normalization,
+                    ref_x,
+                    ref_params,
+                    eps=eps,
+                    zero_centered_gamma=zero_centered_gamma,
+                )
+            )
+            torch.testing.assert_close(actual.to(expected.dtype), expected, **tols)
+            if training:
+                dy = torch.randn_like(actual)
+                got = torch.autograd.grad(actual, (x, *params), dy)
+                want = torch.autograd.grad(expected, (ref_x, *ref_params), dy.to(expected.dtype))
+                for grad, reference in zip(got, want):
+                    torch.testing.assert_close(grad.to(reference.dtype), reference, **tols)
+        if autocast and normalization != "L2Normalization":
+            assert actual.dtype == torch.bfloat16
+        if dynamic:
+            if step == 1:
+                graph_count = len(graphs)
+            elif step > 1:
+                assert len(graphs) == graph_count
+    if layout != "strided":
+        _assert_custom_ops(graphs, normalization.lower(), backward=training)
+
+
+@pytest.mark.parametrize(
+    "normalization,dtype,layout,training",
+    [
+        ("LayerNorm", torch.float32, "contiguous", True),
+        ("LayerNorm", torch.float16, "contiguous", False),
+        ("LayerNorm", torch.bfloat16, "strided", True),
+        ("LayerNorm", torch.bfloat16, "fp8", True),
+        ("RMSNorm", torch.float16, "contiguous", False),
+        ("RMSNorm", torch.bfloat16, "fp8", True),
+        ("L2Normalization", torch.bfloat16, "contiguous", True),
+        ("L2Normalization", torch.float16, "contiguous", False),
+        ("L2Normalization", torch.bfloat16, "fp8", True),
+    ],
+)
+def test_te_ops_normalization_variants_compile(normalization, dtype, layout, training):
+    _check_te_ops_normalization_compile(
+        normalization, dtype=dtype, layout=layout, training=training
+    )
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+def test_te_ops_normalization_autocast_compile(normalization):
+    _check_te_ops_normalization_compile(
+        normalization, zero_centered_gamma=True, autocast=True, use_module=True
+    )
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+def test_te_ops_normalization_dynamic_compile(normalization):
+    _check_te_ops_normalization_compile(normalization, dynamic=True)
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("quantization", [None, "fp8"])
+def test_te_ops_normalization_multidim_compile(normalization, quantization):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    torch._dynamo.reset()
+    dtype = torch.bfloat16
+    norm = getattr(te.ops, normalization)((2, 32), device="cuda", dtype=dtype)
+    with torch.no_grad():
+        for param in norm.parameters():
+            param.copy_(torch.randn_like(param))
+    ops = [norm]
+    if quantization == "fp8":
+        ops.append(te.ops.BasicLinear(32, 32, device="cuda", dtype=dtype))
+    model = te.ops.Sequential(*ops)
+    eager_model = copy.deepcopy(model)
+    quant_recipe = recipe.Float8CurrentScaling(backward_override=None) if quantization else None
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(16, 2, 32, device="cuda", dtype=dtype, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_()
+    actual = compiled(x)
+    expected = run(eager_x, eager_model)
+    torch.testing.assert_close(actual, expected)
+    dy = torch.randn_like(actual)
+    actual.backward(dy)
+    expected.backward(dy)
+    torch.testing.assert_close(x.grad, eager_x.grad)
+    for param, reference in zip(model.parameters(), eager_model.parameters()):
+        torch.testing.assert_close(param.grad, reference.grad)
+    _assert_custom_ops(graphs, normalization.lower(), backward=True)

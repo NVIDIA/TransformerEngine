@@ -5,22 +5,42 @@
 """Fusable operation for L2 Normalization."""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Optional
 import os
 
 import torch
 
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...dynamo import TensorOrQuantized, TensorSpec
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
     l2normalization_backward_fused,
     warmup_jit_l2normalization_all_dtypes,
 )
-from ...tensor import Quantizer
 from ...utils import clear_tensor_data
-from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize
+from ..op import BasicOperation
+from .._common import is_quantized_tensor, maybe_dequantize
+
+
+@dataclass(slots=True)
+class L2NormalizationFwdArgs:
+    """L2 normalization input and configuration."""
+
+    input_: TensorOrQuantized
+    eps: float
+    requires_grad: bool
+
+
+@dataclass(slots=True)
+class L2NormalizationBwdArgs:
+    """L2 normalization gradient and saved tensors."""
+
+    grad_output: TensorOrQuantized
+    input_: TensorOrQuantized
+    rsqrt_norm: torch.Tensor
+    eps: float
 
 
 class L2Normalization(BasicOperation):
@@ -70,54 +90,76 @@ class L2Normalization(BasicOperation):
                 for hidden_size in common_hidden_sizes:
                     warmup_jit_l2normalization_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
-    def op_forward(
+    fwd_args_type = L2NormalizationFwdArgs
+    bwd_args_type = L2NormalizationBwdArgs
+
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        if is_cpu_offload_enabled():
+            return "CPU offloading"
+        return super().compile_unsupported_reason(mode)
+
+    def pack_forward_args(
         self,
-        ctx: OperationContext,
-        input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        # Use input directly - torch.compile can handle multi-dimensional tensors
-        x = maybe_dequantize(input_)
+        basic_op_ctxs,
+        input_,
+        *,
+        basic_op_kwargs,
+        **_unused,
+    ) -> L2NormalizationFwdArgs:
+        if basic_op_kwargs[0]:
+            raise ValueError("L2Normalization forward does not expect keyword arguments")
+        if (
+            torch.compiler.is_compiling()
+            and not is_quantized_tensor(input_)
+            and not input_.is_contiguous()
+        ):
+            raise RuntimeError(
+                "L2Normalization forward requires contiguous inputs under torch.compile"
+            )
+        return L2NormalizationFwdArgs(input_, self.eps, basic_op_ctxs[0].requires_grad)
 
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
+    @classmethod
+    def forward_compute(
+        cls, args: L2NormalizationFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
+        x = maybe_dequantize(args.input_)
+        if not args.requires_grad:
+            return l2normalization_fused(x, args.eps), [()], ()
+        y, rsqrt_norm = l2normalization_fwd_fused(x, args.eps)
+        return y, [()], (x if x is not args.input_ else None, rsqrt_norm)
 
-        # Compute L2 normalization using fused implementation
-        # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
-        if requires_grad:
-            # Training: use version that returns output and intermediate values for backward pass
-            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
-        else:
-            # Inference: use lightweight version that only returns output
-            y = l2normalization_fused(x, self.eps)
-            rsqrt_norm = None  # Not needed for inference
+    @classmethod
+    def forward_compute_fake(cls, args: L2NormalizationFwdArgs):
+        x = args.input_
+        y = TensorSpec(shape=x.shape, dtype=x.dtype, device=x.device)
+        if not args.requires_grad:
+            return y, [()], ()
+        saved_input = TensorSpec(shape=x.shape, dtype=x.dtype, device=x.device)
+        rsqrt_norm = TensorSpec(shape=(*x.shape[:-1], 1), dtype=torch.float32, device=x.device)
+        return y, [()], (saved_input if is_quantized_tensor(x) else None, rsqrt_norm)
 
-        # Save state for backward pass
-        if requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x, rsqrt_norm)
-            ctx.save_for_backward(x, rsqrt_norm)
+    def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
+        ctx = basic_op_ctxs[0]
+        x = args.input_ if aux[0] is None else aux[0]
+        rsqrt_norm = aux[1]
+        if is_cpu_offload_enabled():
+            mark_activation_offload(x, rsqrt_norm)
+        ctx.save_for_backward(x, rsqrt_norm)
 
-        return y
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **_unused) -> L2NormalizationBwdArgs:
+        x, rsqrt_norm = basic_op_ctxs[0].saved_tensors
+        return L2NormalizationBwdArgs(grad_output, x, rsqrt_norm, self.eps)
 
-    def op_backward(
-        self,
-        ctx: OperationContext,
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[()]]:
+    @classmethod
+    def backward_compute(cls, args: L2NormalizationBwdArgs, *, in_custom_op: bool = False):
+        x = maybe_dequantize(args.input_)
+        dy = maybe_dequantize(args.grad_output)
+        dx = l2normalization_backward_fused(dy, x, args.rsqrt_norm, args.eps)
+        if not in_custom_op:
+            clear_tensor_data(args.input_, args.rsqrt_norm)
+        return dx, [()], [()]
 
-        # Saved tensors from forward pass
-        x, rsqrt_norm = ctx.saved_tensors
-
-        dy = maybe_dequantize(grad_output)
-
-        # Compute L2 norm backward pass using fused implementation - recalculates l2_norm_squared_eps
-        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
-
-        # Clear saved tensors if possible
-        clear_tensor_data(x)
-        clear_tensor_data(rsqrt_norm)
-
-        # No parameters, so empty tuple for param grads
-        return dx, ()
+    @classmethod
+    def backward_compute_fake(cls, args: L2NormalizationBwdArgs):
+        x = args.input_
+        return TensorSpec(shape=x.shape, dtype=x.dtype, device=x.device), [()], [()]

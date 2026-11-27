@@ -72,8 +72,10 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     # Each pass may provide its own custom op.
     compile_ops: tuple[Optional[Callable[..., Any]], Optional[Callable[..., Any]]] = (None, None)
 
-    def __init_subclass__(cls, **kwargs) -> None:
+    def __init_subclass__(cls, *, inherit_compile_ops: bool = False, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
+        if inherit_compile_ops:
+            return
         cls._register_compile_ops()
 
     @classmethod

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
+from dataclasses import dataclass
 import math
 import os
 from typing import Optional
@@ -15,6 +16,7 @@ import torch
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...dynamo import TensorOrQuantized, TensorSpec
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 from ...utils import (
@@ -23,12 +25,42 @@ from ...utils import (
     clear_tensor_data,
     devices_match,
 )
-from ..op import BasicOperation, OperationContext
+from ..op import BasicOperation
 from .._common import (
     get_fused_normalization_quantizer,
+    is_quantized_tensor,
     maybe_autocast_dtype,
     maybe_dequantize,
 )
+
+
+@dataclass(slots=True)
+class LayerNormFwdArgs:
+    """LayerNorm inputs, parameters and quantization configuration."""
+
+    input_: TensorOrQuantized
+    weight: torch.Tensor
+    bias: torch.Tensor
+    eps: float
+    zero_centered_gamma: bool
+    sm_margin: int
+    dtype: torch.dtype
+    output_quantizer: Optional[Quantizer]
+    requires_grad: bool
+
+
+@dataclass(slots=True)
+class LayerNormBwdArgs:
+    """LayerNorm gradient, saved tensors and parameters."""
+
+    grad_output: TensorOrQuantized
+    input_: TensorOrQuantized
+    means: torch.Tensor
+    rstdevs: torch.Tensor
+    weight: torch.Tensor
+    zero_centered_gamma: bool
+    sm_margin: int
+    dtype: torch.dtype
 
 
 class LayerNorm(BasicOperation):
@@ -172,100 +204,148 @@ class LayerNorm(BasicOperation):
         self.weight = weight
         self.bias = bias
 
-    def op_forward(
-        self,
-        ctx: OperationContext,
-        input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+    fwd_args_type = LayerNormFwdArgs
+    bwd_args_type = LayerNormBwdArgs
+
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        if is_cpu_offload_enabled():
+            return "CPU offloading"
+        return super().compile_unsupported_reason(mode)
+
+    def fuser_forward(self, basic_op_ctxs, input_, **kwargs):
         if is_in_onnx_export_mode():
-            return self.op_onnx_forward(input_)
+            return self.op_onnx_forward(input_), [()]
+        return super().fuser_forward(basic_op_ctxs, input_, **kwargs)
 
-        # Fall back to a high-precision output when fused quantization is unsupported.
-        next_op_input_quantizer = get_fused_normalization_quantizer(next_op_input_quantizer)
-
-        # Check tensor dims
-        weight = self.weight
-        weight_dims = tuple(weight.size())
+    def pack_forward_args(
+        self,
+        basic_op_ctxs,
+        input_,
+        *,
+        next_op_input_quantizer,
+        basic_op_kwargs,
+        **_unused,
+    ) -> LayerNormFwdArgs:
+        if basic_op_kwargs[0]:
+            raise ValueError("LayerNorm forward does not expect keyword arguments")
+        if (
+            torch.compiler.is_compiling()
+            and not is_quantized_tensor(input_)
+            and not input_.is_contiguous()
+        ):
+            raise RuntimeError("LayerNorm forward requires contiguous inputs under torch.compile")
+        weight_dims = tuple(self.weight.size())
         input_dims = tuple(input_.size())
         if len(input_dims) < len(weight_dims) or input_dims[-len(weight_dims) :] != weight_dims:
             raise ValueError(
                 f"Input tensor (shape={input_dims}) "
                 f"and weight tensor (shape={weight_dims}) are not compatible"
             )
-
-        # Check input tensors
-        inner_dim = math.prod(weight_dims)
-        dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
-        x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
-        b = maybe_dequantize(self.bias, dtype).view((inner_dim,))
-
-        # Compute layer norm
-        sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
-        y, means, rstdevs = layernorm_fwd(
-            x,
-            w,
-            b,
+        requires_grad = basic_op_ctxs[0].requires_grad
+        return LayerNormFwdArgs(
+            input_,
+            self.weight,
+            self.bias,
             self.eps,
-            None,
-            next_op_input_quantizer,
-            TE_DType[dtype],
-            sm_margin,
             self.zero_centered_gamma,
+            self._sm_margins["forward" if requires_grad else "inference"],
+            maybe_autocast_dtype(default_dtype=self.weight.dtype),
+            get_fused_normalization_quantizer(next_op_input_quantizer),
+            requires_grad,
         )
 
-        # Save state for backward pass
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x, means, rstdevs)
-            ctx.save_for_backward(x, means, rstdevs)
-            ctx.dtype = dtype
-
-        # Reshape output tensor
-        out = y.view(input_dims)
-        return out
-
-    def op_backward(
-        self,
-        ctx: OperationContext,
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[()]]:
-
-        # Saved tensors from forward pass
-        x, means, rstdevs = ctx.saved_tensors
-
-        # Tensor dims
-        weight_dims = self.weight.size()
+    @classmethod
+    def forward_compute(
+        cls, args: LayerNormFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
+        weight_dims = args.weight.size()
         inner_dim = math.prod(weight_dims)
+        x = maybe_dequantize(args.input_, args.dtype)
+        w = maybe_dequantize(args.weight, args.dtype).view((inner_dim,))
+        b = maybe_dequantize(args.bias, args.dtype).view((inner_dim,))
+        x_kernel = (
+            x if len(weight_dims) == 1 else x.view((*x.shape[: -len(weight_dims)], inner_dim))
+        )
+        y, means, rstdevs = layernorm_fwd(
+            x_kernel,
+            w,
+            b,
+            args.eps,
+            None,
+            args.output_quantizer,
+            TE_DType[args.dtype],
+            args.sm_margin,
+            args.zero_centered_gamma,
+        )
+        out = y if len(weight_dims) == 1 else y.view(args.input_.size())
+        if not args.requires_grad:
+            return out, [()], ()
+        return out, [()], (x if x is not args.input_ else None, means, rstdevs)
 
-        # Check input tensors
-        dtype = ctx.dtype
-        dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
+    @classmethod
+    def forward_compute_fake(cls, args: LayerNormFwdArgs):
+        x = args.input_
+        out = TensorSpec(
+            shape=x.shape, dtype=args.dtype, device=x.device, quantizer=args.output_quantizer
+        )
+        if out.is_quantized and math.prod(args.weight.shape) != args.weight.shape[-1]:
+            out.update_usage(columnwise_usage=False)
+        if not args.requires_grad:
+            return out, [()], ()
+        saved_input = None
+        if is_quantized_tensor(x) or x.dtype != args.dtype:
+            saved_input = TensorSpec(shape=x.shape, dtype=args.dtype, device=x.device)
+        rows = math.prod(x.shape[: len(x.shape) - len(args.weight.shape)])
+        stats = TensorSpec(shape=(rows,), dtype=torch.float32, device=x.device)
+        return out, [()], (saved_input, stats, stats)
 
-        # Compute layer norm backward pass
-        dx, dw, db = layernorm_bwd(
-            dy,
+    def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
+        ctx = basic_op_ctxs[0]
+        x = args.input_ if aux[0] is None else aux[0]
+        means, rstdevs = aux[1:]
+        if is_cpu_offload_enabled():
+            mark_activation_offload(x, means, rstdevs)
+        ctx.save_for_backward(x, means, rstdevs)
+        ctx.dtype = args.dtype
+
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **_unused) -> LayerNormBwdArgs:
+        ctx = basic_op_ctxs[0]
+        x, means, rstdevs = ctx.saved_tensors
+        return LayerNormBwdArgs(
+            grad_output,
             x,
             means,
             rstdevs,
-            w,
-            self._sm_margins["backward"],
+            self.weight,
             self.zero_centered_gamma,
+            self._sm_margins["backward"],
+            ctx.dtype,
         )
 
-        # Clear saved tensors if possible
-        clear_tensor_data(x)
-        clear_tensor_data(means)
-        clear_tensor_data(rstdevs)
+    @classmethod
+    def backward_compute(cls, args: LayerNormBwdArgs, *, in_custom_op: bool = False):
+        inner_dim = math.prod(args.weight.size())
+        x = maybe_dequantize(args.input_, args.dtype).view((-1, inner_dim))
+        dy = maybe_dequantize(args.grad_output, args.dtype).view(x.size())
+        w = maybe_dequantize(args.weight, args.dtype).view((inner_dim,))
+        dx, dw, db = layernorm_bwd(
+            dy, x, args.means, args.rstdevs, w, args.sm_margin, args.zero_centered_gamma
+        )
+        if not in_custom_op:
+            clear_tensor_data(args.input_, args.means, args.rstdevs)
+        weight_dims = args.weight.size()
+        return (
+            dx.view(args.grad_output.size()),
+            [(dw.view(weight_dims), db.view(weight_dims))],
+            [()],
+        )
 
-        # Reshape results
-        grad_input = dx.view(grad_output.size())
-        grad_weight = dw.view(weight_dims)
-        grad_bias = db.view(weight_dims)
-        return grad_input, (grad_weight, grad_bias)
+    @classmethod
+    def backward_compute_fake(cls, args: LayerNormBwdArgs):
+        dy = args.grad_output
+        dx = TensorSpec(shape=dy.shape, dtype=args.dtype, device=dy.device)
+        dparam = TensorSpec(shape=args.weight.shape, dtype=args.dtype, device=dy.device)
+        return dx, [(dparam, dparam)], [()]
 
     def op_onnx_forward(
         self,

@@ -13,7 +13,7 @@ from transformer_engine.pytorch.ops import LayerNorm as _LayerNormOp
 __all__ = ["LayerNorm"]
 
 
-class LayerNorm(_LayerNormOp):
+class LayerNorm(_LayerNormOp, inherit_compile_ops=True):
     r"""Layer Normalization
 
     Applies Layer Normalization over a mini-batch of inputs as described in
