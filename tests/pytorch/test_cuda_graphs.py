@@ -164,6 +164,73 @@ def test_capture_preserves_eager_calibration_for_subclass():
     assert eager.fp8_calibration
 
 
+def test_invalid_module_does_not_leave_capture_state():
+    from transformer_engine.pytorch import graph as te_graph
+
+    class LocalLinear(torch.nn.Linear):
+        pass
+
+    model = LocalLinear(8, 8)
+    original_call = LocalLinear.__call__
+    with pytest.raises(TypeError, match="Graphing for"):
+        make_graphed_callables((model, None), ((torch.zeros(1, 8),), ()))
+    assert LocalLinear.__call__ is original_call
+    assert not te_graph.is_graph_capturing()
+
+
+@pytest.mark.parametrize("cleanup_fails", (False, True), ids=("retry", "cleanup-error"))
+def test_warmup_failure_restores_capture_state(monkeypatch, cleanup_fails):
+    from transformer_engine.pytorch import graph as te_graph
+
+    class WarmupLinear(torch.nn.Linear):
+        fail_warmup = True
+
+        def forward(self, inp):
+            output = super().forward(inp)
+            if self.fail_warmup:
+                torch.rand(1, device=inp.device)
+                raise RuntimeError("warmup forward failed")
+            return output
+
+    def fail_restore(*_):
+        raise ValueError("FP8 restore failed")
+
+    model = WarmupLinear(32, 32, dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(4, 32, dtype=torch.bfloat16, device="cuda")
+    rng = torch.cuda.get_rng_state()
+    original_call = WarmupLinear.__call__
+
+    with monkeypatch.context() as patch:
+        if cleanup_fails:
+            patch.setattr(te_graph, "restore_fp8_tensors", fail_restore)
+        with pytest.raises(RuntimeError, match="warmup forward failed") as error:
+            make_graphed_callables(model, (inp,), num_warmup_iters=1)
+    assert not model._forward_hooks
+    assert WarmupLinear.__call__ is original_call
+    assert not te_graph.is_graph_capturing()
+    assert torch.equal(torch.cuda.get_rng_state(), rng)
+    if cleanup_fails:
+        assert isinstance(error.value.__cause__, ValueError)
+        assert str(error.value.__cause__) == "FP8 restore failed"
+        return
+
+    model.fail_warmup = False
+    expected = model(inp)
+    expected.sum().backward()
+    expected_grads = [param.grad for param in model.parameters()]
+    model.zero_grad(set_to_none=True)
+    graphed = make_graphed_callables(model, (inp,), num_warmup_iters=1)
+    try:
+        actual = graphed(inp)
+        actual.sum().backward()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            [param.grad for param in model.parameters()], expected_grads, rtol=0, atol=0
+        )
+    finally:
+        graphed.reset()
+
+
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Check that two lists of tensors match exactly."""
     assert len(l1) == len(l2), "Unequal number of outputs."
