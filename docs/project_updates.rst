@@ -32,7 +32,7 @@ The README highlights only the most recent updates.
 * **[09/2025]** `Pretraining Large Language Models with NVFP4 <https://www.arxiv.org/pdf/2509.25149>`_.
 * **[09/2025]** `Native FP8 Mixed Precision Training for Ling 2.0, Open Sourced! <https://huggingface.co/blog/im0qianqian/ling-mini-2-fp8-mixed-precision-training-solution>`_.
 * **[09/2025]** `Faster Training Throughput in FP8 Precision with NVIDIA NeMo <https://developer.nvidia.com/blog/faster-training-throughput-in-fp8-precision-with-nvidia-nemo/>`_.
-* **[08/2025]** `How We Built DeepL's Next-Generation LLMs with FP8 for Training and Inference <https://www.deepl.com/en/blog/tech/next-generation-llm-fp8-training>`_.
+* **[08/2025]** How We Built DeepL's Next-Generation LLMs with FP8 for Training and Inference.
 * **[08/2025]** `NVFP4 Trains with Precision of 16-Bit and Speed and Efficiency of 4-Bit <https://developer.nvidia.com/blog/nvfp4-trains-with-precision-of-16-bit-and-speed-and-efficiency-of-4-bit/>`_.
 * **[06/2025]** `Floating Point 8: An Introduction to Efficient, Lower-Precision AI Training <https://developer.nvidia.com/blog/floating-point-8-an-introduction-to-efficient-lower-precision-ai-training/>`_.
 * **[05/2025]** `Advanced Optimization Strategies for LLM Training on NVIDIA Grace Hopper <https://developer.nvidia.com/blog/advanced-optimization-strategies-for-llm-training-on-nvidia-grace-hopper/>`_.

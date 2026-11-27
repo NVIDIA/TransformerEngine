@@ -223,7 +223,7 @@ Swizzling scaling factors
 
 Like :doc:`FP8 Blockwise Scaling <../fp8_blockwise_scaling/fp8_blockwise_scaling>`, MXFP8 uses different data layouts for communication and computation.
 MXFP8 GEMMs require scaling factors in a specific hardware layout
-(see `cuBLAS documentation <https://docs.nvidia.com/cuda/cublas/index.html#block-scaling-factors-layout>`__).
+(see `cuBLAS documentation <https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout>`__).
 The conversion to this GEMM-ready layout is called *swizzling*. When no communication is needed,
 swizzling can be fused with quantization. When communication is required, swizzled scaling factors
 cannot be communicated across devices, so Transformer Engine performs swizzling after communication,
