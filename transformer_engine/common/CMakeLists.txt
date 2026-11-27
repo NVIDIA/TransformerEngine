@@ -80,6 +80,29 @@ function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
   endif()
 endfunction()
 
+# Compiler warnings. These apply only to Transformer Engine's own targets, are
+# PRIVATE so they never propagate to consumers, and third-party headers are
+# included as SYSTEM so their warnings are not reported.
+option(NVTE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+function(nvte_enable_compiler_warnings TARGET_NAME)
+  target_compile_options(
+    ${TARGET_NAME}
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
+  )
+  if(NVTE_WARNINGS_AS_ERRORS)
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Werror=all-warnings>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Werror>
+    )
+  endif()
+endfunction()
+
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
 if (CUDAToolkit_VERSION VERSION_LESS 12.1)
@@ -434,6 +457,7 @@ endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 nvte_enable_bolt_compatible_compile_options(transformer_engine)
+nvte_enable_compiler_warnings(transformer_engine)
 
 # This is TE-specific and should not apply to all targets
 target_link_options(
@@ -470,6 +494,21 @@ set_property(
   PROPERTY
   COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
 
+# The CUTLASS SM90 grouped GEMM kernels use TMA multicast. When they are also
+# compiled for family targets such as sm_120f, ptxas emits an advisory warning
+# about third-party CUTLASS code, so silence that advisory for this source.
+execute_process(COMMAND "${CUDAToolkit_BIN_DIR}/ptxas" --help
+                OUTPUT_VARIABLE _nvte_ptxas_help
+                ERROR_QUIET)
+if(_nvte_ptxas_help MATCHES "suppress-async-bulk-multicast-advisory-warning")
+  set_property(
+    SOURCE gemm/cutlass_grouped_gemm.cu
+    APPEND
+    PROPERTY
+    COMPILE_OPTIONS "-Xptxas=--suppress-async-bulk-multicast-advisory-warning")
+endif()
+unset(_nvte_ptxas_help)
+
 # CUTLASS kernels could cause hang in debug build
 set(CUTLASS_KERNEL_SOURCES
     gemm/cutlass_grouped_gemm.cu
@@ -490,7 +529,7 @@ target_link_libraries(transformer_engine PUBLIC
 target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
 if(NVTE_WITH_CUTEDSL)
-  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_include_directories(transformer_engine SYSTEM PRIVATE ${TVM_FFI_INCLUDE_DIR})
   target_compile_definitions(
     transformer_engine PRIVATE
     NVTE_WITH_CUTEDSL
@@ -500,11 +539,11 @@ endif()
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
+target_include_directories(transformer_engine SYSTEM PRIVATE ${NCCL_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
-target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
-target_include_directories(transformer_engine PRIVATE
+target_include_directories(transformer_engine SYSTEM PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine SYSTEM PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
 
@@ -513,7 +552,7 @@ option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
     find_package(MPI REQUIRED)
     target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    target_include_directories(transformer_engine SYSTEM PRIVATE ${MPI_CXX_INCLUDES})
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
@@ -529,7 +568,7 @@ option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
 
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
+    target_include_directories(transformer_engine SYSTEM PRIVATE ${CUBLASMP_DIR}/include)
     find_cublasmp_version(CUBLASMP_VERSION CUBLASMP_INCLUDE_DIR ${CUBLASMP_DIR})
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp.so libcublasmp.so.0
@@ -562,7 +601,7 @@ endif()
 option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
-    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    target_include_directories(transformer_engine SYSTEM PRIVATE ${CUSOLVERMP_DIR}/include)
     find_library(CUSOLVERMP_LIB
                  NAMES cusolverMp libcusolverMp
                  PATHS ${CUSOLVERMP_DIR}
@@ -616,7 +655,7 @@ if(NOT NCCL_LIB)
       REQUIRED)
 endif()
 
-target_include_directories(transformer_engine PRIVATE
+target_include_directories(transformer_engine SYSTEM PRIVATE
     ${NCCL_EP_INCLUDE_DIR})
 
 # libtransformer_engine.so uses only the baseline NCCL API directly. NCCL EP's

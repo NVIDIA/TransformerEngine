@@ -5,6 +5,7 @@
 """PyTorch related extensions."""
 
 import os
+import sysconfig
 from pathlib import Path
 from importlib import metadata
 
@@ -16,6 +17,7 @@ from .utils import (
     get_cuda_include_dirs,
     debug_build_enabled,
     get_bolt_build_flags,
+    get_warning_flags,
     nccl_ep_enabled,
     setup_mpi_flags,
 )
@@ -58,7 +60,7 @@ def setup_pytorch_extension(
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
 
     # Header files
-    include_dirs = get_cuda_include_dirs()
+    include_dirs = list(get_cuda_include_dirs())
     include_dirs.extend(
         [
             common_header_files,
@@ -79,6 +81,18 @@ def setup_pytorch_extension(
     bolt_cxx_flags, linker_flags = get_bolt_build_flags()
     cxx_flags.extend(bolt_cxx_flags)
 
+    # Compiler warnings. Third-party headers (PyTorch, CUDA, Python, and MPI or
+    # NVSHMEM when enabled) are included as system headers, so warnings are only
+    # reported for TE's own sources.
+    from torch.utils.cpp_extension import include_paths as torch_include_paths
+
+    cxx_flags.extend(get_warning_flags())
+    system_include_dirs = [
+        *torch_include_paths(),
+        *get_cuda_include_dirs(),
+        sysconfig.get_path("include"),
+    ]
+
     # Version-dependent CUDA options
     try:
         version = cuda_version()
@@ -89,6 +103,8 @@ def setup_pytorch_extension(
             raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
     setup_mpi_flags(include_dirs, cxx_flags)
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        system_include_dirs.append(Path(os.getenv("MPI_HOME")) / "include")
 
     # ProcessGroupNCCL class declarations are gated on USE_C10D_NCCL. get_nccl_comm_ptr
     # borrows the raw ncclComm_t from that backend and is used by both NCCL EP and the
@@ -113,12 +129,16 @@ def setup_pytorch_extension(
         ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
         nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
         include_dirs.append(nvshmem_home / "include")
+        system_include_dirs.append(nvshmem_home / "include")
         library_dirs.append(nvshmem_home / "lib")
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+
+    for system_include_dir in system_include_dirs:
+        cxx_flags.extend(["-isystem", str(system_include_dir)])
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
