@@ -12,14 +12,27 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from utils import dtype_tols
 from transformer_engine.jax.cpp_extensions.activation import ActivationParams
+from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
+from transformer_engine.jax.ep import (
+    EpLayerConfig,
+    ep_bootstrap,
+    ep_combine,
+    ep_dispatch,
+    ep_finalize,
+)
 from transformer_engine.jax.flax import _MoEBlock
 from transformer_engine.jax.moe import (
     RouterComputationInfo,
+    RoutingMapInfo,
     _moe_mesh_axes,
     _resolve_moe_mesh_resource,
+    get_moe_recv_capacity_per_rank,
+    moe,
+    record_ep_bootstrap_signature_for_moe,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
 
@@ -281,6 +294,168 @@ def test_default_ep_out_spec_uses_dp_and_fsdp():
         spec = _default_out_partition_spec()
     assert spec == (("dp", "fsdp", "ep"),)
     assert ep._leading_per_shard((16, 4), spec[0], mesh) == (2, 4)
+
+
+def dp_fsdp_ep1_mesh():
+    if len(jax.devices()) < 4:
+        pytest.skip("Requires four JAX devices for a dp=2 x fsdp=2 x ep=1 mesh")
+    return Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2, 1), ("dp", "fsdp", "ep"))
+
+
+def test_ep1_local_dispatch_groups_every_outer_axis():
+    """EP=1 dispatch keeps one group per dp x fsdp shard and round-trips through combine."""
+    mesh = dp_fsdp_ep1_mesh()
+    resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")
+    num_groups, num_experts, top_k = 4, 4, 2
+    batch, sequence, hidden = 8, 3, 8
+    tokens_per_group = batch * sequence // num_groups
+    recv_capacity = tokens_per_group * top_k
+    cfg = EpLayerConfig(top_k=top_k, topk_idx_dtype=int(jax_dtype_to_te_dtype(jnp.int32)))
+    rng = np.random.default_rng(0)
+    topk_idx = np.stack(
+        [rng.permutation(num_experts)[:top_k] for _ in range(batch * sequence)]
+    ).reshape(batch, sequence, top_k)
+    tokens = jnp.asarray(rng.uniform(-1, 1, (batch, sequence, hidden)), jnp.float32)
+    topk_weights = jnp.asarray(rng.uniform(size=(batch, sequence, top_k)), jnp.float32)
+
+    def run(x, weights):
+        recv, recv_weights, handle, counts, total = ep_dispatch(
+            cfg, jnp.asarray(topk_idx, jnp.int32), x, weights, recv_capacity
+        )
+        output = ep_combine(
+            cfg,
+            handle,
+            counts,
+            recv * recv_weights[..., None],
+            num_local_tokens=(batch, sequence),
+        )
+        return output, recv, counts, total
+
+    def loss(x, weights):
+        return jnp.sum(run(x, weights)[0])
+
+    with mesh, global_shard_guard(resource):
+        ep_bootstrap(
+            world_size=4,
+            rank=0,
+            num_experts=num_experts,
+            max_tokens_per_rank=tokens_per_group,
+            recv_capacity_per_rank=recv_capacity,
+            hidden_dim=hidden,
+        )
+        try:
+            sharding = NamedSharding(mesh, PartitionSpec(("dp", "fsdp", "ep"), None, None))
+            x, weights = jax.device_put((tokens, topk_weights), sharding)
+            output, recv, counts, total = jax.jit(run)(x, weights)
+            grad_tokens, grad_weights = jax.jit(jax.grad(loss, argnums=(0, 1)))(x, weights)
+        finally:
+            ep_finalize()
+
+    assert recv.shape == (num_groups, recv_capacity, hidden)
+    # Each group counts the assignments of its own quarter of the batch.
+    expected_counts = [
+        np.bincount(group, minlength=num_experts) for group in topk_idx.reshape(num_groups, -1)
+    ]
+    np.testing.assert_array_equal(counts, expected_counts)
+    np.testing.assert_array_equal(total, np.full((num_groups, 1), recv_capacity))
+    weight_sums = jnp.sum(topk_weights, axis=-1, keepdims=True)
+    np.testing.assert_allclose(output, tokens * weight_sums, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        grad_tokens, jnp.broadcast_to(weight_sums, tokens.shape), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        grad_weights,
+        jnp.repeat(jnp.sum(tokens, axis=-1, keepdims=True), top_k, axis=-1),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+# EP=1 sizes its own receive buffer, so a capacity below the dropless bound, given to
+# bootstrap alone or to both bootstrap and moe(), gives the same results.
+@pytest.mark.parametrize(
+    "bootstrap_capacity,moe_capacity",
+    [(None, None), (128, None), (128, 128)],
+    ids=["dropless", "small-bootstrap", "small-bootstrap-and-moe"],
+)
+def test_ep1_moe_on_dp_fsdp_mesh_matches_dense_reference(bootstrap_capacity, moe_capacity):
+    """moe() at dp=2 x fsdp=2 x ep=1 matches a dense reference in forward and backward."""
+    mesh = dp_fsdp_ep1_mesh()
+    resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")
+    num_experts, top_k = 4, 2
+    batch, sequence, hidden, intermediate = 4, 16, 128, 128
+    max_tokens_per_rank = batch * sequence // 4
+    recv_capacity = bootstrap_capacity or get_moe_recv_capacity_per_rank(
+        num_experts=num_experts,
+        num_experts_per_tok=top_k,
+        max_tokens_per_rank=max_tokens_per_rank,
+        ep_size=1,
+        use_cudnn_fusion=False,
+    )
+    keys = jax.random.split(jax.random.PRNGKey(0), 6)
+    x = jax.random.normal(keys[0], (batch, sequence, hidden), jnp.bfloat16)
+    wi = jax.random.normal(keys[1], (num_experts, hidden, 2 * intermediate)) / hidden**0.5
+    wo = jax.random.normal(keys[2], (num_experts, intermediate, hidden)) / intermediate**0.5
+    wi, wo = wi.astype(jnp.bfloat16), wo.astype(jnp.bfloat16)
+    scores = jax.random.uniform(keys[3], (batch, sequence, num_experts))
+    topk_idx = jnp.argsort(scores, axis=-1)[..., :top_k].astype(jnp.int32)
+    topk_weights = jax.nn.softmax(jax.random.normal(keys[4], (batch, sequence, top_k)), axis=-1)
+    cotangent = jax.random.normal(keys[5], (batch, sequence, hidden))
+
+    def te_loss(x, wi, wo):
+        output = moe(
+            x,
+            RoutingMapInfo(routing_indices=topk_idx, routing_weights=topk_weights),
+            wi,
+            wo,
+            num_experts=num_experts,
+            mesh_resource=resource,
+            dtype=jnp.bfloat16,
+            recv_capacity_per_rank=moe_capacity,
+            collect_expert_counts=False,
+            use_cudnn_fusion=False,
+        )[0]
+        return jnp.sum(output.astype(jnp.float32) * cotangent), output
+
+    def reference_loss(x, wi, wo):
+        gate, up = jnp.split(jnp.einsum("bsh,ehf->bsef", x, wi), 2, axis=-1)
+        expert_out = jnp.einsum("bsei,eih->bseh", jax.nn.silu(gate) * up, wo)
+        routing = jax.nn.one_hot(topk_idx, num_experts, dtype=x.dtype)
+        routing = jnp.sum(routing * topk_weights[..., None].astype(x.dtype), axis=-2)
+        output = jnp.einsum("bse,bseh->bsh", routing, expert_out)
+        return jnp.sum(output.astype(jnp.float32) * cotangent), output
+
+    with mesh, global_shard_guard(resource):
+        ep_bootstrap(
+            world_size=4,
+            rank=0,
+            num_experts=num_experts,
+            max_tokens_per_rank=max_tokens_per_rank,
+            recv_capacity_per_rank=recv_capacity,
+            hidden_dim=hidden,
+        )
+        record_ep_bootstrap_signature_for_moe(
+            num_experts=num_experts,
+            max_tokens_per_rank=max_tokens_per_rank,
+            recv_capacity_per_rank=recv_capacity,
+            hidden_dim=hidden,
+            ep_size=1,
+        )
+        try:
+            (_, output), grads = jax.jit(
+                jax.value_and_grad(te_loss, argnums=(0, 1, 2), has_aux=True)
+            )(x, wi, wo)
+        finally:
+            ep_finalize()
+    (_, ref_output), ref_grads = jax.jit(
+        jax.value_and_grad(reference_loss, argnums=(0, 1, 2), has_aux=True)
+    )(x, wi, wo)
+
+    # Both sides round BF16 intermediates, at different points.
+    tols = dtype_tols(jnp.bfloat16)
+    np.testing.assert_allclose(output.astype(jnp.float32), ref_output.astype(jnp.float32), **tols)
+    for grad, ref_grad in zip(grads, ref_grads):
+        np.testing.assert_allclose(grad.astype(jnp.float32), ref_grad.astype(jnp.float32), **tols)
 
 
 @pytest.mark.parametrize(

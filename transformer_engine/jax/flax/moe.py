@@ -122,7 +122,8 @@ class _MoEBlock(TransformerEngineBase):
         reduction at the cost of an extra broadcast). Default ``False``.
     recv_capacity_per_rank : Optional[int]
         Exact aligned receive capacity per EP rank. ``None`` reserves the
-        dropless worst case.
+        dropless worst case. Unused at EP=1, which sizes the receive buffer
+        from the local token count.
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.

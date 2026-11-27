@@ -556,12 +556,14 @@ def _te_ep_assert_compatible_bootstrap(
             " with the same params, before invoking moe()."
         )
     b_num_experts, b_max_tpr, b_recv_pr, b_hidden, b_ep_size = _te_ep_bootstrap_signature
+    # EP=1 sizes its own receive buffer, so the bootstrap capacity does not apply.
+    capacity_fits = ep_size == 1 or recv_capacity_per_rank <= b_recv_pr
     if (
         num_experts != b_num_experts
         or hidden_dim != b_hidden
         or ep_size != b_ep_size
         or max_tokens_per_rank > b_max_tpr
-        or recv_capacity_per_rank > b_recv_pr
+        or not capacity_fits
     ):
         raise ValueError(
             "TE EP was already bootstrapped with signature"
@@ -1818,7 +1820,8 @@ def _moe_fwd_rule(
         static = {
             "has_bias": has_bias,
             "x_shape": x.shape,
-            "recv_pr": recv_pr,
+            # The dispatched buffer size; EP=1 sizes it from the local token count.
+            "recv_pr": recv_tokens.shape[-2],
             "cudnn_native_weight_layout": cudnn_native_weight_layout,
         }
         # The integer metadata outputs are non-differentiable (see moe()).
@@ -2272,6 +2275,9 @@ def moe(
         (default) reserves the dropless aligned worst case. The value must match
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
+        At EP=1 the receive buffer is sized from the local token count, so
+        neither this value nor the bootstrap capacity sizes it, and
+        ``drop_on_overflow`` does not apply.
     collect_expert_counts : bool
         Whether to compute global per-expert assignment counts. Disable this
         when the returned counts are unused to avoid an extra all-reduce.

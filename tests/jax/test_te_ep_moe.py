@@ -158,7 +158,7 @@ EXPERT_AXIS = "expert"
 TENSOR_AXIS = "tensor"
 FSDP_AXIS = "fsdp"
 DP_AXIS = "dp"
-EP_SIZE = 2
+EP_SIZE = int(os.environ.get("NVTE_TEST_EP_SIZE", "2"))
 TP_SIZE = int(os.environ.get("TE_EP_MOE_TP_SIZE", "2"))
 # DP_SIZE > 1 adds an outer ``dp`` axis, so EP groups must count dp x fsdp.
 DP_SIZE = int(os.environ.get("TE_EP_MOE_DP_SIZE", "1"))
