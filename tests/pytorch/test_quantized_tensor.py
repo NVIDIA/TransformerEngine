@@ -1654,10 +1654,8 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
 @pytest.mark.parametrize(
     "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8")]
 )
-@pytest.mark.parametrize("bulk", [False, True])
-def test_split_quantize_bulk_data_and_scale_storage(quantization, bulk, monkeypatch):
+def test_split_quantize_bulk_data_and_scale_storage(quantization, monkeypatch):
     module = te.GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
-    module.bulk_offload_fp8_inputs = bulk
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
     )
@@ -1666,15 +1664,16 @@ def test_split_quantize_bulk_data_and_scale_storage(quantization, bulk, monkeypa
 
     def check_split(*args, **kwargs):
         outputs = split_quantize(*args, **kwargs)
-        assert kwargs["disable_bulk_allocation"] == (not bulk)
+        assert not kwargs["disable_bulk_allocation"]
         allocations = set()
         for orientation in ("rowwise", "columnwise"):
             for field in ("data", "scale_inv"):
                 tensors = [getattr(out, f"_{orientation}_{field}") for out in outputs]
                 pointers = {t.untyped_storage().data_ptr() for t in tensors}
-                assert len(pointers) == (1 if bulk else 2)
-                assert allocations.isdisjoint(pointers)
+                assert len(pointers) == 1 and allocations.isdisjoint(pointers)
                 allocations.update(pointers)
+                alignment = 256 if field == "data" else 16
+                assert all(t.data_ptr() % alignment == 0 for t in tensors)
                 if field == "scale_inv":
                     scales.extend(tensors)
         return outputs
@@ -1689,5 +1688,4 @@ def test_split_quantize_bulk_data_and_scale_storage(quantization, bulk, monkeypa
     x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
     with te.autocast(enabled=True, recipe=fp8_recipe):
         module(x, [128, 128])
-    assert scales
-    assert all(getattr(scale, "_TE_do_not_offload", False) == bulk for scale in scales)
+    assert scales and all(not getattr(scale, "_TE_do_not_offload", False) for scale in scales)

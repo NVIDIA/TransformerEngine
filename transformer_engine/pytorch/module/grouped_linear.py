@@ -76,6 +76,7 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -239,7 +240,6 @@ class GroupedLinearFwdArgs:
     wgrad_store: Optional[Any]
     cpu_offloading: bool
     is_grad_enabled: bool
-    bulk_offload_fp8_inputs: bool = False
 
 
 @dataclass(slots=True)
@@ -375,25 +375,19 @@ def _grouped_linear_forward_impl(
         )
 
     inp_view = inp.reshape(-1, in_features)
-    offload_fp8_data = (
-        cpu_offloading
-        and args.bulk_offload_fp8_inputs
-        and type(input_quantizers[0]) in (Float8BlockQuantizer, MXFP8Quantizer)
-    )
     inputmats, _ = _split_quantization._split_quantize(
         inp_view,
         m_splits,
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=cpu_offloading and not offload_fp8_data,
+        # NVFP4 can still pack data, scales, and amax in a single allocation.
+        disable_bulk_allocation=cpu_offloading
+        and isinstance(input_quantizers[0], (NVFP4Quantizer, HybridQuantizer)),
     )
 
     if cpu_offloading:
         start_offload(*inputmats)
-        if offload_fp8_data:
-            for mat in inputmats:
-                mark_not_offload(mat._rowwise_scale_inv, mat._columnwise_scale_inv)
 
     # Initialize weights
     weights_fp8: list
@@ -743,7 +737,8 @@ def _grouped_linear_backward_impl(
                 with_quantized_output=args.fp8 or args.debug,
                 quantizers=args.input_quantizers,
                 activation_dtype=args.activation_dtype,
-                disable_bulk_allocation=args.cpu_offloading,
+                disable_bulk_allocation=args.cpu_offloading
+                and isinstance(args.input_quantizers[0], (NVFP4Quantizer, HybridQuantizer)),
             )
         elif args.backward_override == "dequantized":
             inputmats = [
@@ -1768,9 +1763,6 @@ class GroupedLinear(TransformerEngineBaseModule):
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
-    # External offload managers can move the expert data together and keep FP8 scales on device.
-    bulk_offload_fp8_inputs: bool = False
-
     def __init__(
         self,
         num_gemms: int,
@@ -2555,7 +2547,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 wgrad_store=self.wgrad_store,
                 cpu_offloading=cpu_offloading,
                 is_grad_enabled=is_grad_enabled,
-                bulk_offload_fp8_inputs=self.bulk_offload_fp8_inputs,
             )
 
             out, new_workspaces = _grouped_linear_eager(
