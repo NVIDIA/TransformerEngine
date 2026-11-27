@@ -716,7 +716,7 @@ void group_rht_gemm_ntt_w_sfc(int m, int n, TA const *A, TB const *B,
   // Define strides (mixed)
   auto dA = make_stride(Int<1>{}, m);   // (dM,dK)
   auto dB = make_stride(Int<1>{}, 16);  // (dN,dK)
-  for (size_t i = 0; i < kernel_args_ptr->num_tensors; ++i) {
+  for (int i = 0; i < kernel_args_ptr->num_tensors; ++i) {
     kernel_args_ptr->output_stride2d_list[i] =
         make_stride(kernel_args_ptr->split_sections[i], Int<1>{});
   }

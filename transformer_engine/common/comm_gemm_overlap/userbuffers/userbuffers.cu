@@ -2350,7 +2350,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 }
 
 void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset,
-                          const size_t recv_offset, const size_t bytes, communicator *comm,
+                          const size_t /*recv_offset*/, const size_t bytes, communicator *comm,
                           const int send_peer, const int recv_peer, cudaStream_t stream) {
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
   int send_peerlocal = send_peer % comm->nvsize;
@@ -2404,7 +2404,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 }
 
 void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
-                                 const size_t send_offset, const size_t recv_offset,
+                                 const size_t send_offset, const size_t /*recv_offset*/,
                                  const size_t bytes, communicator *comm, const int send_peer,
                                  const int recv_peer, void *counters, cudaStream_t stream) {
   assert(comm->push && comm->use_ce == 0);

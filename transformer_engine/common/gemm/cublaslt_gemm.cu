@@ -410,8 +410,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
                  const void *alpha, const void *beta, bool alpha_beta_on_device,
-                 bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
-                 bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
+                 bool use_split_accumulator, int math_sm_count, [[maybe_unused]] int m_split,
+                 [[maybe_unused]] int n_split, [[maybe_unused]] bool gemm_producer,
+                 const Tensor *inputCounter, cudaStream_t stream) {
   NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
              "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
 
@@ -423,7 +424,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
   const int m = transa == CUBLAS_OP_T ? A0 : A1;
   const int n = transb == CUBLAS_OP_T ? B1 : B0;
   const int k = transa == CUBLAS_OP_T ? A1 : A0;
-  NVTE_CHECK((transb == CUBLAS_OP_T ? B0 : B1) == k,
+  NVTE_CHECK((transb == CUBLAS_OP_T ? B0 : B1) == static_cast<size_t>(k),
              "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
              ")");
   const int ldd = m;
@@ -558,8 +559,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
     }
     if (inputC != outputD) {
       const auto [C0, C1] = inputC->flat_2d_dims();
-      NVTE_CHECK(C0 == n && C1 == m, "GEMM input C has incompatible dimensions (expected ", n, "x",
-                 m, ", got ", C0, "x", C1, ")");
+      NVTE_CHECK(C0 == static_cast<size_t>(n) && C1 == static_cast<size_t>(m),
+                 "GEMM input C has incompatible dimensions (expected ", n, "x", m, ", got ", C0,
+                 "x", C1, ")");
     }
     C = inputC->data.dptr;
     C_type = get_cuda_dtype(C_dtype);
@@ -1092,12 +1094,15 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
               math_sm_count, 0, 0, false, nullptr, stream);
 }
 
-void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
-                             const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
-                             bool transb, bool grad, NVTETensor workspace, bool accumulate,
-                             bool use_split_accumulator, int math_sm_count, int m_split,
-                             int n_split, bool gemm_producer, const NVTETensor counter,
-                             cudaStream_t stream) {
+void nvte_cublas_atomic_gemm(
+    [[maybe_unused]] const NVTETensor A, [[maybe_unused]] const NVTETensor B,
+    [[maybe_unused]] NVTETensor D, [[maybe_unused]] const NVTETensor bias,
+    [[maybe_unused]] NVTETensor pre_gelu_out, [[maybe_unused]] bool transa,
+    [[maybe_unused]] bool transb, [[maybe_unused]] bool grad, [[maybe_unused]] NVTETensor workspace,
+    [[maybe_unused]] bool accumulate, [[maybe_unused]] bool use_split_accumulator,
+    [[maybe_unused]] int math_sm_count, [[maybe_unused]] int m_split, [[maybe_unused]] int n_split,
+    [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const NVTETensor counter,
+    [[maybe_unused]] cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
   using namespace transformer_engine;
 #if !(CUDA_VERSION >= 12020 && CUDA_VERSION < 13000)
@@ -1261,7 +1266,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
     int64_t ref_k = -1;
-    for (size_t i = 0; i < num_gemms; i++) {
+    for (int i = 0; i < num_gemms; i++) {
       const auto tensor = transformer_engine::convertNVTETensorCheck(p[i]);
       const int k = trans ? tensor->data.shape[0] : tensor->data.shape[1];
 

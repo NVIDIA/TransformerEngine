@@ -167,28 +167,33 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
-    NVTE_CHECK(a1 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a1);
+    NVTE_CHECK(a1 == static_cast<size_t>(k), "Unsupported tensor dimension in A: expected ", k,
+               ", got ", a1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, k, block_size(ctx, m), 0, 0, k,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a0 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a0);
+    NVTE_CHECK(a0 == static_cast<size_t>(k), "Unsupported tensor dimension in A: expected ", k,
+               ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, block_size(ctx, m), k, 0, 0,
                                                      block_size(ctx, m), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
-    NVTE_CHECK(b0 == k, "Unsupported tensor dimensionin B: expected ", k, ", got ", b0);
+    NVTE_CHECK(b0 == static_cast<size_t>(k), "Unsupported tensor dimensionin B: expected ", k,
+               ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), k, 0, 0,
                                                      block_size(ctx, n), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b1 == k, "Unsupported tensor dimension in B: expected ", k, ", got ", b1);
+    NVTE_CHECK(b1 == static_cast<size_t>(k), "Unsupported tensor dimension in B: expected ", k,
+               ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, k, block_size(ctx, n), 0, 0, k,
                                                      get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d0 == n, "Unsupported tensor dimension in D: expected ", n, ", got ", d0);
+  NVTE_CHECK(d0 == static_cast<size_t>(n), "Unsupported tensor dimension in D: expected ", n,
+             ", got ", d0);
   *ldd = block_size(ctx, m);
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, block_size(ctx, m), block_size(ctx, n), 0,
                                                    0, *ldd, get_cuda_dtype(d->dtype()),
@@ -203,29 +208,34 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
-    NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
+    NVTE_CHECK(a0 == static_cast<size_t>(m), "Unsupported tensor dimension in A: expected ", m,
+               ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a1 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a1);
+    NVTE_CHECK(a1 == static_cast<size_t>(m), "Unsupported tensor dimension in A: expected ", m,
+               ", got ", a1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, m, block_size(ctx, k), 0, 0, m,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
   // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated.
   if (transb) {
-    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
+    NVTE_CHECK(b1 == static_cast<size_t>(n), "Unsupported tensor dimension in B: expected ", n,
+               ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
                                                      0, 0, n, get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK(b0 == static_cast<size_t>(n), "Unsupported tensor dimension in B: expected ", n,
+               ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
         k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
         get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
+  NVTE_CHECK(d1 == static_cast<size_t>(m), "Unsupported tensor dimension in D: expected ", m,
+             ", got ", d1);
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
@@ -245,7 +255,8 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
-    NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
+    NVTE_CHECK(a0 == static_cast<size_t>(m), "Unsupported tensor dimension in A: expected ", m,
+               ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
@@ -255,12 +266,14 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   if (transb) {
     NVTE_ERROR("T transpose flag is not supported for input B");
   } else {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK(b0 == static_cast<size_t>(n), "Unsupported tensor dimension in B: expected ", n,
+               ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
+  NVTE_CHECK(d1 == static_cast<size_t>(m), "Unsupported tensor dimension in D: expected ", m,
+             ", got ", d1);
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
@@ -740,43 +753,46 @@ int nvte_cublasmp_version() {
 
 struct NVTECommGemmCtx {};
 
-NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank) {
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t /*comm*/, int /*nranks*/, int /*rank*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
+void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* /*ctx*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
-                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
-                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+void nvte_all_gather_gemm(NVTECommGemmCtx* /*ctx*/, int64_t /*m*/, int64_t /*n*/, int64_t /*k*/,
+                          const NVTETensor /*a*/, const NVTETensor /*b*/, const NVTETensor /*d*/,
+                          const NVTETensor /*bias*/, const NVTETensor /*pre_act_out*/,
+                          bool /*transa*/, bool /*transb*/, bool /*grad*/, bool /*accumulate*/,
+                          int /*comm_sm_count*/, cudaStream_t /*main_stream*/,
+                          NVTECommGemmAlgoType /*algo*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
-                              const NVTETensor a, const NVTETensor b, const NVTETensor d,
-                              const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                              bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+void nvte_gemm_reduce_scatter(NVTECommGemmCtx* /*ctx*/, int64_t /*m*/, int64_t /*n*/, int64_t /*k*/,
+                              const NVTETensor /*a*/, const NVTETensor /*b*/,
+                              const NVTETensor /*d*/, const NVTETensor /*bias*/,
+                              const NVTETensor /*pre_act_out*/, bool /*transa*/, bool /*transb*/,
+                              bool /*grad*/, bool /*accumulate*/, int /*comm_sm_count*/,
+                              cudaStream_t /*main_stream*/, NVTECommGemmAlgoType /*algo*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
-                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
-                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+void nvte_gemm_all_reduce(NVTECommGemmCtx* /*ctx*/, int64_t /*m*/, int64_t /*n*/, int64_t /*k*/,
+                          const NVTETensor /*a*/, const NVTETensor /*b*/, const NVTETensor /*d*/,
+                          const NVTETensor /*bias*/, const NVTETensor /*pre_act_out*/,
+                          bool /*transa*/, bool /*transb*/, bool /*grad*/, bool /*accumulate*/,
+                          int /*comm_sm_count*/, cudaStream_t /*main_stream*/,
+                          NVTECommGemmAlgoType /*algo*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
+int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* /*ctx*/, int64_t /*global_size*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size) {
+void* nvte_comm_gemm_workspace(NVTECommGemmCtx* /*ctx*/, size_t* /*size*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 

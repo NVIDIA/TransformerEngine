@@ -107,8 +107,8 @@ class CommOverlapCore {
     _ubuf_scale_inv_initialized = true;
   }
 
-  virtual void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,
-                                bool rowwise = true) {
+  virtual void copy_into_buffer(cudaStream_t /*stream*/, const TensorWrapper & /*source*/,
+                                bool /*local_chunk*/, bool /*rowwise*/ = true) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
@@ -128,48 +128,55 @@ class CommOverlapCore {
 
   bool with_cublasmp() { return _with_cublasmp; }
 
-  virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                            bool transb, TensorWrapper &D, TensorWrapper &bias,
-                            TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
-                            bool accumulate, bool use_split_accumulator, CommOverlapType comm_type,
-                            TensorWrapper &rs_output, cudaStream_t stream_main) {
+  virtual void bulk_overlap(const TensorWrapper & /*A*/, bool /*transa*/,
+                            const TensorWrapper & /*B*/, bool /*transb*/, TensorWrapper & /*D*/,
+                            TensorWrapper & /*bias*/, TensorWrapper & /*pre_gelu_out*/,
+                            TensorWrapper & /*workspace*/, bool /*grad*/, bool /*accumulate*/,
+                            bool /*use_split_accumulator*/, CommOverlapType /*comm_type*/,
+                            TensorWrapper & /*rs_output*/, cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
-  virtual void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                      bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                      TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
-                                      bool grad, bool accumulate, bool use_split_accumulator,
-                                      TensorWrapper &rs_output, cudaStream_t stream_main) {
+  virtual void atomic_gemm_overlap_rs(const TensorWrapper & /*A*/, bool /*transa*/,
+                                      const TensorWrapper & /*B*/, bool /*transb*/,
+                                      TensorWrapper & /*D*/, TensorWrapper & /*bias*/,
+                                      TensorWrapper & /*pre_gelu_out*/,
+                                      TensorWrapper & /*workspace*/, bool /*grad*/,
+                                      bool /*accumulate*/, bool /*use_split_accumulator*/,
+                                      TensorWrapper & /*rs_output*/, cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
-  virtual void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
-                                bool accumulate, bool use_split_accumulator,
-                                TensorWrapper &rs_output, cudaStream_t stream_main) {
+  virtual void split_overlap_rs(const TensorWrapper & /*A*/, bool /*transa*/,
+                                const TensorWrapper & /*B*/, bool /*transb*/, TensorWrapper & /*D*/,
+                                TensorWrapper & /*bias*/, TensorWrapper & /*pre_gelu_out*/,
+                                TensorWrapper & /*workspace*/, bool /*grad*/, bool /*accumulate*/,
+                                bool /*use_split_accumulator*/, TensorWrapper & /*rs_output*/,
+                                cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
-  virtual void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                      bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                      TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
-                                      bool grad, bool accumulate, bool use_split_accumulator,
-                                      TensorWrapper &B_copy, cudaStream_t stream_main) {
+  virtual void atomic_gemm_overlap_ag(const TensorWrapper & /*A*/, bool /*transa*/,
+                                      const TensorWrapper & /*B*/, bool /*transb*/,
+                                      TensorWrapper & /*D*/, TensorWrapper & /*bias*/,
+                                      TensorWrapper & /*pre_gelu_out*/,
+                                      TensorWrapper & /*workspace*/, bool /*grad*/,
+                                      bool /*accumulate*/, bool /*use_split_accumulator*/,
+                                      TensorWrapper & /*B_copy*/, cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
-  virtual void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
-                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                                cudaStream_t stream_main) {
+  virtual void split_overlap_ag(const TensorWrapper & /*A*/, bool /*transa*/,
+                                const TensorWrapper & /*B*/, bool /*transb*/, TensorWrapper & /*D*/,
+                                TensorWrapper & /*bias*/, TensorWrapper & /*pre_gelu_out*/,
+                                TensorWrapper & /*workspace*/, bool /*grad*/, bool /*accumulate*/,
+                                bool /*use_split_accumulator*/, TensorWrapper & /*B_copy*/,
+                                cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
-  virtual void bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
-                                        cudaStream_t stream_main) {
+  virtual void bulk_overlap_external_ag(cudaStream_t /*send_stream*/, cudaStream_t /*recv_stream*/,
+                                        cudaStream_t /*stream_main*/) {
     NVTE_ERROR("Operation is not implemented.");
   }
 };  // CommOverlapCore
@@ -214,19 +221,20 @@ class CommOverlapBase : public CommOverlapCore {
                     bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
                     cudaStream_t stream_main) override;
 
-  void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, TensorWrapper &D, TensorWrapper &bias,
-                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
-                              bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                              cudaStream_t stream_main) override {
+  void atomic_gemm_overlap_ag(const TensorWrapper & /*A*/, bool /*transa*/,
+                              const TensorWrapper & /*B*/, bool /*transb*/, TensorWrapper & /*D*/,
+                              TensorWrapper & /*bias*/, TensorWrapper & /*pre_gelu_out*/,
+                              TensorWrapper & /*workspace*/, bool /*grad*/, bool /*accumulate*/,
+                              bool /*use_split_accumulator*/, TensorWrapper & /*B_copy*/,
+                              cudaStream_t /*stream_main*/) override {
     NVTE_ERROR("Operation not supported.");
   }
 
-  void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
-                        TensorWrapper &workspace, bool grad, bool accumulate,
-                        bool use_split_accumulator, TensorWrapper &B_copy,
-                        cudaStream_t stream_main) override {
+  void split_overlap_ag(const TensorWrapper & /*A*/, bool /*transa*/, const TensorWrapper & /*B*/,
+                        bool /*transb*/, TensorWrapper & /*D*/, TensorWrapper & /*bias*/,
+                        TensorWrapper & /*pre_gelu_out*/, TensorWrapper & /*workspace*/,
+                        bool /*grad*/, bool /*accumulate*/, bool /*use_split_accumulator*/,
+                        TensorWrapper & /*B_copy*/, cudaStream_t /*stream_main*/) override {
     NVTE_ERROR("Operation not supported.");
   }
 
@@ -295,11 +303,12 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   TensorWrapper get_buffer_chunk_by_id(const TensorWrapper &source, size_t buffer_id);
 
-  void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                    TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
-                    TensorWrapper &workspace, bool grad, bool accumulate,
-                    bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
-                    cudaStream_t stream_main) override {
+  void bulk_overlap(const TensorWrapper & /*A*/, bool /*transa*/, const TensorWrapper & /*B*/,
+                    bool /*transb*/, TensorWrapper & /*D*/, TensorWrapper & /*bias*/,
+                    TensorWrapper & /*pre_gelu_out*/, TensorWrapper & /*workspace*/, bool /*grad*/,
+                    bool /*accumulate*/, bool /*use_split_accumulator*/,
+                    CommOverlapType /*comm_type*/, TensorWrapper & /*rs_output*/,
+                    cudaStream_t /*stream_main*/) override {
     NVTE_ERROR("Operation not supported.");
   }
 
@@ -347,8 +356,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.
   ** The gemm for overlap_gemm is assumed to have been previously started.
   */
-  void bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
-                                cudaStream_t stream_main) override {
+  void bulk_overlap_external_ag(cudaStream_t /*send_stream*/, cudaStream_t /*recv_stream*/,
+                                cudaStream_t /*stream_main*/) override {
     NVTE_ERROR("Operation not supported.");
   }
 };  // CommOverlapP2PBase

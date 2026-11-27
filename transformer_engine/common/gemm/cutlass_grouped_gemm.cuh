@@ -246,7 +246,7 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
   auto param_workspace_size = 3 * ptr_size + 3 * ldd_size + gemm_coord_size;
 
   NVTE_CHECK(
-      param_workspace_size < kCPUWorkSpaceSize,
+      static_cast<size_t>(param_workspace_size) < kCPUWorkSpaceSize,
       "Insufficient kCPUWorkSpaceSize size: required=", static_cast<int64_t>(param_workspace_size),
       ", available=", static_cast<int64_t>(kCPUWorkSpaceSize), " for CUTLASS grouped GEMM.");
 
@@ -276,7 +276,7 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
   int64_t* ldc_host =
       reinterpret_cast<int64_t*>(host_workspace + gemm_coord_size + 3 * ptr_size + 2 * ldd_size);
 
-  for (size_t i = 0; i < num_gemms; i++) {
+  for (int i = 0; i < num_gemms; i++) {
     const transformer_engine::Tensor* inputA = transformer_engine::convertNVTETensorCheck(A[i]);
     const transformer_engine::Tensor* inputB = transformer_engine::convertNVTETensorCheck(B[i]);
     transformer_engine::Tensor* outputD = transformer_engine::convertNVTETensor(D[i]);

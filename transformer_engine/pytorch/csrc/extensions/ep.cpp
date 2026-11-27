@@ -57,7 +57,7 @@ std::atomic<bool> g_zero_copy_enabled{false};
 
 // Sentinel returned by maybe_make_window when zero-copy is off or the tensor
 // is not symm-mem-backed; the backend treats it as "no window, use staged copy".
-constexpr NVTECommWindow kNoWindow = {nullptr, 0};
+constexpr NVTECommWindow kNoWindow = {nullptr, 0, nullptr, 0};
 
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
 // Offset of a symm-mem allocation relative to the start of its NCCL window.
@@ -99,7 +99,7 @@ NVTECommWindow maybe_make_window(const at::Tensor& t) {
   const uint64_t offset =
       static_cast<uint64_t>(symm_mem_window_offset(nccl_sm, 0)) +
       static_cast<uint64_t>(t.storage_offset()) * static_cast<uint64_t>(t.element_size());
-  return NVTECommWindow{static_cast<ncclWindow_t>(nccl_sm->get_window()), offset};
+  return NVTECommWindow{static_cast<ncclWindow_t>(nccl_sm->get_window()), offset, nullptr, 0};
 #else
   (void)t;
   return kNoWindow;

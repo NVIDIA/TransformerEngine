@@ -1155,13 +1155,13 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   Tensor tensorA = make_tensor(A, make_shape(hidden_size, packed_sequence_length), LayoutLeft{});
   Tensor tensorB = make_tensor(B, make_shape(RhtTensorSize, RhtTensorSize), LayoutLeft{});
   Tensor tensorQA = make_tensor(QA, make_shape(hidden_size, packed_sequence_length), LayoutLeft{});
-  Tensor tensorSFA = make_tensor(SFA, sfa_layout);
 
   // Define strides (from tensors)
-  auto dA = stride(tensorA);    // (dM,dK)
-  auto dB = stride(tensorB);    // (dN,dK)
-  auto dD = LayoutRight{};      // (dM,dN)
-  auto dQA = stride(tensorQA);  // (dM,dK)
+  auto dA = stride(tensorA);  // (dM,dK)
+  auto dB = stride(tensorB);  // (dN,dK)
+  // dD and sD are only used through decltype in the kernel template arguments below.
+  [[maybe_unused]] auto dD = LayoutRight{};  // (dM,dN)
+  auto dQA = stride(tensorQA);               // (dM,dK)
   using ClusterShape = Shape<_1, _1, _1>;
   auto cluster_shape = ClusterShape{};
   auto cluster_tile_shape = Shape<_128, Int<RhtTensorSize>, Int<RhtTensorSize>>{};
@@ -1249,7 +1249,7 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
                                     Step<_2, _1, _3>{});  // (MMA,MMA_M,MMA_K,PIPE)
   auto sB = UMMA::tile_to_mma_shape(SmemLayoutAtomB{},
                                     append(mma_shape_B, _1{}));  // (MMA,MMA_N,MMA_K, _1)
-  auto sD = Layout<_1>{};                                        // XXX Dummy
+  [[maybe_unused]] auto sD = Layout<_1>{};                       // XXX Dummy
 
   auto tma_load_a =
       make_tma_copy_A_sm100(SM90_TMA_LOAD{}, tensorA, sA(_, _, _, 0), cluster_tile_mainloop, mma);

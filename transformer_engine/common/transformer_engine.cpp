@@ -730,8 +730,8 @@ size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(ten
 
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
   const auto &shape = nvte_tensor_shape(tensor);
-  NVTE_CHECK(0 <= dim && dim < shape.ndim, "Attempted to access index ", dim,
-             " in a shape array with ", shape.ndim, " entries");
+  NVTE_CHECK(dim < shape.ndim, "Attempted to access index ", dim, " in a shape array with ",
+             shape.ndim, " entries");
   return shape.data[dim];
 }
 

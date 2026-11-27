@@ -488,9 +488,6 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       // output list here is allowed to have empty tensor
 
       // Choose kernel
-      const auto [rows, cols] = input_tensor->flat_2d_dims();
-      auto dtype = input_tensor->dtype();
-
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       if (!nvfp4_use_4over6) {
         for (const auto *output_tensor : output_tensors) {
@@ -582,25 +579,28 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
-      NVTE_CHECK(output_tensor->row_scaled_nvfp4,
-                 "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
-      NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
-                 "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
-      NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
-                 "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
-      NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
-                 "Grouped row-scaled NVFP4 quantization does not support 4over6.");
-      if (input_tensor->num_tensors == 0) {
-        break;
+      // Discard the rest for IS_ACT, where the check above always throws.
+      if constexpr (!IS_ACT) {
+        NVTE_CHECK(output_tensor->row_scaled_nvfp4,
+                   "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
+        NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
+                   "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+                   "Grouped row-scaled NVFP4 quantization does not support 4over6.");
+        if (input_tensor->num_tensors == 0) {
+          break;
+        }
+        nvfp4::group_row_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream);
+        const DType scale_dtype = output_tensor->scale_inv.has_data()
+                                      ? output_tensor->scale_inv.dtype
+                                      : output_tensor->columnwise_scale_inv.dtype;
+        TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+            scale_dtype, ScaleType,
+            nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
+                input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
       }
-      nvfp4::group_row_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream);
-      const DType scale_dtype = output_tensor->scale_inv.has_data()
-                                    ? output_tensor->scale_inv.dtype
-                                    : output_tensor->columnwise_scale_inv.dtype;
-      TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-          scale_dtype, ScaleType,
-          nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
-              input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
       break;
     }
     default:

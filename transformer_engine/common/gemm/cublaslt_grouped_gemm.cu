@@ -927,10 +927,11 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
 
 // Configures cuBLAS for NVFP4 grouped GEMM: sets VEC16_UE4M3 or VEC16_UE5M3 scale mode
 // and scale pointers for both A and B. Requires cuBLAS 13.4+.
-inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
-                                     void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-                                     transformer_engine::DType a_scale_inv_dtype,
-                                     transformer_engine::DType b_scale_inv_dtype) {
+inline void set_nvfp4_scale_pointers([[maybe_unused]] cublasLtMatmulDescOpaque_t &matmulDesc,
+                                     [[maybe_unused]] void **a_scale_inv_ptrs,
+                                     [[maybe_unused]] void **b_scale_inv_ptrs,
+                                     [[maybe_unused]] transformer_engine::DType a_scale_inv_dtype,
+                                     [[maybe_unused]] transformer_engine::DType b_scale_inv_dtype) {
 #if CUBLAS_VERSION >= CUBLAS_NVFP4_GROUPED_GEMM_VERSION
   NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_NVFP4_GROUPED_GEMM_VERSION,
              "NVFP4 grouped GEMM requires cuBLAS 13.4+, but run-time cuBLAS version is ",
@@ -981,10 +982,11 @@ inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
 
 // Configures cuBLAS for FP8 block-scaling grouped GEMM: sets VEC128_32F or BLK128x128_32F
 // scale mode and scale pointers for A and B. Requires cuBLAS 13.4+.
-inline void set_fp8_block_scaling_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
-                                                 void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-                                                 NVTEScalingMode a_scaling_mode,
-                                                 NVTEScalingMode b_scaling_mode) {
+inline void set_fp8_block_scaling_scale_pointers(
+    [[maybe_unused]] cublasLtMatmulDescOpaque_t &matmulDesc,
+    [[maybe_unused]] void **a_scale_inv_ptrs, [[maybe_unused]] void **b_scale_inv_ptrs,
+    [[maybe_unused]] NVTEScalingMode a_scaling_mode,
+    [[maybe_unused]] NVTEScalingMode b_scaling_mode) {
 #if CUBLAS_VERSION >= CUBLAS_FP8_BLOCK_GROUPED_GEMM_VERSION
   NVTE_CHECK(
       transformer_engine::cuda::cublas_version() >= CUBLAS_FP8_BLOCK_GROUPED_GEMM_VERSION,
@@ -1583,8 +1585,8 @@ inline void launch_grouped_gemm_setup(
     const transformer_engine::Tensor *beta_tensor, bool use_per_group_alpha_beta,
     size_t num_tensors, cudaStream_t stream,
     const MultiTensorGroupGemmInputArgs &a_multi_tensor_args, const NVTETensor *C_list,
-    const NVTETensor *D_list, bool a_is_discrete, char *a_base, transformer_engine::DType c_dtype,
-    transformer_engine::DType d_dtype) {
+    const NVTETensor *D_list, bool a_is_discrete, char * /*a_base*/,
+    transformer_engine::DType c_dtype, transformer_engine::DType d_dtype) {
   // Use logical shape info from selection; storage transposes are tracked separately.
   TensorShapeInfo A_meta = A_sel.logical_tensor_shape;
   TensorShapeInfo B_meta = B_sel.logical_tensor_shape;

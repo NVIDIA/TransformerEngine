@@ -795,6 +795,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
     scaling_type = ScalingType::COLWISE;
   } else if (use_rowwise_scaling && use_colwise_scaling) {
     scaling_type = ScalingType::BIDIMENSIONAL;
+  } else {
+    NVTE_ERROR("Either rowwise or columnwise output data need to be allocated.");
   }
 
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;

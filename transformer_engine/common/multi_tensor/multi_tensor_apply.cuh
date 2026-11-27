@@ -64,7 +64,7 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
   tl.start_tensor_this_launch = 0;
   int loc_block_info = 0;
   int loc_tensor_info = 0;
-  for (int t = 0; t < num_tensors_per_list; t++) {
+  for (size_t t = 0; t < num_tensors_per_list; t++) {
     tl.sizes[loc_tensor_info] = tensor_lists[0][t]->numel();
     for (int d = 0; d < depth; d++)
       tl.addresses[d][loc_tensor_info] = tensor_lists[d][t]->data.dptr;
@@ -79,7 +79,7 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
                "multi_tensor_apply expects tensors with at least one chunk; zero-sized tensors "
                "must be filtered before launch because they skip the chunk loop");
 
-    for (auto chunk = 0; chunk < chunks_this_tensor; chunk++) {
+    for (size_t chunk = 0; chunk < chunks_this_tensor; chunk++) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;
       tl.block_to_chunk[loc_block_info] = chunk;
       loc_block_info++;

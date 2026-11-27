@@ -405,7 +405,8 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
 
     // This value must match the WARP_SIZE constexpr
     // value computed inside softmax_warp_forward.
-    int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
+    int warp_size = (next_power_of_two < static_cast<int>(THREADS_PER_WARP)) ? next_power_of_two
+                                                                             : THREADS_PER_WARP;
 
     // This value must match the WARP_BATCH constexpr
     // value computed inside softmax_warp_forward.
@@ -541,7 +542,8 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
 
     // This value must match the WARP_SIZE constexpr
     // value computed inside softmax_warp_backward.
-    int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
+    int warp_size = (next_power_of_two < static_cast<int>(THREADS_PER_WARP)) ? next_power_of_two
+                                                                             : THREADS_PER_WARP;
 
     // This value must match the WARP_BATCH constexpr
     // value computed inside softmax_warp_backward.

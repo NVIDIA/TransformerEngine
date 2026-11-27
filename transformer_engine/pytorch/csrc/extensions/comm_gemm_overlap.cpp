@@ -28,8 +28,9 @@ CommOverlapHelper::CommOverlapHelper() {
 #endif
 }  // empty constructor for NVTE_UB_WITH_MPI=1
 
-CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     std::optional<c10d::ProcessGroup *> intra_domain_group) {
+CommOverlapHelper::CommOverlapHelper(
+    [[maybe_unused]] c10d::ProcessGroup *world_group,
+    [[maybe_unused]] std::optional<c10d::ProcessGroup *> intra_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
   torch_pgs.insert({"world", world_group});
   myrank = torch_pgs["world"]->getRank();
@@ -148,8 +149,11 @@ CommOverlapHelper::~CommOverlapHelper() {
 #endif
 }
 
-void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void *localdata,
-                                     size_t localbytes, ExtComm group) {
+void CommOverlapHelper::ub_allgather([[maybe_unused]] void *globaldata,
+                                     [[maybe_unused]] size_t globalbytes,
+                                     [[maybe_unused]] void *localdata,
+                                     [[maybe_unused]] size_t localbytes,
+                                     [[maybe_unused]] ExtComm group) {
 #ifndef NVTE_UB_WITH_MPI
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
@@ -180,7 +184,7 @@ void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void 
 #endif
 }
 
-void CommOverlapHelper::ub_barrier(ExtComm group) {
+void CommOverlapHelper::ub_barrier([[maybe_unused]] ExtComm group) {
 #ifndef NVTE_UB_WITH_MPI
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
@@ -192,7 +196,8 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
 #endif
 }
 
-CommOverlapHelper::NcclCommSharedPtr CommOverlapHelper::get_nccl_comm(std::string comm_name) {
+CommOverlapHelper::NcclCommSharedPtr CommOverlapHelper::get_nccl_comm(
+    [[maybe_unused]] std::string comm_name) {
 #ifdef NVTE_WITH_CUBLASMP
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");

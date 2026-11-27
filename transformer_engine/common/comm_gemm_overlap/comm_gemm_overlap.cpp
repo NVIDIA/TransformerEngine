@@ -55,12 +55,14 @@ bool ubuf_built_with_mpi() {
  **************************************************************************************************/
 
 // Constructor for Userbuffers backend
-CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
-                                 int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
-                                 ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
-                                 int comm_cga_size, int gemm_priority, int comm_priority,
-                                 int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                 bool atomic_gemm) {
+CommOverlapCore::CommOverlapCore(int myrank, [[maybe_unused]] int numranks,
+                                 [[maybe_unused]] int mylocal, [[maybe_unused]] int numlocal,
+                                 [[maybe_unused]] int mynode, [[maybe_unused]] int numnodes,
+                                 int tp_size, [[maybe_unused]] ExtAllgatherOp allgather_handle,
+                                 [[maybe_unused]] ExtBarrierOp barrier_handle, int num_splits,
+                                 int num_max_streams, int comm_cga_size, int gemm_priority,
+                                 int comm_priority, int num_comm_sm, bool set_sm_margin,
+                                 bool use_ce, bool atomic_gemm) {
   // Initialize userbuf communicator
   if (!_comm_created) {
     if (myrank == 0) {
@@ -529,15 +531,11 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
 
   // Get GEMM dimensions
   size_t m = transa ? A.size(0) : A.size(1);
-  size_t k = transa ? A.size(1) : A.size(0);
   size_t n = _ubuf.size(0);
   size_t m_chunk = m / _num_splits;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
-  // Get input, output, and workspace data pointers
-  char *input_a_chunk_ptr = reinterpret_cast<char *>(A.dptr());
-  char *output_buf_chunk_ptr = reinterpret_cast<char *>(_ubuf.dptr());
-  char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
+  // Get output data pointer
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
 
   // Reset atomic counters
@@ -861,7 +859,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     NVTE_CHECK_CUDA(cudaMemset(_counter.dptr(), 0, sizeof(int32_t)));
   }
 
-  for (int i = 0; i < _stream_compute.size(); i++) {
+  for (size_t i = 0; i < _stream_compute.size(); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
@@ -1320,14 +1318,12 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   _ub_comm->cga_size = _cga_size;
 
   // Get communication and GEMM input chunk sizes
-  size_t m = transa ? A.size(0) : A.size(1);
   size_t k = transa ? A.size(1) : A.size(0);
   size_t n_chunk = _ubufs[0].size(0);
   const int comm_bytes = _ubufs[0].bytes();
 
   // Get input and workspace data pointers
   size_t input_chunk_size = n_chunk * k;
-  size_t output_chunk_size = n_chunk * m;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
   // Catch up the main stream

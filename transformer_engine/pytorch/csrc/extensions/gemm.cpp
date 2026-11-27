@@ -99,7 +99,7 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
 }
 
 bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual,
-                    size_t tp_size = 1, size_t tp_dim = 0) {
+                    size_t /*tp_size*/ = 1, size_t /*tp_dim*/ = 0) {
   if (expected.size() != actual.ndim) return false;
   for (size_t i = 0; i < expected.size(); ++i) {
     if (expected[i] != actual.data[i]) return false;
@@ -657,13 +657,14 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, int64_t batch_dim_a, 
 }
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
-                    std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
-                    at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
-                    bool transb, at::Tensor D, at::Tensor D_scale, DType D_type, at::Tensor D_amax,
-                    at::Tensor bias, DType bias_type, at::Tensor pre_gelu_out, bool grad,
-                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                    bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
-                    bool gemm_producer, at::Tensor counter) {
+                    std::vector<int64_t> /*A_scaling_mode*/, bool transa, at::Tensor B,
+                    at::Tensor B_scale_inverse, DType B_type,
+                    std::vector<int64_t> /*B_scaling_mode*/, bool transb, at::Tensor D,
+                    at::Tensor D_scale, DType D_type, at::Tensor D_amax, at::Tensor bias,
+                    DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                    size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+                    int math_sm_count, int m_split, int n_split, bool gemm_producer,
+                    at::Tensor counter) {
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
@@ -710,7 +711,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
 
 std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
-    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
+    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> /*m_splits*/,
     std::vector<at::Tensor> bias, DType bias_type, bool single_output,
     std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
@@ -1052,7 +1053,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
 py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
                                                     bool transb, py::handle D, py::object bias,
-                                                    std::optional<at::Tensor> bias_scale,
+                                                    std::optional<at::Tensor> /*bias_scale*/,
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,

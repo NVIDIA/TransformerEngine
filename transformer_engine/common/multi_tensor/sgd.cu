@@ -135,7 +135,7 @@ void multi_tensor_sgd_cuda(int chunk_size, Tensor noop_flag,
   auto weight_type = tensor_lists[1][0]->dtype();
 
   if (num_tensor_lists == 4) {
-    for (int i = 0; i < num_tensors_per_list; i++)
+    for (size_t i = 0; i < num_tensors_per_list; i++)
       NVTE_CHECK(tensor_lists[3][i]->dtype() == DType::kFloat16,
                  "Additional output tensors should always be fp16.");
   }

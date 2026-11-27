@@ -118,12 +118,10 @@ __device__ __forceinline__ void gated_backward_values(const float act_in, const 
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT, typename ParamOP,
           float (*ActOP)(float, const ParamOP &)>
-__global__ void __launch_bounds__(kThreads, 4)
-    scaled_gated_forward_kernel(const InputT *__restrict__ input,
-                                const ScaleT *__restrict__ act_scales, OutputT *__restrict__ output,
-                                const size_t rows, const size_t hidden, const size_t segment_size,
-                                const size_t num_segments, const size_t num_vectors_per_segment,
-                                const ParamOP param) {
+__global__ void NVTE_SCALED_ACTIVATION_LAUNCH_BOUNDS scaled_gated_forward_kernel(
+    const InputT *__restrict__ input, const ScaleT *__restrict__ act_scales,
+    OutputT *__restrict__ output, const size_t rows, const size_t hidden, const size_t segment_size,
+    const size_t num_segments, const size_t num_vectors_per_segment, const ParamOP param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -225,11 +223,10 @@ __global__ void __launch_bounds__(kReductionThreads, 4)
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT, typename ParamOP,
           float (*ActOP)(float, const ParamOP &)>
-__global__ void __launch_bounds__(kThreads, 4)
-    scaled_unary_forward_kernel(const InputT *__restrict__ input,
-                                const ScaleT *__restrict__ act_scales, OutputT *__restrict__ output,
-                                const size_t rows, const size_t hidden,
-                                const size_t num_vectors_per_row, const ParamOP param) {
+__global__ void NVTE_SCALED_ACTIVATION_LAUNCH_BOUNDS
+scaled_unary_forward_kernel(const InputT *__restrict__ input, const ScaleT *__restrict__ act_scales,
+                            OutputT *__restrict__ output, const size_t rows, const size_t hidden,
+                            const size_t num_vectors_per_row, const ParamOP param) {
   const size_t total_vectors = rows * num_vectors_per_row;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {

@@ -260,7 +260,7 @@ void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
+void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int /*t*/,
                          cudaStream_t stream) {
   using namespace transformer_engine;
 

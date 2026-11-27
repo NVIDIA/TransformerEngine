@@ -45,8 +45,8 @@ static MPI_Comm EXT_COMM_INTRA;
     }                                                                                        \
   } while (false)
 
-void ub_mpi_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
-                      ExtComm comm) {
+void ub_mpi_allgather(void *globaldata, [[maybe_unused]] size_t globalbytes, void *localdata,
+                      size_t localbytes, ExtComm comm) {
   int numranks;
   UB_MPI_CHECK(MPI_Comm_size(comm, &numranks));
   assert(globalbytes == numranks * localbytes);
@@ -144,7 +144,8 @@ bool has_mnnvl_fabric(int device_id) {
 int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
                                  int numlocal, int mynode, int numnodes,
                                  ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
-                                 int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
+                                 int pipegpus, int /*pipenodes*/, int tensorgpus,
+                                 int /*tensornodes*/) {
   *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
@@ -221,8 +222,6 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->ar2_firstgpu = mylocal - mylocal % tensorgpus;
   (*comm)->ar2_nvrank = mylocal - (*comm)->ar2_firstgpu;
   // ar2 has step equal to ar_nvsize
-  int allnodes = numranks / numlocal;
-  int nodeid = myrank / numlocal;
 
   (*comm)->num_nodes = numnodes;
   (*comm)->my_node = mynode;
@@ -291,7 +290,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       //       recreate the correct file descriptor on every receiving rank.
       int fd;
       volatile uint32_t abortFlag = 0;
-      IpcSocketHandle ipcSock = {0};
+      IpcSocketHandle ipcSock = {};
       uint64_t opId = 0xdeadcafe0000 + (*comm)->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
       IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
@@ -415,8 +414,10 @@ int create_communicator(communicator **comm, int myrank, int numranks, int myloc
                                       ext_allgather, ext_barrier, 1, 1, 1, 1);
 }
 
-int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
-                                     int tensorgpus, int tensornodes) {
+int create_communicator_grouped2_mpi([[maybe_unused]] communicator **comm,
+                                     [[maybe_unused]] int pipegpus, [[maybe_unused]] int pipenodes,
+                                     [[maybe_unused]] int tensorgpus,
+                                     [[maybe_unused]] int tensornodes) {
 #ifdef NVTE_UB_WITH_MPI
   // get global numbers
   int myrank, numranks;
@@ -501,7 +502,7 @@ void destroy_communicator(communicator *comm) {
   delete comm;
 }
 
-void destroy_communicator_mpi(communicator *comm) {
+void destroy_communicator_mpi([[maybe_unused]] communicator *comm) {
 #ifdef NVTE_UB_WITH_MPI
   MPI_Comm_free(static_cast<MPI_Comm *>(&(comm->comm_intra)));
   destroy_communicator(comm);
@@ -582,7 +583,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
           (uint64_t)0);
 
       volatile uint32_t abortFlag = 0;
-      IpcSocketHandle ipcSock = {0};
+      IpcSocketHandle ipcSock = {};
       uint64_t opId = 0xdeadcafe0000 + comm->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
 

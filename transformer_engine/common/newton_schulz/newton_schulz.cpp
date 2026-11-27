@@ -359,17 +359,17 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
 struct NVTECusolverMpCtx {};
 
-NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t /*comm*/, int /*nranks*/, int /*rank*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
 }
 
-void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
+void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* /*ctx*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
 }
 
-void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
-                        int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
-                        cudaStream_t caller_stream) {
+void nvte_newton_schulz(NVTECusolverMpCtx* /*ctx*/, int64_t /*m*/, int64_t /*n*/, NVTETensor /*x*/,
+                        int64_t /*num_iterations*/, const float* /*coefficients*/,
+                        int64_t /*num_coefficients*/, cudaStream_t /*caller_stream*/) {
   NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
 }
 

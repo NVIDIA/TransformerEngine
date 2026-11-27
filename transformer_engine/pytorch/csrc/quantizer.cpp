@@ -326,15 +326,14 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                             const std::optional<TensorWrapper>& noop_flag) {
+void NoneQuantizer::quantize(const TensorWrapper& /*input*/, TensorWrapper& /*out*/,
+                             const std::optional<TensorWrapper>& /*noop_flag*/) {
   NVTE_ERROR("NoneQuantizer does not support quantization");
 }
 
 void Float8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   tensor->set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
                     getTensorShape(scale));
-  at::TensorOptions opts = opts.dtype(torch::kFloat32).device(torch::kCUDA);
   tensor->set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
                    getTensorShape(amax));
 }
@@ -663,7 +662,7 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
 }
 
-void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
+void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* /*tensor*/) const {}
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
@@ -1054,7 +1053,7 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
              "Unsupported block scaling dim.");
 }
 
-void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
+void Float8BlockQuantizer::set_quantization_params(TensorWrapper* /*tensor*/) const {}
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
@@ -1495,7 +1494,7 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
 }
 
-void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
+void MXFP8Quantizer::set_quantization_params(TensorWrapper* /*tensor*/) const {}
 
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
@@ -1508,7 +1507,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 

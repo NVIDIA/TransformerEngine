@@ -501,8 +501,7 @@ constexpr int get_activation_type() {
       &srelu<ComputeType, ComputeType>,     // 11
       &dsrelu<ComputeType, ComputeType>     // 12
   };
-#pragma unroll
-  for (int i = 0; i < sizeof(ActivationList) / sizeof(ActivationList[0]); ++i) {
+  for (size_t i = 0; i < sizeof(ActivationList) / sizeof(ActivationList[0]); ++i) {
     if (OP == ActivationList[i]) {
       return i;
     }
@@ -643,6 +642,8 @@ void cast_transpose_fused(const Tensor &input, const Tensor *act_input, Tensor *
             case 8:
               VecOutputTypeSize = sizeof(Vec<OutputType, 8>);
               break;
+            default:
+              NVTE_ERROR("Unsupported output vector size: ", nvec_out);
           } size_t shared_size_transpose = cast_transpose_num_threads / n_warps_per_tile *
                                            (threads_per_warp + 1) * VecOutputTypeSize;
 
@@ -661,6 +662,8 @@ void cast_transpose_fused(const Tensor &input, const Tensor *act_input, Tensor *
               case 8:
                 VecComputeTypeSize = sizeof(Vec<ComputeType, 8>);
                 break;
+              default:
+                NVTE_ERROR("Unsupported input vector size: ", nvec_in);
             }
             const size_t shared_size_dbias = cast_transpose_num_threads * VecComputeTypeSize;
             if (shared_size_transpose < shared_size_dbias) {

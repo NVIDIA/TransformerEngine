@@ -276,6 +276,11 @@ __device__ __forceinline__ void drain_smem_t_to_gmem(
 // registers. Pass 2: quantize from registers, emit rowwise output and the
 // transposed smem_T tile, then drain smem_T to gmem.
 
+// The host dispatchers below name the {rowwise=false, colwise=false} specializations of the
+// TMA kernels only in discarded `if constexpr` branches, so they are never instantiated. nvcc
+// still warns (#20280-D) that those specializations lack a definition; that warning is a false
+// positive here, so suppress it for the TMA kernel templates only.
+#pragma nv_diag_suppress 20280
 template <bool kSameBothDims, bool kReturnRowwise, bool kReturnColwise, typename CType,
           typename IType, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma_kernel(
@@ -464,6 +469,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
   }
 #endif  // __CUDA_ARCH__ >= 900
 }
+#pragma nv_diag_default 20280
 
 // ----- 1D block scaling rowwise-only kernel ----------------------------------------------------
 // No smem cache. Each thread loads 16 cols/row, reduces amax across the 8
@@ -566,6 +572,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // and stores quantized output. CW pass stages a column slice in registers,
 // computes the per-column amax there, then fills smem_T and drains to gmem.
 
+// See the note above group_block_scaled_2d_tma_kernel about #20280-D.
+#pragma nv_diag_suppress 20280
 template <bool kSameBothDims, bool kReturnRowwise, bool kReturnColwise, typename CType,
           typename IType, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_kernel(
@@ -763,6 +771,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
   }
 #endif  // __CUDA_ARCH__ >= 900
 }
+#pragma nv_diag_default 20280
 
 // ----- Host-side dispatchers --------------------------------------------------------------------
 

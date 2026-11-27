@@ -59,7 +59,7 @@ cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t)
   }
 }
 
-void nvte_cudnn_handle_init() { auto _ = nvte_get_cudnn_handle(); }
+void nvte_cudnn_handle_init() { static_cast<void>(nvte_get_cudnn_handle()); }
 
 namespace detail {
 

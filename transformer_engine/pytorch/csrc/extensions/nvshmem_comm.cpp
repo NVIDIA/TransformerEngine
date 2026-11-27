@@ -19,7 +19,7 @@
 
 namespace transformer_engine::pytorch {
 
-void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
+void init_nvshmem_backend([[maybe_unused]] c10d::ProcessGroup *process_group) {
 #ifdef NVTE_ENABLE_NVSHMEM
   nvshmemx_init_attr_t attr = {};
   nvshmemx_uniqueid_t id = {};
@@ -62,7 +62,8 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 #endif
 }
 
-void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind) {
+void nvshmem_wait_on_current_stream([[maybe_unused]] torch::Tensor signal,
+                                    [[maybe_unused]] const std::string &wait_kind) {
 #ifdef NVTE_ENABLE_NVSHMEM
   uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
   cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
@@ -87,7 +88,8 @@ void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wai
 #endif
 }
 
-torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype) {
+torch::Tensor create_nvshmem_tensor([[maybe_unused]] const std::vector<int64_t> &shape,
+                                    [[maybe_unused]] c10::ScalarType dtype) {
 #ifdef NVTE_ENABLE_NVSHMEM
   auto option_gpu =
       at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(c10::cuda::current_device());
@@ -101,8 +103,9 @@ torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::Scal
 #endif
 }
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
-                                    torch::Tensor signal) {
+void nvshmem_send_on_current_stream([[maybe_unused]] torch::Tensor src,
+                                    [[maybe_unused]] torch::Tensor dst, [[maybe_unused]] int peer,
+                                    [[maybe_unused]] torch::Tensor signal) {
 #ifdef NVTE_ENABLE_NVSHMEM
   void *src_ptr = reinterpret_cast<void *>(src.data_ptr());
   void *dst_ptr = reinterpret_cast<void *>(dst.data_ptr());
@@ -121,7 +124,8 @@ void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int pe
 }
 void nvshmem_finalize() {
 #ifdef NVTE_ENABLE_NVSHMEM
-  nvshmem_finalize();
+  // Call NVSHMEM's C API, not this function.
+  ::nvshmem_finalize();
 #else
   NVTE_ERROR("Internal TE error: nvshmem_finalize cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
