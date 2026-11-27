@@ -439,12 +439,13 @@ void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
 
   // Update amax tensor
   if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_, "Row-scaled NVFP4 requires row-wise data.");
     auto shape = tensor_.shape();
     const size_t rows = product(shape, 0, shape.ndim - 1);
     const size_t cols = shape.data[shape.ndim - 1];
-    amax_rowwise_.emplace(rows, DType::kFloat32);
-    tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{rows});
+    if (rowwise_) {
+      amax_rowwise_.emplace(rows, DType::kFloat32);
+      tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{rows});
+    }
     if (columnwise_) {
       amax_columnwise_.emplace(cols, DType::kFloat32);
       tensor_.set_columnwise_amax(amax_columnwise_->gpu_buffer(), DType::kFloat32,

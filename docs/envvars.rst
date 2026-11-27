@@ -395,7 +395,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
+   :Description: Quantize activations and gradients to row-scaled NVFP4 in the ``NVFP4BlockScaling`` recipe (equivalent to ``NVFP4BlockScaling(row_scaled_activation=True)``). The per-tensor ``amax`` is replaced by one ``amax`` per tensor row (rowwise) and per tensor column (columnwise). Sequence parallelism, Userbuffers communication overlap, and ``transformer_engine.pytorch.ops.GroupedLinear`` are not supported.
+
+.. envvar:: NVTE_NVFP4_ROW_SCALED_WEIGHT
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Quantize weights to row-scaled NVFP4 in the ``NVFP4BlockScaling`` recipe (equivalent to ``NVFP4BlockScaling(row_scaled_weight=True)``). Requires ``NVTE_NVFP4_DISABLE_2D_QUANTIZATION=1`` and BF16 weights with both dimensions divisible by 32. The restrictions of :envvar:`NVTE_NVFP4_ROW_SCALED_ACTIVATION` apply. 4over6 on weights and casting master weights with ``quantize_master_weights`` are not supported.
 
 .. envvar:: NVTE_NVFP4_4OVER6
 

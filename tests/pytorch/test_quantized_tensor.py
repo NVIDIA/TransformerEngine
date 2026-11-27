@@ -956,10 +956,6 @@ class TestQuantizedTensor:
         and from the shape the tensor was allocated with.
         """
         quantizer = make_quantizer(quantization, device=device)
-        # Row-scaled NVFP4 accepts set_usage(rowwise=False) but rejects the
-        # allocation itself, so it has to be filtered out up front.
-        if getattr(quantizer, "row_scaled_nvfp4", False) and not rowwise:
-            pytest.skip(f"{quantization} requires rowwise usage")
         quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
         if (quantizer.rowwise_usage, quantizer.columnwise_usage) != (rowwise, columnwise):
             pytest.skip(f"{quantization} does not support this usage combination")
@@ -1303,8 +1299,6 @@ def test_skip_quantization_with_noop_flag(
     """
     if usage == "columnwise" and quantization in ("fp8", "fp8_delayed_scaling"):
         pytest.skip("Delayed scaling does not support columnwise-only quantization")
-    if usage != "rowwise" and quantization == "nvfp4_row_scaled":
-        pytest.skip("Row-scaled NVFP4 does not produce columnwise output")
 
     quantizer = make_quantizer(quantization)
     quantizer.optimize_for_gemm = optimize_for_gemm

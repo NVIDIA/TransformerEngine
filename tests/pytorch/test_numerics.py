@@ -138,17 +138,14 @@ def nvfp4_rht_and_2d_quantization():
 
 
 def nvfp4_row_scaled():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=True,
+    return recipe.NVFP4BlockScaling(
+        disable_rht=False,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         row_scaled_activation=True,
-        backward_override="high_precision",
+        row_scaled_weight=True,
+        backward_override=None,
     )
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
 
 
 def nvfp4_4over6():
@@ -1765,13 +1762,17 @@ def test_linear_tight_dims(recipe, inference, dtype):
         torch.testing.assert_close(te_out, ref_out, **tols)
 
         if not inference:
-            # Linear quantizes the raw gradient internally. Give the reference
-            # its quantize-dequantize equivalent rather than requantizing it.
-            bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
-            grad_output_quantizer = bwd_state.make_quantizers()[0]
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            # Linear quantizes the raw gradient internally unless the recipe
+            # overrides backward. Give the reference its quantize-dequantize
+            # equivalent rather than requantizing it.
             grad_raw = torch.randn_like(te_out)
-            grad_qdq = grad_output_quantizer(grad_raw).dequantize()
+            if recipe.backward_override is None:
+                bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
+                grad_output_quantizer = bwd_state.make_quantizers()[0]
+                grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                grad_qdq = grad_output_quantizer(grad_raw).dequantize()
+            else:
+                grad_qdq = grad_raw
 
             te_out.backward(grad_raw)
             ref_out.backward(grad_qdq)

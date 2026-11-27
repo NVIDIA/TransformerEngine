@@ -271,12 +271,10 @@ void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_in
                                           const NVFP4Quantizer *nvfp4_quantizer_cpp,
                                           const std::optional<TensorWrapper> &noop_flag,
                                           cudaStream_t stream) {
-  NVTE_CHECK(!nvfp4_quantizer_cpp->with_rht,
-             "Grouped row-scaled NVFP4 quantization does not support RHT.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_rht || nvfp4_quantizer_cpp->with_post_rht_amax,
+             "Grouped row-scaled NVFP4 RHT quantization expects post-RHT amax buffers.");
   NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
              "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
-  NVTE_CHECK(!nvfp4_quantizer_cpp->stochastic_rounding,
-             "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
   NVTE_CHECK(!nvfp4_quantizer_cpp->with_amax_reduction,
              "Grouped row-scaled NVFP4 quantization does not support amax reduction.");
   NVTE_CHECK(nvfp4_quantizer_cpp->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
@@ -286,8 +284,37 @@ void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_in
   if (noop_flag.has_value()) {
     quant_config_cpp.set_noop_tensor(noop_flag->data());
   }
+
+  at::Tensor rng_state;
+  TensorWrapper te_rng_state;
+  if (nvfp4_quantizer_cpp->stochastic_rounding) {
+    constexpr size_t rng_elts_per_thread = 1024;
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+    rng_state = torch::empty({2}, at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
+    te_rng_state = makeTransformerEngineTensor(rng_state);
+    quant_config_cpp.set_rng_state(te_rng_state.data());
+    quant_config_cpp.set_stochastic_rounding(true);
+  }
   if (transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH")) {
     quant_config_cpp.set_use_fast_math(true);
+  }
+  if (nvfp4_quantizer_cpp->with_rht &&
+      grouped_output_tensor.get_columnwise_data().data_ptr != nullptr) {
+    NVTE_CHECK(!noop_flag.has_value(),
+               "Grouped row-scaled NVFP4 RHT quantization does not support a noop flag.");
+    auto rht_matrix_nvte = makeTransformerEngineTensor(nvfp4_quantizer_cpp->rht_matrix);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_hadamard_transform_amax_graph_safe(
+          grouped_input_tensor.data(), grouped_output_tensor.data(), 0,
+          nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t, stream);
+      nvte_group_hadamard_transform_cast_fusion_graph_safe(
+          grouped_input_tensor.data(), grouped_output_tensor.data(), rht_matrix_nvte.data(),
+          quant_config_cpp, nullptr, stream);
+    });
+    return;
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(), quant_config_cpp,
@@ -1553,9 +1580,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
   const bool disable_second_level_scale = quantizer_cpp_list[0]->disable_second_level_scale;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
-  if (row_scaled_nvfp4) {
-    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-  }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const auto scale_dtype = quantizer_cpp_list[0]->scale_dtype;

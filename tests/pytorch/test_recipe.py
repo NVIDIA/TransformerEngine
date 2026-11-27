@@ -657,7 +657,7 @@ def test_nvfp4_row_scaled_quantizer_roles(
             QuantizerRole(module_type="linear", tensor_type="grad_input"),
         ],
     ).make_quantizers()
-    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
+    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [True, True]
     assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [False, False]
     assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [0, 0]
     assert [q.nvfp4_4over6_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
@@ -689,6 +689,82 @@ def test_nvfp4_row_scaled_quantizer_roles(
         True,
         True,
     ]
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["act", "row_scaled_act"])
+@pytest.mark.parametrize("row_scaled_weight", [False, True], ids=["w", "row_scaled_w"])
+@pytest.mark.parametrize("disable_2d_quantization", [False, True], ids=["2d", "1d"])
+def test_nvfp4_row_scaled_weight_quantizer_roles(
+    row_scaled_activation, row_scaled_weight, disable_2d_quantization
+):
+    if row_scaled_weight and not disable_2d_quantization:
+        with pytest.raises(ValueError, match="2D quantization"):
+            NVFP4BlockScaling(row_scaled_weight=True, disable_2d_quantization=False)
+        return
+    recipe = NVFP4BlockScaling(
+        row_scaled_activation=row_scaled_activation,
+        row_scaled_weight=row_scaled_weight,
+        disable_2d_quantization=disable_2d_quantization,
+    )
+    weight_quantizer, input_quantizer = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="input"),
+        ],
+    ).make_quantizers()
+    assert weight_quantizer.row_scaled_nvfp4 == row_scaled_weight
+    assert weight_quantizer.with_2d_quantization == (not disable_2d_quantization)
+    assert input_quantizer.row_scaled_nvfp4 == row_scaled_activation
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+@pytest.mark.parametrize("module_type", ["linear", "grouped_linear"])
+def test_nvfp4_row_scaled_weight_primary_weights(module_type):
+    from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+    recipe = NVFP4BlockScaling(row_scaled_weight=True, disable_2d_quantization=True)
+    in_features, out_features = 256, 256
+    m_splits = [128, 128]
+
+    def make_module():
+        if module_type == "linear":
+            return Linear(in_features, out_features, bias=False, params_dtype=torch.bfloat16)
+        return GroupedLinear(
+            len(m_splits), in_features, out_features, bias=False, params_dtype=torch.bfloat16
+        )
+
+    def run(module, inp):
+        inp = inp.detach().clone().requires_grad_()
+        with te.autocast(enabled=True, recipe=recipe):
+            out = module(inp) if module_type == "linear" else module(inp, m_splits)
+        out.backward(torch.ones_like(out))
+        return out, inp.grad, [p.grad for p in module.parameters()]
+
+    with quantized_model_init(enabled=True, recipe=recipe, preserve_high_precision_init_val=True):
+        module = make_module().cuda()
+    ref_module = make_module().cuda()
+    with torch.no_grad():
+        for param, ref_param in zip(module.parameters(), ref_module.parameters()):
+            assert isinstance(param, te.NVFP4Tensor)
+            assert param._row_scaled_nvfp4
+            ref_param.copy_(param.get_high_precision_init_val())
+
+    inp = torch.randn(sum(m_splits), in_features, dtype=torch.bfloat16, device="cuda")
+    out, dgrad, wgrads = run(module, inp)
+    ref_out, ref_dgrad, ref_wgrads = run(ref_module, inp)
+    torch.testing.assert_close(out, ref_out, rtol=0, atol=0)
+    torch.testing.assert_close(dgrad, ref_dgrad, rtol=0, atol=0)
+    for wgrad, ref_wgrad in zip(wgrads, ref_wgrads):
+        torch.testing.assert_close(wgrad, ref_wgrad, rtol=0, atol=0)
+
+    weight = next(module.parameters())
+    master_weight = weight.get_high_precision_init_val().cuda().float().reshape(-1)
+    with pytest.raises(ValueError, match="2D quantization"):
+        quantize_master_weights([weight], [master_weight], [0], group=None)
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)

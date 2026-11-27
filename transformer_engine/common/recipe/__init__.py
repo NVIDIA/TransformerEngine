@@ -576,9 +576,17 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     row_scaled_activation : bool, default = False
-             If set to `True`, forward activation quantizers emit row-scaled
-             NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
-             as a vector with one FP32 value per tensor row.
+             If set to `True`, activations and gradients are quantized to
+             row-scaled NVFP4, where the per-tensor ``amax`` is replaced by one
+             ``amax`` per tensor row (rowwise) and per tensor column
+             (columnwise). Sequence parallelism, Userbuffers communication
+             overlap, and ``te.ops.GroupedLinear`` are not supported.
+    row_scaled_weight : bool, default = False
+             If set to `True`, weights are quantized to row-scaled NVFP4.
+             Requires ``disable_2d_quantization=True`` and BF16 weights with
+             both dimensions divisible by 32. The restrictions of
+             ``row_scaled_activation`` apply. 4over6 on weights and casting
+             master weights with ``quantize_master_weights`` are not supported.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares
@@ -606,6 +614,7 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    row_scaled_weight: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_WEIGHT", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
@@ -639,6 +648,13 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
+        assert not (
+            self.row_scaled_weight and self.nvfp4_4over6 in ("weights", "all")
+        ), "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support 4over6."
+        assert not (self.row_scaled_weight and not self.disable_2d_quantization), (
+            "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support 2D quantization. "
+            "Set disable_2d_quantization=True."
+        )
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -669,6 +685,7 @@ class NVFP4BlockScaling(Recipe):
             f"backward_override={self.backward_override}, "
             f"disable_rht={self.disable_rht}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"row_scaled_weight={self.row_scaled_weight}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
             f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "

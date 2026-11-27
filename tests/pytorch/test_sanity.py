@@ -101,17 +101,14 @@ def nvfp4_vanilla():
 
 
 def nvfp4_row_scaled():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=True,
+    return recipe.NVFP4BlockScaling(
+        disable_rht=False,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         row_scaled_activation=True,
-        backward_override="dequantized",
+        row_scaled_weight=True,
+        backward_override=None,
     )
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
 
 
 def nvfp4_4over6():
@@ -472,6 +469,8 @@ def test_sanity_layernorm_linear(
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4() and dtype == torch.float16:
             pytest.skip("FP16 output for NVFP4 not supported")
+        if fp8_recipe.nvfp4() and not fp8_recipe.disable_rht and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 RHT requires BF16 input")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -514,6 +513,8 @@ def test_sanity_linear(
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4() and dtype == torch.float16:
             pytest.skip("FP16 output for NVFP4 not supported")
+        if fp8_recipe.nvfp4() and not fp8_recipe.disable_rht and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 RHT requires BF16 input")
 
     sigma = 0.023
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -556,6 +557,8 @@ def test_sanity_linear_with_zero_tokens(
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4() and dtype == torch.float16:
             pytest.skip("FP16 output for NVFP4 not supported")
+        if fp8_recipe.nvfp4() and not fp8_recipe.disable_rht and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 RHT requires BF16 input")
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -622,7 +625,7 @@ def test_sanity_grouped_linear(
         tokens_per_nonempty_expert = bs * config.max_seqlen_q
         if tokens_per_nonempty_expert % 128 != 0:
             pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
-        k_alignment = 64
+        k_alignment = 128 if getattr(fp8_recipe, "row_scaled_activation", False) else 64
         if config.hidden_size % k_alignment != 0:
             pytest.skip(f"Single grouped parameters require GEMM K to be {k_alignment}-aligned")
 

@@ -855,11 +855,6 @@ class GroupedTensorStorage:
             nvfp4_use_4over6 = quantizer.nvfp4_use_4over6
             nvfp4_e4m3_max = quantizer.nvfp4_e4m3_max
             disable_second_level_scale = quantizer.disable_second_level_scale
-            if row_scaled_nvfp4:
-                if not rowwise_usage:
-                    raise ValueError(
-                        "Row-scaled NVFP4 grouped quantization requires rowwise usage."
-                    )
             total_amax_elements = (
                 sum(math.prod(s[:-1]) for s in shape) if row_scaled_nvfp4 else num_tensors
             )

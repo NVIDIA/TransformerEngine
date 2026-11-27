@@ -31,6 +31,7 @@ struct GroupedCastConfig {
   std::vector<size_t> Ms;
   size_t K;
   bool transpose;
+  bool rowwise = true;
 };
 
 std::vector<std::unique_ptr<Tensor>> make_outputs(const std::string& tag,
@@ -157,6 +158,7 @@ struct GroupedBuffersNVFP4 {
   size_t num_tensors = 0;
   size_t row_scale_cols = 0;
   bool transpose = false;
+  bool rowwise = true;
 
   CudaPtr<bf16> in_data;
   CudaPtr<uint8_t> out_data;
@@ -172,17 +174,20 @@ struct GroupedBuffersNVFP4 {
   std::unique_ptr<GroupedTensorWrapper> output;
 
   void allocate(size_t capacity_rows_, size_t K_, size_t num_tensors_, size_t row_scale_cols_,
-                bool transpose_) {
+                bool transpose_, bool rowwise_ = true) {
     capacity_rows = capacity_rows_;
     K = K_;
     num_tensors = num_tensors_;
     row_scale_cols = row_scale_cols_;
     transpose = transpose_;
+    rowwise = rowwise_;
 
     in_data = cuda_alloc<bf16>(capacity_rows * K * sizeof(bf16));
-    out_data = cuda_alloc<uint8_t>(capacity_rows * (K / 2));
-    out_scale = cuda_alloc<uint8_t>(capacity_rows * row_scale_cols);
-    out_amax = cuda_alloc<float>(capacity_rows * sizeof(float));
+    if (rowwise) {
+      out_data = cuda_alloc<uint8_t>(capacity_rows * (K / 2));
+      out_scale = cuda_alloc<uint8_t>(capacity_rows * row_scale_cols);
+      out_amax = cuda_alloc<float>(capacity_rows * sizeof(float));
+    }
     offsets = cuda_alloc<int64_t>((num_tensors + 1) * sizeof(int64_t));
     first_dims = cuda_alloc<int64_t>(num_tensors * sizeof(int64_t));
     if (transpose) {
@@ -203,11 +208,13 @@ struct GroupedBuffersNVFP4 {
     input->set_first_dims(first_dims.get(), DType::kInt64, std::vector<size_t>{num_tensors});
 
     output->set_row_scaled_nvfp4(true);
-    output->set_rowwise_data(out_data.get(), DType::kFloat4E2M1,
-                             std::vector<size_t>{capacity_rows, K});
-    output->set_rowwise_scale_inv(out_scale.get(), DType::kFloat8E4M3,
-                                  std::vector<size_t>{capacity_rows, row_scale_cols});
-    output->set_amax(out_amax.get(), DType::kFloat32, std::vector<size_t>{capacity_rows});
+    if (rowwise) {
+      output->set_rowwise_data(out_data.get(), DType::kFloat4E2M1,
+                               std::vector<size_t>{capacity_rows, K});
+      output->set_rowwise_scale_inv(out_scale.get(), DType::kFloat8E4M3,
+                                    std::vector<size_t>{capacity_rows, row_scale_cols});
+      output->set_amax(out_amax.get(), DType::kFloat32, std::vector<size_t>{capacity_rows});
+    }
     output->set_tensor_offsets(offsets.get(), DType::kInt64,
                                std::vector<size_t>{num_tensors + 1});
     output->set_first_dims(first_dims.get(), DType::kInt64, std::vector<size_t>{num_tensors});
@@ -235,9 +242,11 @@ struct GroupedBuffersNVFP4 {
                                cudaMemcpyHostToDevice));
     NVTE_CHECK_CUDA(cudaMemcpy(in_data.get(), packed_in.data(), ref.sum_M * K * sizeof(bf16),
                                cudaMemcpyHostToDevice));
-    std::vector<float> poison_row(capacity_rows, -1.0f);
-    NVTE_CHECK_CUDA(cudaMemcpy(out_amax.get(), poison_row.data(), capacity_rows * sizeof(float),
-                               cudaMemcpyHostToDevice));
+    if (rowwise) {
+      std::vector<float> poison_row(capacity_rows, -1.0f);
+      NVTE_CHECK_CUDA(cudaMemcpy(out_amax.get(), poison_row.data(), capacity_rows * sizeof(float),
+                                 cudaMemcpyHostToDevice));
+    }
     if (transpose) {
       std::vector<float> poison_col(num_tensors * K, -1.0f);
       NVTE_CHECK_CUDA(cudaMemcpy(out_col_amax.get(), poison_col.data(),
@@ -255,27 +264,30 @@ void expect_matches_reference(const GroupedBuffersNVFP4& b, const GroupedReferen
   const size_t sum_M = ref.sum_M;
   const size_t K = ref.K;
 
-  std::vector<uint8_t> h_data(sum_M * K / 2);
-  std::vector<uint8_t> h_scale(sum_M * ref.row_scale_cols);
-  std::vector<float> h_amax(sum_M);
-  NVTE_CHECK_CUDA(cudaMemcpy(h_data.data(), b.out_data.get(), h_data.size(), cudaMemcpyDeviceToHost));
-  NVTE_CHECK_CUDA(
-      cudaMemcpy(h_scale.data(), b.out_scale.get(), h_scale.size(), cudaMemcpyDeviceToHost));
-  NVTE_CHECK_CUDA(
-      cudaMemcpy(h_amax.data(), b.out_amax.get(), sum_M * sizeof(float), cudaMemcpyDeviceToHost));
+  if (b.rowwise) {
+    std::vector<uint8_t> h_data(sum_M * K / 2);
+    std::vector<uint8_t> h_scale(sum_M * ref.row_scale_cols);
+    std::vector<float> h_amax(sum_M);
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(h_data.data(), b.out_data.get(), h_data.size(), cudaMemcpyDeviceToHost));
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(h_scale.data(), b.out_scale.get(), h_scale.size(), cudaMemcpyDeviceToHost));
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(h_amax.data(), b.out_amax.get(), sum_M * sizeof(float), cudaMemcpyDeviceToHost));
 
-  for (size_t i = 0; i < sum_M; ++i)
-    ASSERT_EQ(h_amax[i], ref.row_amax[i]) << "rowwise amax mismatch at row " << i;
-  size_t data_mismatch = 0;
-  for (size_t i = 0; i < h_data.size(); ++i)
-    if (h_data[i] != ref.row_data[i]) ++data_mismatch;
-  ASSERT_EQ(data_mismatch, 0u) << "rowwise FP4 data mismatch (" << data_mismatch << "/"
-                               << h_data.size() << ")";
-  size_t scale_mismatch = 0;
-  for (size_t i = 0; i < h_scale.size(); ++i)
-    if (h_scale[i] != ref.row_scale[i]) ++scale_mismatch;
-  ASSERT_EQ(scale_mismatch, 0u) << "rowwise scale mismatch (" << scale_mismatch << "/"
-                                << h_scale.size() << ")";
+    for (size_t i = 0; i < sum_M; ++i)
+      ASSERT_EQ(h_amax[i], ref.row_amax[i]) << "rowwise amax mismatch at row " << i;
+    size_t data_mismatch = 0;
+    for (size_t i = 0; i < h_data.size(); ++i)
+      if (h_data[i] != ref.row_data[i]) ++data_mismatch;
+    ASSERT_EQ(data_mismatch, 0u) << "rowwise FP4 data mismatch (" << data_mismatch << "/"
+                                 << h_data.size() << ")";
+    size_t scale_mismatch = 0;
+    for (size_t i = 0; i < h_scale.size(); ++i)
+      if (h_scale[i] != ref.row_scale[i]) ++scale_mismatch;
+    ASSERT_EQ(scale_mismatch, 0u) << "rowwise scale mismatch (" << scale_mismatch << "/"
+                                  << h_scale.size() << ")";
+  }
 
   if (!ref.transpose) return;
 
@@ -314,7 +326,7 @@ void performGroupedRowScaledQuantizeTest(const GroupedCastConfig& cfg) {
   const std::vector<bf16> packed_in = pack_inputs(ins, Ms, K);
 
   GroupedBuffersNVFP4 b;
-  b.allocate(sum_M, K, Ms.size(), ref.row_scale_cols, transpose);
+  b.allocate(sum_M, K, Ms.size(), ref.row_scale_cols, transpose, cfg.rowwise);
   b.set_routing(Ms, ref, packed_in);
 
   b.quantize(0);
@@ -402,6 +414,13 @@ INSTANTIATE_TEST_SUITE_P(
                       GroupedCastConfig{{256, 128}, 512, true},
                       GroupedCastConfig{{384, 128, 256}, 128, true},
                       GroupedCastConfig{{512}, 1024, true}));
+
+INSTANTIATE_TEST_SUITE_P(
+    NVFP4GroupedRowScaledQuantizeColumnwiseOnly, NVFP4GroupedRowScaledQuantizeTestSuite,
+    ::testing::Values(GroupedCastConfig{{128}, 128, true, false},
+                      GroupedCastConfig{{128, 256, 128}, 256, true, false},
+                      GroupedCastConfig{{384, 128, 256}, 128, true, false},
+                      GroupedCastConfig{{512}, 1024, true, false}));
 
 class NVFP4GroupedRowScaledQuantizeReplaySuite
     : public ::testing::TestWithParam<GroupedCastConfig> {};
