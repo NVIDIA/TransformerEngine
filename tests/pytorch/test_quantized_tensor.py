@@ -19,6 +19,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
     Float8Tensor,
+    Float8TensorStorage,
     Float8BlockwiseQTensor,
     MXFP8Tensor,
     MXFP8TensorStorage,
@@ -488,6 +489,38 @@ class TestFloat8Tensor:
         assert x.size() == y.size()
         assert x.dtype == y.dtype
         assert x.device == y.device
+
+    def test_view_and_reshape_transpose(self):
+        data = torch.randint(0, 256, (32, 16), device="cuda", dtype=torch.uint8)
+        transpose = data.T.contiguous()
+        tensor = Float8Tensor(
+            (32, 16),
+            torch.bfloat16,
+            data=data,
+            data_transpose=transpose,
+            fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=te.DType.kFloat8E4M3,
+            device="cuda",
+        )
+
+        expected_t = data.view(2, 16, 16).movedim(-1, 0).contiguous()
+        for out in (
+            tensor.view(2, -1, 16),
+            torch.ops.aten.view.default(tensor, [2, -1, 16]),
+            tensor.reshape(2, -1, 16),
+            Float8TensorStorage.view(tensor, (2, -1, 16)),
+        ):
+            assert not out._transpose_invalid
+            assert out._transpose.data_ptr() == transpose.data_ptr()
+            assert torch.equal(out._transpose, expected_t)
+
+        back = tensor.view(2, 16, 16).reshape(32, -1)
+        assert not back._transpose_invalid
+        assert back._transpose.data_ptr() == transpose.data_ptr()
+        assert torch.equal(back._transpose, transpose)
+
+        assert tensor.view(16, 32)._transpose is None
+        assert tensor.reshape(16, 32)._transpose is None
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
