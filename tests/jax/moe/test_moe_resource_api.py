@@ -83,6 +83,146 @@ def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_ca
         assert call["situ_beta2"] == expected["up_beta"]
 
 
+@pytest.mark.parametrize(
+    "apply_topk_weights_early,counts",
+    [(False, [3, 0, 5]), (True, [3, 0, 5]), (True, [0, 0, 0])],
+)
+def test_unfused_situ_ffn_masks_inactive_rows(monkeypatch, apply_topk_weights_early, counts):
+    module = importlib.import_module("transformer_engine.jax.moe")
+    captured = {}
+
+    class _Tensor:
+        def __init__(self, data, first_dims=None):
+            self.data, self.first_dims = data, first_dims
+
+        def get_tensor(self, usage=None):
+            del usage
+            return self
+
+        def checkpoint(self, quantizer=None):
+            del quantizer
+            return self
+
+    def quantize(data, quantizer, group_sizes=None, **_):
+        if quantizer == "fc1_dgrad":
+            captured["d_combined"] = data
+        return _Tensor(data, group_sizes)
+
+    def gemm(lhs, rhs, *, contracting_dims, bias=None):
+        del bias
+        if contracting_dims == ((0,), (0,)):
+            return jnp.zeros((len(counts), lhs.data.shape[1], rhs.data.shape[1]), lhs.data.dtype)
+        active = jnp.arange(lhs.data.shape[0]) < lhs.first_dims.sum()
+        rhs_mat = rhs.data[0] if contracting_dims == ((1,), (1,)) else rhs.data[0].T
+        return jnp.where(active[:, None], lhs.data @ rhs_mat, jnp.nan)
+
+    monkeypatch.setattr(module.tex, "grouped_quantize", quantize)
+    monkeypatch.setattr(module.tex, "grouped_gemm", gemm)
+
+    capacity, active, inter = 10, sum(counts), 4
+    hidden = 2 * inter
+    rng = np.random.default_rng(72)
+    gate, up, dy = [rng.uniform(-4, 4, (capacity, inter)).astype(np.float32) for _ in range(3)]
+    weights_np = rng.uniform(0.1, 0.9, (1, capacity)).astype(np.float32)
+    for arr in (gate, up, dy):
+        arr[active:] = np.nan
+    weights_np[:, active:] = np.nan
+
+    tokens = jnp.asarray(np.concatenate([gate, up], axis=-1))[None]
+    d_out = jnp.asarray(np.concatenate([dy, np.zeros_like(dy)], axis=-1))[None]
+    weights = jnp.asarray(weights_np)
+    sizes = jnp.asarray(counts, jnp.int32)
+    wi = jnp.broadcast_to(jnp.eye(hidden, dtype=jnp.float32), (len(counts), hidden, hidden))
+    wo = jnp.broadcast_to(jnp.eye(inter, hidden, dtype=jnp.float32), (len(counts), inter, hidden))
+    qsets = (
+        SimpleNamespace(x=None, kernel=None, dgrad="fc1_dgrad"),
+        SimpleNamespace(x=None, kernel=None, dgrad=None),
+    )
+    params = ActivationParams.create("situglu", gate_beta=2.0, up_beta=8.0)
+
+    _, residuals = module._ffn_fwd_per_shard(
+        tokens,
+        weights,
+        sizes,
+        wi,
+        wo,
+        None,
+        None,
+        None,
+        None,
+        qsets,
+        compute_dtype=jnp.float32,
+        num_local_experts=len(counts),
+        activation_type="situglu",
+        apply_topk_weights_early=apply_topk_weights_early,
+        use_cudnn_jax_fusion=False,
+        wi_0_checkpoint_name=None,
+        wi_1_checkpoint_name=None,
+        wo_checkpoint_name=None,
+        cudnn_native_weight_layout=False,
+        quant_before_fsdp_ag=False,
+        fsdp_axis=None,
+        fsdp_size=1,
+        wi_fsdp_axis=None,
+        wo_fsdp_axis=None,
+        act_params=params,
+    )
+    _, d_w, *_ = module._ffn_bwd_per_shard(
+        d_out,
+        *residuals,
+        weights,
+        qsets,
+        activation_type="situglu",
+        apply_topk_weights_early=apply_topk_weights_early,
+        has_bias=False,
+        use_cudnn_jax_fusion=False,
+        cudnn_native_weight_layout=False,
+        act_params=params,
+    )
+
+    g, u, d = gate[:active], up[:active], dy[:active]
+    tg, tu, sig = np.tanh(g / 2.0), np.tanh(u / 8.0), 1 / (1 + np.exp(-g))
+    mid = (2.0 * tg * sig) * (8.0 * tu)
+    w = weights_np[0, :active, None] if apply_topk_weights_early else 1.0
+    d_combined = captured["d_combined"]
+    expected = (
+        mid * w,
+        (d * w) * ((1 - tg**2) * sig + 2.0 * tg * sig * (1 - sig)) * (8.0 * tu),
+        (d * w) * (2.0 * tg * sig) * (1 - tu**2),
+        np.sum(d * mid, axis=-1) if apply_topk_weights_early else np.zeros(active),
+    )
+    for actual, ref in zip(
+        (residuals[4].data, d_combined[:, :inter], d_combined[:, inter:], d_w[0]), expected
+    ):
+        arr = np.asarray(actual, np.float32)
+        assert np.isfinite(arr).all()
+        np.testing.assert_array_equal(arr[active:], 0)
+        np.testing.assert_allclose(arr[:active], ref, atol=2e-05, rtol=2e-05)
+
+
+@pytest.mark.parametrize(
+    "capability,available,expected",
+    [(89, True, False), (100, True, True), (100, False, False), (107, True, False)],
+)
+def test_situ_fusion_or_jax_fallback(monkeypatch, capability, available, expected):
+    import transformer_engine_jax
+
+    module = importlib.import_module("transformer_engine.jax.moe")
+    monkeypatch.setattr(
+        transformer_engine_jax, "get_device_compute_capability", lambda _: capability
+    )
+    monkeypatch.setattr(
+        module.tex,
+        "grouped_gemm_glu_dependencies_available",
+        lambda **_: (available, "unavailable frontend"),
+    )
+    if expected:
+        assert module._select_cudnn_jax_fusion([], activation_type="situglu")
+    else:
+        with pytest.warns(UserWarning, match="falling back"):
+            assert not module._select_cudnn_jax_fusion([], activation_type="situglu")
+
+
 @pytest.fixture(autouse=True)
 def no_global_resource():
     with global_shard_guard(None):

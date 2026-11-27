@@ -438,16 +438,16 @@ def _pure_jax_moe_reference(
     wi_0, wi_1 = jnp.split(wi, 2, axis=-1)
     layer_w0 = jnp.einsum("th,ehm->tem", x_2d, wi_0)
     layer_w1 = jnp.einsum("th,ehm->tem", x_2d, wi_1)
-    # Activation runs in x.dtype (typically bf16) to mirror the impl --
-    # the impl keeps silu+multiply in the wi GEMM output dtype because
-    # storing higher precision than the consumer (wo) GEMM buys nothing.
+    # Native GLU math uses FP32 intermediates and casts the product to the GEMM dtype.
     if activation_type == "situglu":
         gate, up = layer_w0.astype(jnp.float32), layer_w1.astype(jnp.float32)
         capped_gate = 4.0 * jnp.tanh(gate / 4.0)
         capped_up = 25.0 * jnp.tanh(up / 25.0)
         intermediate = (capped_gate * jax.nn.sigmoid(gate) * capped_up).astype(x.dtype)
     else:
-        intermediate = jax.nn.silu(layer_w0) * layer_w1
+        intermediate = (
+            jax.nn.silu(layer_w0.astype(jnp.float32)) * layer_w1.astype(jnp.float32)
+        ).astype(x.dtype)
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
     output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
     output = output_2d.reshape(original_shape).astype(x.dtype)
@@ -688,6 +688,10 @@ def _quantization_recipe(quantization):
 
 _CONFIGS = [
     pytest.param(
+        dict(activation_type="situglu", apply_topk_weights_early=True),
+        id="situ-early-weighting",
+    ),
+    pytest.param(
         dict(score_function="softmax"),
         id="softmax",
     ),
@@ -894,6 +898,7 @@ def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
     return dict(
+        activation_type=config.get("activation_type", "silu"),
         score_function=config.get("score_function", "softmax"),
         expert_bias=(
             jnp.asarray(params_np["expert_bias"])

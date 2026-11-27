@@ -146,6 +146,12 @@ def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
     """Convert a string to an activation function."""
     if fn_or_string == "linear":
         return lambda x: x
+    if fn_or_string == "situ":
+        beta = act_params.situglu.gate_beta
+        return lambda x: beta * jnp.tanh(x / beta) * jax.nn.sigmoid(x)
+    if fn_or_string == "situ_linear":
+        beta = act_params.situglu.up_beta
+        return lambda x: beta * jnp.tanh(x / beta)
     if fn_or_string == "clamped_linear":
         limit = act_params.clamped_swiglu.limit
         offset = act_params.clamped_swiglu.glu_linear_offset
