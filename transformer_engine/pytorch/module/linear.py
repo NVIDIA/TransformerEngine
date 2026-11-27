@@ -20,6 +20,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
     get_dummy_wgrad,
+    check_ub_name_initialized,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -2119,6 +2120,7 @@ class Linear(TransformerEngineBaseModule):
         ):
             assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
+            check_ub_name_initialized(ub_name)
         self.ub_name = ub_name
 
         if using_cublasmp_backend():

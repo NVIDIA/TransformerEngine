@@ -17,7 +17,11 @@ from transformer_engine.common.recipe import (
     Recipe,
 )
 from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
-from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
+from .storage.float8_tensor_storage import (
+    Float8TensorStorage,
+    _FromFloat8Func,
+    _columnwise_shape_for,
+)
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import (
@@ -39,16 +43,7 @@ _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten._to_copy.default,
     torch.ops.aten._pin_memory.default,
     torch.ops.aten.split.Tensor,
-    torch.ops.aten.clone.default,
 }
-
-
-def _columnwise_shape_for(rowwise_shape: Iterable[int]) -> torch.Size:
-    """Physical columnwise FP8 shape for a logical rowwise shape."""
-    shape = torch.Size(rowwise_shape)
-    if len(shape) == 0:
-        return shape
-    return torch.Size((shape[-1], *shape[:-1]))
 
 
 class Float8Quantizer(Quantizer):
@@ -525,25 +520,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def clone(self) -> Float8Tensor:
-        # pylint: disable=missing-function-docstring
-        # ``_data`` may be None for columnwise-only sub-storages of a
-        # HybridQuantizedTensor on architectures without native non-TN FP8
-        # GEMM (Hopper / L40), where columnwise-only Float8 allocates
-        # ``_transpose`` instead of ``_data``. On Blackwell+ the C++
-        # override keeps ``_data`` populated even in columnwise-only mode.
-        data = self._data.detach().clone() if self._data is not None else None
-        data_transpose = None
-        if self._transpose is not None:
-            data_transpose = self._transpose.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "data": data,
-                "data_transpose": data_transpose,
-            },
-        )
-
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
@@ -651,22 +627,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             else:
                 out_shape = _resolve_view_shape(tensor.shape, args[1:])
 
-            out_transpose = None if tensor._transpose_invalid else tensor._transpose
-            if out_transpose is not None:
-                view_shape_for_transpose = _columnwise_shape_for(out_shape)
-                if out_transpose.shape != view_shape_for_transpose:
-                    if data is None:
-                        raise NotImplementedError(
-                            "Float8Tensor view with columnwise-only data is only supported "
-                            "when the requested shape preserves the columnwise layout"
-                        )
-                    out_transpose = None
-                else:
-                    out_transpose = out_transpose.view(*view_shape_for_transpose)
-            if data is None and out_transpose is None:
-                raise NotImplementedError(
-                    "Float8Tensor view with columnwise-only data requires a valid columnwise buffer"
-                )
             return Float8Tensor(
                 shape=out_shape,
                 dtype=tensor.dtype,
@@ -674,7 +634,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 data=out_data,
                 fp8_scale_inv=tensor._scale_inv,
                 fp8_dtype=tensor._fp8_dtype,
-                data_transpose=out_transpose,
+                data_transpose=tensor._view_transpose(out_shape),
                 quantizer=tensor._quantizer,
                 device=tensor.device,
             )
@@ -852,7 +812,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     tensor._transpose is not None and not tensor._transpose_invalid
                 )
                 is_contiguous_row_shard = (
-                    tensor.dim() == 2
+                    tensor.dim() == 2  # pylint: disable=chained-comparison
                     and tensor.shape[1] > 0
                     and len(size) == 2
                     and size[1] == tensor.shape[1]
@@ -912,8 +872,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
-        if func == torch.ops.aten.clone.default:
-            return cls.clone(args[0])
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
@@ -1059,7 +1017,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self._data.shape
         if self._transpose is not None:
             transpose_shape = self._transpose.shape
-            return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
+            return torch.Size(transpose_shape[1:] + transpose_shape[:1])
         return torch.Tensor.size(self)
 
     @property
@@ -1237,28 +1195,10 @@ class _ViewFunc(torch.autograd.Function):
         ctx.shape = tensor.shape
         if shape is None:
             return tensor.detach()
-        out_data = None
-        if tensor._data is not None:
-            out_data = tensor._data.view(*shape)
-            out_shape = out_data.size()
-        else:
-            out_shape = _resolve_view_shape(tensor.shape, shape)
-        out_transpose = None if tensor._transpose_invalid else tensor._transpose
-        if out_transpose is not None:
-            view_shape_for_transpose = _columnwise_shape_for(out_shape)
-            if out_transpose.shape != view_shape_for_transpose:
-                if tensor._data is None:
-                    raise NotImplementedError(
-                        "Float8Tensor view with columnwise-only data is only supported "
-                        "when the requested shape preserves the columnwise layout"
-                    )
-                out_transpose = None
-            else:
-                out_transpose = out_transpose.view(*view_shape_for_transpose)
-        if tensor._data is None and out_transpose is None:
-            raise NotImplementedError(
-                "Float8Tensor view with columnwise-only data requires a valid columnwise buffer"
-            )
+        out_data = tensor._data.view(*shape) if tensor._data is not None else None
+        out_shape = (
+            out_data.size() if out_data is not None else _resolve_view_shape(tensor.shape, shape)
+        )
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -1266,7 +1206,7 @@ class _ViewFunc(torch.autograd.Function):
             data=out_data,
             fp8_scale_inv=tensor._scale_inv,
             fp8_dtype=tensor._fp8_dtype,
-            data_transpose=out_transpose,
+            data_transpose=tensor._view_transpose(out_shape),
             quantizer=tensor._quantizer,
             device=tensor.device,
         )
@@ -1299,14 +1239,6 @@ class _ReshapeFunc(torch.autograd.Function):
             return tensor.detach()
         out_data = tensor._data.reshape(*shape)
         out_shape = out_data.size()
-        out_transpose = None if tensor._transpose_invalid else tensor._transpose
-        if out_transpose is not None:
-            out_transpose_shape = out_transpose.size()
-            if out_transpose_shape[0] != out_shape[-1] or out_transpose_shape[1:] != out_shape[:-1]:
-                out_transpose = None
-            else:
-                reshape_shape_for_transpose = [shape[-1]] + list(shape[:-1])
-                out_transpose = out_transpose.reshape(*reshape_shape_for_transpose)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -1314,7 +1246,7 @@ class _ReshapeFunc(torch.autograd.Function):
             data=out_data,
             fp8_scale_inv=tensor._scale_inv,
             fp8_dtype=tensor._fp8_dtype,
-            data_transpose=out_transpose,
+            data_transpose=tensor._view_transpose(out_shape, allow_copy=True),
             quantizer=tensor._quantizer,
             device=tensor.device,
         )

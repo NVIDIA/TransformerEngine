@@ -44,6 +44,12 @@ def _fold_block_argmax(x, i, offsets, n_cols, run_max, run_idx, run_nan):
 
 
 @triton.jit
+def _softmax_shift(maximum):
+    # With a -inf maximum, shifting by zero gives -inf logits zero mass and preserves NaNs.
+    return tl.where(maximum == float("-inf"), 0.0, maximum)
+
+
+@triton.jit
 def cross_entropy_forward_kernel(
     X_ptr,
     X_stride_0,
@@ -97,7 +103,8 @@ def cross_entropy_forward_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        shift = _softmax_shift(m_new)
+        d = d * tl.exp(m - shift) + tl.sum(tl.exp(x - shift))
         m = m_new
         if label_smoothing > 0:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -183,7 +190,8 @@ def cross_entropy_tp_pre_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        shift = _softmax_shift(m_new)
+        d = d * tl.exp(m - shift) + tl.sum(tl.exp(x - shift))
         m = m_new
         if COMPUTE_X_SUM:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -246,7 +254,8 @@ def cross_entropy_tp_post_kernel(
                     argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
                     argmax_max = rank_argmax_max
         global_m = tl.maximum(m, m_new)
-        d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
+        shift = _softmax_shift(global_m)
+        d = d * tl.exp(m - shift) + d_new * tl.exp(m_new - shift)
         m = global_m
         x_y = tl.maximum(x_y, tl.load(rank_data_ptr + 2))
         if label_smoothing > 0:
