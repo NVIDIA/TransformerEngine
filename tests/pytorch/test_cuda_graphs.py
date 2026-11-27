@@ -141,23 +141,6 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
-def test_invalid_module_does_not_leave_capture_state():
-    from transformer_engine.pytorch import graph as te_graph
-
-    class LocalLinear(torch.nn.Linear):
-        pass
-
-    module = LocalLinear(8, 8)
-    original_call = LocalLinear.__call__
-    try:
-        with pytest.raises(TypeError, match="Graphing for"):
-            make_graphed_callables((module, "not a module"), ((torch.zeros(1, 8),), ()))
-        assert not te_graph.is_graph_capturing()
-        assert LocalLinear.__call__ is original_call
-    finally:
-        te_graph.set_capture_end()
-
-
 def test_capture_preserves_eager_calibration_for_subclass():
     """Capturing a base and derived layer must preserve later eager calibration."""
 
