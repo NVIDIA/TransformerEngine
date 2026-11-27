@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from typing import Optional
+import sys
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
@@ -499,25 +500,29 @@ time_te_transformer_layer = speedometer(
 # BENCHMARK_TE_TRANSFORMER_LAYER_END
 print("# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END\n")
 
-# Write summary CSV for RST documentation
-with open("getting_started_jax_summary.csv", "w") as f:
-    f.write("Implementation,Time (ms),Speedup\n")
-    f.write(f"Baseline Flax,{time_baseline:.2f},1.00x\n")
-    f.write(f"TE Unfused,{time_te_unfused:.2f},{time_baseline/time_te_unfused:.2f}x\n")
-    f.write(
-        "TE Unfused + TE"
-        f" Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n"
-    )
-    f.write(
-        "TE Unfused + TE Attention +"
-        f" FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n"
-    )
-    f.write(
-        "TE Fused + TE Attention +"
-        f" FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n"
-    )
-    f.write(
-        "TE TransformerLayer +"
-        f" FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n"
-    )
-print("\nSummary written to getting_started_jax_summary.csv")
+# The committed CSV is the reference table published in the docs;
+# regenerate it explicitly with --write-reference-csv.
+if "--write-reference-csv" in sys.argv:
+    with open("getting_started_jax_summary.csv", "w") as f:
+        f.write("Implementation,Time (ms),Speedup\n")
+        f.write(f"Baseline Flax,{time_baseline:.2f},1.00x\n")
+        f.write(f"TE Unfused,{time_te_unfused:.2f},{time_baseline/time_te_unfused:.2f}x\n")
+        f.write(
+            "TE Unfused + TE"
+            f" Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n"
+        )
+        f.write(
+            "TE Unfused + TE Attention +"
+            f" FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n"
+        )
+        f.write(
+            "TE Fused + TE Attention +"
+            f" FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n"
+        )
+        f.write(
+            "TE TransformerLayer +"
+            f" FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n"
+        )
+    print("\nSummary written to getting_started_jax_summary.csv")
+else:
+    print("\nSummary CSV not written; pass --write-reference-csv to refresh the reference table")

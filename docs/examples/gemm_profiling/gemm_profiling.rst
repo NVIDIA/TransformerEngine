@@ -33,7 +33,7 @@ speedup analysis -- in a single command:
       --num_hidden_layers 24 \
       --micro_batch_size 31 \
       --sequence_length 512 \
-      -o ./gemm_speedup.png
+      -o ./_plots/gemm_speedup.png
 
 On Hopper (H100/H200), skip MXFP8 and NVFP4 which require Blackwell:
 
@@ -47,7 +47,7 @@ On Hopper (H100/H200), skip MXFP8 and NVFP4 which require Blackwell:
       --micro_batch_size 31 \
       --sequence_length 512 \
       --no-fp8 --no-fp4 \
-      -o ./gemm_speedup.png
+      -o ./_plots/gemm_speedup.png
 
 By default the tool runs in **autocast mode**, which is what Transformer Engine does
 during training: inputs are dynamically quantized to the target precision before each
@@ -134,7 +134,7 @@ during the timed region.
       --micro_batch_size 31 \
       --sequence_length 512 \
       --pre-quantize \
-      -o ./gemm_speedup_prequant.png
+      -o ./_plots/gemm_speedup_prequant.png
 
 .. code-block:: text
 
@@ -382,15 +382,15 @@ profile individual GEMMs in isolation, you can pass explicit MxKxN triplets with
 .. code-block:: bash
 
     # Fprop shapes for the 5B config
-    python benchmarks/gemm/benchmark_gemm.py -o roofline_fprop.png \
+    python benchmarks/gemm/benchmark_gemm.py -o _plots/roofline_fprop.png \
       --shapes 15872x4096x12288,15872x4096x4096,15872x4096x16384,15872x16384x4096
 
     # Dgrad shapes (K and N swapped from Fprop)
-    python benchmarks/gemm/benchmark_gemm.py -o roofline_dgrad.png \
+    python benchmarks/gemm/benchmark_gemm.py -o _plots/roofline_dgrad.png \
       --shapes 15872x12288x4096,15872x4096x4096,15872x16384x4096,15872x4096x16384
 
     # Wgrad shapes
-    python benchmarks/gemm/benchmark_gemm.py -o roofline_wgrad.png \
+    python benchmarks/gemm/benchmark_gemm.py -o _plots/roofline_wgrad.png \
       --shapes 4096x15872x12288,4096x15872x4096,4096x15872x16384,16384x15872x4096
 
 This mode prints per-shape TFLOPS and ms but does not compute per-layer or full-model
