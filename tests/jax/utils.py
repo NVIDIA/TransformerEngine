@@ -233,7 +233,6 @@ class DotProductAttention(nn.Module):
             bias: bias for the attention weights. This should be broadcastable to the
             shape `[batch, num_heads, q_length, kv_length]` This can be used for
             incorporating causal masks, padding masks, proximity bias, etc.
-            dropout_rng: JAX PRNGKey: to be used for dropout
             deterministic: bool, deterministic or not (to apply dropout)
         Returns:
             Output of shape `[batch, length, num_heads, v_depth_per_head]`.

@@ -661,8 +661,6 @@ class UserbuffersBackwardLinear(FusedOperation):
         ----------
         ops : list of FusibleOperation
             Backward pass operations.
-        recipe : Recipe, optional
-            Quantization recipe.
 
         Returns
         -------
