@@ -86,9 +86,11 @@ def _none_grad_context_wrapper(inputs):
     for input_tensor in inputs:
         original_input_grads.append(input_tensor.grad)
         input_tensor.grad = None
-    yield
-    for input_tensor, original_grad in zip(inputs, original_input_grads):
-        input_tensor.grad = original_grad
+    try:
+        yield
+    finally:
+        for input_tensor, original_grad in zip(inputs, original_input_grads):
+            input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
@@ -104,10 +106,12 @@ def _graph_context_wrapper(*args, **kwargs):
     gc_is_enabled = gc.isenabled()
     if gc_is_enabled:
         gc.disable()
-    with torch.cuda.graph(*args, **kwargs):
-        yield
-    if gc_is_enabled:
-        gc.enable()
+    try:
+        with torch.cuda.graph(*args, **kwargs):
+            yield
+    finally:
+        if gc_is_enabled:
+            gc.enable()
 
 
 def _canonicalize_capture_time_hooks(
@@ -651,7 +655,11 @@ def _make_graphed_callables(
         need_bwd_dw_graph[func_idx] = need_backward_dw
 
     # Run warmup and do the above filtering.
-    with torch.cuda.stream(torch.cuda.Stream()):
+    warmup_stream = torch.cuda.Stream()
+    caller_stream = torch.cuda.current_stream()
+    with contextlib.ExitStack() as warmup_cleanup:
+        warmup_cleanup.callback(caller_stream.wait_stream, warmup_stream)
+        warmup_cleanup.enter_context(torch.cuda.stream(warmup_stream))
         if pre_warmup_hook is not None:
             pre_warmup_hook()
 
@@ -1680,30 +1688,30 @@ def make_graphed_callables(
     # Resolve inherited calls before any class is patched.
     classes = dict.fromkeys(type(module) for module in modules)
     original_calls = {cls: cls.__call__ for cls in classes}
-    cleanup = contextlib.ExitStack()
 
-    def wrap_autocast(block_cls, original_call):
-        # Wrap the original call function of the module class.
-        def call_func(self, *args, **kwargs):
-            with autocast(
-                enabled=module_uses_fp8.get(id(self), False),
-                calibrating=calibrating,
-                recipe=recipe,
-                amax_reduction_group=amax_reduction_group,
-                _graph=True,
-            ):
-                return original_call(self, *args, **kwargs)
+    with contextlib.ExitStack() as cleanup:
 
-        if "__call__" in block_cls.__dict__:
-            restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
-        else:
-            restore_call = (delattr, block_cls, "__call__")
-        block_cls.__call__ = call_func
-        cleanup.callback(*restore_call)
+        def wrap_autocast(block_cls, original_call):
+            # Wrap the original call function of the module class.
+            def call_func(self, *args, **kwargs):
+                with autocast(
+                    enabled=module_uses_fp8.get(id(self), False),
+                    calibrating=calibrating,
+                    recipe=recipe,
+                    amax_reduction_group=amax_reduction_group,
+                    _graph=True,
+                ):
+                    return original_call(self, *args, **kwargs)
 
-    set_capture_start()
-    cleanup.callback(set_capture_end)
-    try:
+            if "__call__" in block_cls.__dict__:
+                restore_call = (setattr, block_cls, "__call__", block_cls.__dict__["__call__"])
+            else:
+                restore_call = (delattr, block_cls, "__call__")
+            block_cls.__call__ = call_func
+            cleanup.callback(*restore_call)
+
+        set_capture_start()
+        cleanup.callback(set_capture_end)
         saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
         cleanup.callback(restore_fp8_tensors, modules, saved_fp8_tensors)
         for block_cls, original_call in original_calls.items():
@@ -1717,7 +1725,7 @@ def make_graphed_callables(
         for gen in reversed(generators):
             cleanup.callback(gen.set_state, gen.get_state())
 
-        graphed_callables = _make_graphed_callables(
+        return _make_graphed_callables(
             modules[0] if just_one_callable else modules,
             sample_args,
             num_warmup_iters=num_warmup_iters,
@@ -1734,11 +1742,3 @@ def make_graphed_callables(
             post_warmup_hook=post_warmup_hook,
             capture_time_hooks=capture_time_hooks,
         )
-    except BaseException as error:
-        try:
-            cleanup.close()
-        except BaseException as cleanup_error:
-            raise error from cleanup_error
-        raise
-    cleanup.close()
-    return graphed_callables
