@@ -3745,3 +3745,42 @@ def test_te_ops_normalization_autocast_compile(normalization):
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
 def test_te_ops_normalization_dynamic_compile(normalization):
     _check_te_ops_normalization_compile(normalization, dynamic=True)
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("quantization", [None, "fp8"])
+def test_te_ops_normalization_multidim_compile(normalization, quantization):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    torch._dynamo.reset()
+    dtype = torch.bfloat16
+    norm = getattr(te.ops, normalization)((2, 32), device="cuda", dtype=dtype)
+    with torch.no_grad():
+        for param in norm.parameters():
+            param.copy_(torch.randn_like(param))
+    ops = [norm]
+    if quantization == "fp8":
+        ops.append(te.ops.BasicLinear(32, 32, device="cuda", dtype=dtype))
+    model = te.ops.Sequential(*ops)
+    eager_model = copy.deepcopy(model)
+    quant_recipe = recipe.Float8CurrentScaling(backward_override=None) if quantization else None
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(16, 2, 32, device="cuda", dtype=dtype, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_()
+    actual = compiled(x)
+    expected = run(eager_x, eager_model)
+    torch.testing.assert_close(actual, expected)
+    dy = torch.randn_like(actual)
+    actual.backward(dy)
+    expected.backward(dy)
+    torch.testing.assert_close(x.grad, eager_x.grad)
+    for param, reference in zip(model.parameters(), eager_model.parameters()):
+        torch.testing.assert_close(param.grad, reference.grad)
+    _assert_custom_ops(graphs, normalization.lower(), backward=True)

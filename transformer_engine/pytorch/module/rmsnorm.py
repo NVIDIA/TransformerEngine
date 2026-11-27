@@ -13,7 +13,7 @@ from transformer_engine.pytorch.ops import RMSNorm as _RMSNormOp
 __all__ = ["RMSNorm"]
 
 
-class RMSNorm(_RMSNormOp):
+class RMSNorm(_RMSNormOp, inherit_compile_ops=True):
     r"""Root Mean Square Layer Normalization
 
     Applies Root Mean Square Layer Normalization over a mini-batch of

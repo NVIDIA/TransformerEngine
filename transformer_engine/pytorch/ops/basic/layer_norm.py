@@ -277,15 +277,7 @@ class LayerNorm(BasicOperation):
             args.sm_margin,
             args.zero_centered_gamma,
         )
-        out = y
-        if len(weight_dims) > 1:
-            out = y.view(args.input_.size())
-            if is_quantized_tensor(out):
-                quantizer = args.output_quantizer
-                out.update_usage(
-                    rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
-                )
+        out = y if len(weight_dims) == 1 else y.view(args.input_.size())
         if not args.requires_grad:
             return out, [()], ()
         return out, [()], (x if x is not args.input_ else None, means, rstdevs)
@@ -296,6 +288,8 @@ class LayerNorm(BasicOperation):
         out = TensorSpec(
             shape=x.shape, dtype=args.dtype, device=x.device, quantizer=args.output_quantizer
         )
+        if out.is_quantized and math.prod(args.weight.shape) != args.weight.shape[-1]:
+            out.update_usage(columnwise_usage=False)
         if not args.requires_grad:
             return out, [()], ()
         saved_input = None
