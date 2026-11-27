@@ -283,8 +283,6 @@ class GroupedLinearBwdArgs:
 
     reduce_and_update_bwd_fp8_tensors: bool = False
 
-    cpu_offloading: bool = False
-
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         saved = restore_from_func_ctx(ctx)
@@ -380,7 +378,6 @@ def _grouped_linear_forward_impl(
         input_quantizers,
         activation_dtype,
         with_quantized_output=fp8 or debug,
-        disable_bulk_allocation=cpu_offloading,
     )
 
     if cpu_offloading:
@@ -513,7 +510,6 @@ def _grouped_linear_setup_ctx(
     bwd_args.is_first_microbatch = fwd_args.is_first_microbatch
     bwd_args.fuse_wgrad_accumulation = fwd_args.fuse_wgrad_accumulation
     bwd_args.wgrad_store = fwd_args.wgrad_store
-    bwd_args.cpu_offloading = fwd_args.cpu_offloading
     bwd_args.dgrad_out = fwd_args.dgrad_out
 
     if fwd_args.fuse_wgrad_accumulation and fwd_args.weights_requires_grad:
@@ -624,11 +620,6 @@ def _grouped_linear_backward_impl(
         args.activation_dtype,
         with_quantized_output=args.fp8 or args.debug,
         compute_dbias=compute_dbias,
-        disable_bulk_allocation=(
-            args.cpu_offloading
-            and isinstance(grad_output_reference, HybridQuantizer)
-            and not _split_quantization._uses_identity_quantizer(grad_output_reference)
-        ),
     )
     if grad_biases is None:
         grad_biases = [None] * num_gemms
@@ -734,7 +725,6 @@ def _grouped_linear_backward_impl(
                 with_quantized_output=args.fp8 or args.debug,
                 quantizers=args.input_quantizers,
                 activation_dtype=args.activation_dtype,
-                disable_bulk_allocation=args.cpu_offloading,
             )
         elif args.backward_override == "dequantized":
             inputmats = [

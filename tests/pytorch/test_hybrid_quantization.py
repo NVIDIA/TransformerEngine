@@ -4614,6 +4614,62 @@ class TestHybridGroupedLinearValidation:
                 context=f"transient-row grouped split {index} columnwise",
             )
 
+    @requires_mxfp8
+    def test_offload_bulk_split_in_forward_and_backward(self, monkeypatch):
+        def qfactory(role):
+            return HybridQuantizer(
+                rowwise_quantizer=_mxfp8_factory(), columnwise_quantizer=_mxfp8_factory()
+            )
+
+        module = GroupedLinear(
+            2, 128, 128, bias=False, save_original_input=True, params_dtype=torch.bfloat16
+        )
+        monkeypatch.setattr(
+            "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
+        )
+        split = split_quantization._split_quantize
+        usages = []
+
+        def check_split(*args, **kwargs):
+            outputs, biases = split(*args, **kwargs)
+            directions = []
+            for direction in ("rowwise", "columnwise"):
+                parts = [getattr(out, f"{direction}_sub_storage") for out in outputs]
+                if parts[0] is not None:
+                    tensors = [getattr(part, f"_{direction}_data") for part in parts]
+                    assert len({t.untyped_storage().data_ptr() for t in tensors}) == 1
+                    directions.append(direction)
+            usages.append(tuple(directions))
+            return outputs, biases
+
+        monkeypatch.setattr(split_quantization, "_split_quantize", check_split)
+        x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=qfactory)):
+            y = module(x, [128, 128])
+        y.backward(torch.randn_like(y))
+        # Forward input, backward grad_output, then input requantization for wgrad.
+        assert usages == [("rowwise",), ("rowwise", "columnwise"), ("columnwise",)]
+
+    @requires_mxfp8_and_nvfp4
+    def test_nvfp4_2d_split_falls_back_only_for_columnwise(self):
+        splits = [512, 512]
+        x = torch.randn(sum(splits), 512, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3),
+                columnwise_quantizer=NVFP4Quantizer(with_2d_quantization=True),
+            )
+            for _ in splits
+        ]
+        outputs, _ = split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+        rows = [out.rowwise_sub_storage._rowwise_data for out in outputs]
+        cols = [out.columnwise_sub_storage._columnwise_data for out in outputs]
+        assert rows[0].untyped_storage().data_ptr() == rows[1].untyped_storage().data_ptr()
+        assert cols[0].untyped_storage().data_ptr() != cols[1].untyped_storage().data_ptr()
+        for out, part, quantizer in zip(outputs, x.split(splits), quantizers):
+            reference = quantizer.columnwise_quantizer(part)
+            _assert_storage_data_exact(out.columnwise_sub_storage, reference, context="2D NVFP4")
+
     @requires_nvfp4
     @pytest.mark.parametrize("m_splits", ([128, 128], [0, 128]))
     def test_nvfp4_rowwise_dequantized_preserves_source_dtype(self, monkeypatch, m_splits):

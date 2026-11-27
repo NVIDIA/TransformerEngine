@@ -12,6 +12,7 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.cpu_offload import OffloadableLayerState
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1535,12 +1536,7 @@ def test_native_quantization_scale_layout(
         if operation == "multi_tensor_quantize":
             return tex.multi_tensor_quantize([inp], [quantizer])[0]
         if operation == "split_quantize":
-            return tex.split_quantize(
-                inp,
-                [shape[0]],
-                [quantizer],
-                disable_bulk_allocation=shape[0] % 64 != 0 or quantization == "nvfp4-2d",
-            )[0]
+            return tex.split_quantize(inp, [shape[0]], [quantizer])[0]
         if operation == "gelu":
             return tex.gelu(inp, quantizer)
         if operation == "dgelu":
@@ -1587,6 +1583,7 @@ def test_native_quantization_scale_layout(
         "mixed_formats",
         "already_swizzled",
         "all_swizzled",
+        "no_amax",
         "empty",
     ],
 )
@@ -1605,6 +1602,7 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
             with_rht = case in ("all", "no_optimize", "all_swizzled")
             with_rht |= case == "already_swizzled" and i != 1
             quantizer = NVFP4Quantizer(
+                disable_second_level_scale=case == "no_amax",
                 with_rht=with_rht,
                 with_post_rht_amax=with_rht,
                 stochastic_rounding=False,
@@ -1627,16 +1625,7 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
             torch.cat(inputs),
             [shape[0] for shape in shapes],
             quantizers,
-            disable_bulk_allocation=case
-            in (
-                "compact",
-                "rowwise",
-                "mixed_usage",
-                "mixed_optimize",
-                "mixed_formats",
-                "already_swizzled",
-                "empty",
-            ),
+            disable_bulk_allocation=case in ("compact", "rowwise", "mixed_formats"),
         )
     for actual, expected, quantizer in zip(outputs, references, quantizers):
         assert actual._with_gemm_swizzled_scales == quantizer.optimize_for_gemm
@@ -1651,6 +1640,11 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
             if actual_data is not None:
                 torch.testing.assert_close(actual_data, expected_data, atol=0, rtol=0)
                 assert actual_scales.shape == expected_scales.shape
+        if case == "no_amax":
+            assert actual._amax_rowwise is None and actual._amax_columnwise is None
+        if operation == "split_quantize" and case == "empty" and actual.shape[0] == 0:
+            for data in (actual._rowwise_data, actual._columnwise_data):
+                assert data.untyped_storage().nbytes() == 0
         if actual._rowwise_data is not None:
             torch.testing.assert_close(
                 actual.dequantize(dtype=torch.float32),
@@ -1682,3 +1676,116 @@ def test_multi_tensor_quantization_scale_layout(operation, case):
                     atol=0,
                     rtol=0,
                 )
+
+
+@pytest.mark.parametrize(
+    "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8", "nvfp4")]
+)
+def test_split_quantize_bulk_data_and_scale_storage(quantization, monkeypatch):
+    module = te.GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.module.grouped_linear.is_cpu_offload_enabled", lambda: True
+    )
+    split_quantize = tex.split_quantize
+    scales = []
+
+    def check_split(*args, **kwargs):
+        outputs = split_quantize(*args, **kwargs)
+        assert not kwargs["disable_bulk_allocation"]
+        allocations = set()
+        for orientation in ("rowwise", "columnwise"):
+            for field in ("data", "scale_inv"):
+                tensors = [getattr(out, f"_{orientation}_{field}") for out in outputs]
+                pointers = {t.untyped_storage().data_ptr() for t in tensors}
+                assert len(pointers) == 1 and allocations.isdisjoint(pointers)
+                allocations.update(pointers)
+                alignment = 256 if field == "data" else 16
+                assert all(t.data_ptr() % alignment == 0 for t in tensors)
+                if field == "scale_inv":
+                    scales.extend(tensors)
+                    if quantization == "nvfp4":
+                        for out in outputs:
+                            amax = getattr(out, f"_amax_{orientation}")
+                            assert amax.untyped_storage().data_ptr() in pointers
+                            assert amax.data_ptr() % 16 == 0
+        return outputs
+
+    monkeypatch.setattr(tex, "split_quantize", check_split)
+    recipe = transformer_engine.common.recipe
+    recipe_type = {
+        "fp8_blockwise": recipe.Float8BlockScaling,
+        "mxfp8": recipe.MXFP8BlockScaling,
+        "nvfp4": recipe.NVFP4BlockScaling,
+    }[quantization]
+    x = torch.randn(256, 128, dtype=torch.bfloat16, device="cuda")
+    with te.autocast(enabled=True, recipe=recipe_type()):
+        module(x, [128, 128])
+    assert scales and all(not getattr(scale, "_TE_do_not_offload", False) for scale in scales)
+
+
+@pytest.mark.parametrize(
+    "quantization", [q for q in _quantization_list if q in ("fp8_blockwise", "mxfp8", "nvfp4")]
+)
+def test_bulk_data_offload_releases_storage(quantization):
+    x = torch.randn(2048, 1024, dtype=torch.bfloat16, device="cuda")
+    quantizers = [make_quantizer(quantization) for _ in range(2)]
+    for q in quantizers:
+        q.set_usage(rowwise=True, columnwise=False)
+    outputs = tex.split_quantize(x, [1024, 1024], quantizers)
+    state = OffloadableLayerState(offload_stream=torch.cuda.Stream())
+    references = [out._rowwise_data.cpu() for out in outputs]
+    data_ids = [state.push_tensor(out._rowwise_data) for out in outputs]
+    metadata = [out._rowwise_scale_inv for out in outputs]
+    if quantization == "nvfp4":
+        metadata.extend(out._amax_rowwise for out in outputs)
+    assert all(isinstance(tag, int) for tag in data_ids)
+    assert all(state.push_tensor(t) is t and t.is_cuda for t in metadata)
+    del outputs
+
+    before = torch.cuda.memory_allocated()
+    state.start_offload()
+    state.release_activation_forward_gpu_memory()
+    state.offload_stream.synchronize()
+    assert before - torch.cuda.memory_allocated() >= sum(t.nbytes for t in references)
+    state.start_reload()
+    for tag, expected in zip(data_ids, references):
+        torch.testing.assert_close(state.pop_tensor(tag).cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize(
+    "shape,splits",
+    [((2, 128, 128), [1, 1]), ((384, 128), [128, 128]), ((65 * 128, 128), [128] * 65)],
+    ids=["rank3", "partial-input", "65-experts"],
+)
+def test_nvfp4_grouped_shape_fallback(shape, splits):
+    x = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    qs = [make_quantizer("nvfp4") for _ in splits]
+    outputs = tex.split_quantize(x, splits, qs)
+    assert len({out._rowwise_data.untyped_storage().data_ptr() for out in outputs}) == len(splits)
+    for part, q, out in zip(x[: sum(splits)].split(splits), qs, outputs):
+        expected = q(part)
+        for field in ("_rowwise_data", "_columnwise_data", "_amax_rowwise", "_amax_columnwise"):
+            torch.testing.assert_close(
+                getattr(out, field), getattr(expected, field), rtol=0, atol=0
+            )
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+def test_nvfp4_split_uses_grouped_rht_kernel():
+    if torch.cuda.get_device_capability()[0] != 10:
+        pytest.skip("This grouped RHT kernel is used on SM10x")
+    if torch.profiler.ProfilerActivity.CUDA not in torch.profiler.supported_activities():
+        pytest.skip("CUDA profiler unavailable")
+    x = torch.randn(1024, 512, dtype=torch.bfloat16, device="cuda")
+    qs = [
+        NVFP4Quantizer(with_rht=True, with_post_rht_amax=True, with_random_sign_mask=False)
+        for _ in range(2)
+    ]
+    for q in qs:
+        q.optimize_for_gemm = True
+    tex.split_quantize(x, [512, 512], qs)
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        tex.split_quantize(x, [512, 512], qs)
+        torch.cuda.synchronize()
+    assert any("group_row_col_rht_gemm_device" in event.name for event in prof.events())

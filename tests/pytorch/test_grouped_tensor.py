@@ -494,6 +494,15 @@ class TestGroupedTensor:
                 expected = expected[1:]
             assert_close(output, expected)
 
+        if bulk_allocate:
+            nonempty_outputs = [output for output in outputs if output.numel()]
+            if nonempty_outputs:
+                storage = nonempty_outputs[0].untyped_storage()
+                assert storage.resizable()
+                assert all(
+                    output.untyped_storage()._cdata == storage._cdata for output in nonempty_outputs
+                )
+
         # Check pointer alignment: cuDNN CuTe-DSL grouped GEMM kernels
         # require 16-byte-aligned data pointers.
         for idx, output in enumerate(outputs):

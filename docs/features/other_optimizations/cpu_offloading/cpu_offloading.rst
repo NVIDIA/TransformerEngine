@@ -264,6 +264,11 @@ Caveats
    even after being copied to CPU (e.g., if the layer stores references in ``ctx``),
    resulting in wasted bandwidth with no memory savings.
 
+   In grouped blockwise FP8, MXFP8, and NVFP4 quantization, bulk-allocated expert
+   data has separate storage from its scales and optional NVFP4 amax values.
+   Once all data views for a direction are offloaded and their GPU references are
+   released, smaller metadata tensors can stay on the GPU without retaining that data.
+
    To exclude specific tensors from offloading, use :func:`mark_not_offload`:
 
    .. code-block:: python

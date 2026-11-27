@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <memory>
 #include <vector>
 
 #include "../extensions.h"
@@ -16,11 +15,9 @@ namespace pytorch {
  *
  * Use with caution and avoid exposing externally.
  *
- * In order to reduce CPU overhead, we compute pointer offsets
- * manually and construct PyTorch tensors with raw pointers. The
- * backing buffer is deallocated once the final tensor is destroyed.
- * Stream usage is not recorded, so there may be race conditions if
- * compute is performed on multiple streams.
+ * The outputs share allocator-owned storage so record_stream on any
+ * output protects the backing allocation across streams. The backing
+ * buffer is deallocated once the final tensor is destroyed.
  */
 std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
                                       const std::vector<at::ScalarType> &dtypes,
@@ -64,11 +61,10 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   }
 
   // Allocate base buffer
-  auto base_buffer = std::make_shared<at::Tensor>(
-      at::empty({static_cast<int64_t>(base_byte_size)}, at::device(*device).dtype(torch::kUInt8)));
-  uint8_t *base_ptr = base_buffer->data_ptr<uint8_t>();
-  base_ptr =
-      reinterpret_cast<uint8_t *>(roundup(reinterpret_cast<uintptr_t>(base_ptr), base_alignment));
+  auto base_buffer =
+      at::empty({static_cast<int64_t>(base_byte_size)}, at::device(*device).dtype(torch::kUInt8));
+  const auto base_ptr = reinterpret_cast<uintptr_t>(base_buffer.data_ptr());
+  const size_t alignment_offset = roundup(base_ptr, base_alignment) - base_ptr;
 
   // Create views into base buffer
   std::vector<at::Tensor> out;
@@ -77,16 +73,15 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   for (size_t i = 0; i < n; ++i) {
     shape_int64.assign(shapes[i].begin(), shapes[i].end());
     if (byte_sizes[i] == 0) {
-      // Work around problems with from_blob when constructing an
-      // empty tensor. Passing a null pointer fails because it checks
-      // that the pointer is on GPU. Passing a non-null pointer can
-      // cause bugs in TE kernels.
+      // Keep empty tensors separate: TE kernels expect a null data pointer.
       out.emplace_back(at::empty(shape_int64, at::device(*device).dtype(dtypes[i])));
     } else {
-      // Construct tensor with custom deleter to keep base buffer alive
-      out.emplace_back(at::from_blob(
-          base_ptr + offsets[i], shape_int64, [base_buffer](void *) {},
-          at::device(*device).dtype(dtypes[i])));
+      // Preserve the allocator-owned storage instead of wrapping its raw pointer.
+      const size_t byte_offset = alignment_offset + offsets[i];
+      const size_t element_size = at::elementSize(dtypes[i]);
+      NVTE_CHECK(byte_offset % element_size == 0, "Bulk tensor offset is not dtype-aligned");
+      out.emplace_back(at::empty({0}, at::device(*device).dtype(dtypes[i]))
+                           .set_(base_buffer.storage(), byte_offset / element_size, shape_int64));
     }
   }
   return out;
