@@ -345,7 +345,8 @@ class MeshResource:
             compound with ``dp_resource`` / ``fsdp_resource`` as outer, e.g.
             ``PartitionSpec(("dp", "ep"), None, None)``). Dispatch output
             ``[ep_size, recv_capacity, H]`` is always sharded by ``ep_resource``
-            on the leading ``ep_size`` dim.
+            on the leading ``ep_size`` dim. An ordered tuple of axis names, e.g.
+            ``("ep", "tp")``, makes those axes one EP domain.
     """
 
     dp_resource: str = None
@@ -354,7 +355,7 @@ class MeshResource:
     fsdp_resource: str | tuple[str, ...] = None
     pp_resource: str = None
     cp_resource: str = None
-    ep_resource: str = None
+    ep_resource: str | tuple[str, ...] = None
 
 
 _MeshResourceSnapshot = namedtuple("_MeshResourceSnapshot", MeshResource.__dataclass_fields__)

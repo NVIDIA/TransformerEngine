@@ -87,7 +87,7 @@ class BackwardAddRMSNorm(FusedOperation):
     @staticmethod
     def fuse_backward_ops(
         ops: list[FusibleOperation],
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> list[FusibleOperation]:
         """Apply operation fusion for backward pass.
 

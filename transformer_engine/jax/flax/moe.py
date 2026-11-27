@@ -34,7 +34,12 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import RouterComputationInfo, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
+from ..moe import (
+    RouterComputationInfo,
+    _moe_mesh_axes,
+    _resolve_moe_mesh_resource,
+    moe,
+)
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import MeshResource, _get_mesh, global_shard_guard
@@ -69,7 +74,13 @@ class _MoEBlock(TransformerEngineBase):
         Hidden dim of the per-expert FFN (the inner ``mlp`` axis).
     activation_type : str
         Activation between ``layer_w0 @ wi_0`` and the elementwise
-        product with ``layer_w0 @ wi_1``. Default ``"silu"``.
+        product with ``layer_w0 @ wi_1``. Default ``"silu"``. Pass
+        ``"situglu"`` for fused MXFP8
+        SiTU-GLU on SM100/SM103. SiTU requires cuDNN Frontend >= 1.33.0 with compatible JAX
+        APIs and ``use_cudnn_fusion=True``; there is no unfused SiTU path.
+    activation_params : Optional[dict]
+        Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
+        (default 25.0). Values must be finite and positive.
 
     score_function : Union[str, ScoreFunction]
         ``"softmax"`` (default), ``"sigmoid"``, or ``"sqrtsoftplus"`` for the routing scores.
@@ -96,7 +107,7 @@ class _MoEBlock(TransformerEngineBase):
         Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
         MeshResource context. An explicit resource takes precedence; one of
         these is required. Batch sharding uses DP and FSDP as outer axes and
-        EP innermost.
+        EP innermost; EP may be an ordered tuple of axes.
     quant_before_fsdp_ag : bool
         Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
         ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
@@ -181,6 +192,7 @@ class _MoEBlock(TransformerEngineBase):
     expert_bias_init: Initializer = nn.initializers.zeros
     use_ffn_bias: bool = False
     quantization_recipe: Optional[Recipe] = None
+    activation_params: Optional[dict] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -200,12 +212,12 @@ class _MoEBlock(TransformerEngineBase):
         Parameters
         ----------
         inputs : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            ``[batch, sequence, hidden]`` or ``[tokens, hidden]``.
 
         Returns
         -------
         output : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            Same shape as ``inputs``.
         aux_loss : Optional[jnp.ndarray]
             Scalar load-balancing loss when ``aux_loss_coeff > 0``,
             else ``None``.
@@ -220,10 +232,11 @@ class _MoEBlock(TransformerEngineBase):
             self.quant_before_fsdp_ag,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-        assert (
-            inputs.ndim == 3
-        ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
-        _, _, hidden_size = inputs.shape
+        assert inputs.ndim in (2, 3), (
+            "_MoEBlock expects [tokens, hidden] or [batch, sequence, hidden] input, got shape"
+            f" {inputs.shape}"
+        )
+        hidden_size = inputs.shape[-1]
 
         # Param registrations -- must run OUTSIDE any JAX transform that
         # alters the variable scope (e.g. shard_map). The functional
@@ -341,6 +354,7 @@ class _MoEBlock(TransformerEngineBase):
                 wo_bias,
                 num_experts=self.num_experts,
                 activation_type=self.activation_type,
+                activation_params=self.activation_params,
                 use_cudnn_fusion=self.use_cudnn_fusion,
                 cudnn_native_weight_layout=False,
                 apply_topk_weights_early=self.apply_topk_weights_early,

@@ -4,9 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// NCCL backend headers, for borrowing the raw ncclComm_t. The NCCL2 backend
-// header exists only on torch builds that ship it.
+// NCCL backend headers, for borrowing the raw ncclComm_t. Each exists only on
+// torch builds that ship that backend: the NCCL2 backend is newer, and the classic
+// one left OSS torch with pytorch#205374 (nightlies from 2.16.0.dev20261121 on).
+#if __has_include(<torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>)
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
+#define NVTE_HAS_CLASSIC_NCCL_PG 1
+#endif
 #if __has_include(<torch/csrc/distributed/c10d/nccl2/ProcessGroupNCCL.hpp>)
 #include <torch/csrc/distributed/c10d/nccl2/ProcessGroupNCCL.hpp>
 #define NVTE_HAS_NCCL2_PG 1
@@ -37,10 +41,16 @@ int64_t borrow_comm_ptr(PG* pg) {
   if constexpr (has_get_comm_ptr<PG>::value) {
     return pg->getCommPtr();
   } else {
+#ifdef NVTE_HAS_CLASSIC_NCCL_PG
     NVTE_ERROR(
         "get_nccl_comm_ptr: the NCCL2 backend of this PyTorch version does not expose the raw "
         "NCCL communicator (getCommPtr()), which EP and cuSolverMp need to borrow. Set "
         "TORCH_DIST_USE_NCCL2=0 to use the classic NCCL backend instead.");
+#else
+    NVTE_ERROR(
+        "get_nccl_comm_ptr: the NCCL2 backend of this PyTorch version does not expose the raw "
+        "NCCL communicator (getCommPtr()), which EP and cuSolverMp need to borrow.");
+#endif
   }
 }
 
@@ -52,10 +62,12 @@ int64_t get_nccl_comm_ptr(c10d::ProcessGroup* process_group) {
   auto backend = process_group->getBackend(c10::DeviceType::CUDA);
   NVTE_CHECK(backend, "get_nccl_comm_ptr: process group has no CUDA backend");
 
+#ifdef NVTE_HAS_CLASSIC_NCCL_PG
   // Classic backend (ProcessGroupNCCL._comm_ptr() in Python).
   if (auto* nccl_pg = dynamic_cast<c10d::ProcessGroupNCCL*>(backend.get())) {
     return nccl_pg->getCommPtr();
   }
+#endif
   // NCCL2 backend, default on recent torch.
 #ifdef NVTE_HAS_NCCL2_PG
   if (auto* nccl2_pg = dynamic_cast<c10d::nccl2::ProcessGroupNCCL*>(backend.get())) {

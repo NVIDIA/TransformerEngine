@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/activation_table.cuh"
 #include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
@@ -48,7 +49,8 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES, size_t CHUNK_DIM_Y,
-          size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK, bool kIs2DBlockScaling>
+          size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK, bool kIs2DBlockScaling,
+          int kActivationTableUse>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                           const __grid_constant__ CUtensorMap tensor_map_act_input,
@@ -57,7 +59,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                           const float *noop, float *const dbias_workspace, float *const amax_ptr,
                           const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                          const size_t scale_stride_colwise) {
+                          const size_t scale_stride_colwise, const size_t scale_rows_rowwise,
+                          const size_t scale_rows_colwise, const void *activation_lut) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
@@ -266,11 +269,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
           float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
           if constexpr (IS_ACT) {
-            elt = OP(elt, {});
+            elt = activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
           }
           if constexpr (IS_DACT) {
             float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-            elt *= OP(act_in_elt, {});
+            elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
+                                                                                activation_lut);
           }
           if constexpr (DBIAS_REDUCTION_IN_COLWISE) {
             // Accumulate before the truncation below so the partial sums stay full precision
@@ -319,7 +323,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
         scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       }
-      scales_colwise[scale_idx] = biased_exponent;
+      // The chunk can extend past the tensor, and unswizzled scales may be compact,
+      // so only store scales that fall inside the scale tensor.
+      if (global_scales_offset_Y < scale_rows_colwise &&
+          global_scales_offset_X < scale_stride_colwise) {
+        scales_colwise[scale_idx] = biased_exponent;
+      }
 
       const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
@@ -356,11 +365,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
         if constexpr (IS_ACT) {
-          elt = OP(elt, {});
+          elt = activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
         }
         if constexpr (IS_DACT) {
           const float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-          elt *= OP(act_in_elt, {});
+          elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
+                                                                              activation_lut);
         }
         partial_dbias_colwise += elt;
         // Cache computed activations to avoid computing them again in the rowwise pass
@@ -464,11 +474,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             // Compute element
             float elt = static_cast<float>(in.data.elt[e]);
             if constexpr (IS_ACT) {
-              elt = OP(elt, {});
+              elt =
+                  activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
             }
             if constexpr (IS_DACT) {
               float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-              elt *= OP(act_in_elt, {});
+              elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
+                                                                                  activation_lut);
             }
 
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
@@ -536,7 +548,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
         scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
       }
-      if (rowwise_scale_is_within_bounds) {
+      if (rowwise_scale_is_within_bounds &&
+          static_cast<size_t>(stage_scales_offset_Y) < scale_rows_rowwise) {
         scales_rowwise[scale_idx] = biased_exponent;
       }
 
@@ -689,7 +702,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,  // TODO (ksivamani)
               Tensor *output, Tensor *dbias, Tensor *workspace, const bool use_2d_quantization,
-              cudaStream_t stream) {
+              const activation_table::TableRef activation_lut, cudaStream_t stream) {
   using namespace quantize_kernel;
   checkCuDriverContext(stream);
 
@@ -728,28 +741,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
-  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
-
-  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
-  const size_t scale_stride_colwise =
-      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
-
-  e8m0_t *const scales_rowwise_ptr =
-      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
-  e8m0_t *const scales_colwise_ptr =
-      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
-
-  ScalingType scaling_type;
-  if (use_rowwise_scaling && (!use_colwise_scaling)) {
-    scaling_type = ScalingType::ROWWISE;
-  } else if ((!use_rowwise_scaling) && use_colwise_scaling) {
-    scaling_type = ScalingType::COLWISE;
-  } else if (use_rowwise_scaling && use_colwise_scaling) {
-    scaling_type = ScalingType::BIDIMENSIONAL;
-  }
-
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
     NVTE_CHECK(dbias->data.shape == Shape{cols}, "Wrong shape of DBias.");
@@ -760,6 +753,48 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       workspace->data.dtype = DType::kFloat32;
       return;
     }
+  }
+
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+
+  // Unswizzled scales may omit outer-dimension padding, but their contiguous dimension
+  // must retain the canonical padding. Quantization stores no scale outside the tensor's shape.
+  if (!with_gemm_swizzled_scales) {
+    const size_t padded_cols = DIVUP_TO_MULTIPLE(cols, 128);
+    if (use_rowwise_scaling) {
+      const auto &shape = output->scale_inv.shape;
+      const size_t scale_cols = padded_cols / SCALE_DIM_X;
+      NVTE_CHECK(shape.size() == 2 && shape[0] >= rows && shape[1] == scale_cols,
+                 "MXFP8 rowwise scale_inv must have at least ", rows, " rows and exactly ",
+                 scale_cols, " columns (padded to a multiple of 4), got ", shape, ".");
+    }
+    if (use_colwise_scaling) {
+      const auto &shape = output->columnwise_scale_inv.shape;
+      const size_t min_rows = DIVUP(rows, SCALE_DIM_Y);
+      NVTE_CHECK(shape.size() == 2 && shape[0] >= min_rows && shape[1] == padded_cols,
+                 "MXFP8 columnwise scale_inv must have at least ", min_rows, " rows and exactly ",
+                 padded_cols, " columns (padded to a multiple of 128), got ", shape, ".");
+    }
+  }
+
+  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+  const size_t scale_rows_rowwise = use_rowwise_scaling ? output->scale_inv.shape[0] : 1;
+  const size_t scale_rows_colwise = use_colwise_scaling ? output->columnwise_scale_inv.shape[0] : 1;
+
+  e8m0_t *const scales_rowwise_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+
+  ScalingType scaling_type;
+  if (use_rowwise_scaling && (!use_colwise_scaling)) {
+    scaling_type = ScalingType::ROWWISE;
+  } else if ((!use_rowwise_scaling) && use_colwise_scaling) {
+    scaling_type = ScalingType::COLWISE;
+  } else if (use_rowwise_scaling && use_colwise_scaling) {
+    scaling_type = ScalingType::BIDIMENSIONAL;
   }
 
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
@@ -807,6 +842,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // otherwise the last chunk reads/writes past the logical end of the row.
               using rowwise_traits = specialized::CastTraits<IType, OType, true, false>;
               using bidimensional_traits = specialized::CastTraits<IType, OType, true, true>;
+              using bidimensional_staged_traits =
+                  specialized::CastTraitsSwizzle<IType, OType,
+                                                 /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
+                                                 /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
+                                                 /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
               constexpr size_t max_grid_dim_y = 65535;
               const bool rowwise_specialized_grid_fits =
                   ((rows + rowwise_traits::blockDimM - 1) / rowwise_traits::blockDimM) <=
@@ -827,6 +867,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
+              // The specialized kernels use vectorized scale stores and require 16-byte-aligned
+              // scale buffers. Views at other offsets use the generic kernel.
+              const bool scales_fit_specialized =
+                  is_aligned_ptr(scales_rowwise_ptr, 16) && is_aligned_ptr(scales_colwise_ptr, 16);
+
               // The register-resident kernels issue 256-bit loads, which need sm_100
               // or later and a 32-byte aligned base pointer.  Everything that fails
               // either test falls through to the staged kernels below.
@@ -838,7 +883,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // Preserve cached outputs by keeping noop-aware calls on the generic path.
               if (noop_ptr == nullptr &&
                   specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !use_2d_quantization && scaling_type_has_specialized_support) {
+                  !use_2d_quantization && scaling_type_has_specialized_support &&
+                  scales_fit_specialized) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     // The register-resident kernel supersedes the staged one below
@@ -909,11 +955,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       }
                     }
 
-                    using traits =
-                        specialized::CastTraitsSwizzle<IType, OType,
-                                                       /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
-                                                       /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
-                                                       /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
+                    using traits = bidimensional_staged_traits;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -1003,59 +1045,43 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
               const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
-              switch (scaling_type) {
-                case ScalingType::ROWWISE: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
-                    auto kernel =
-                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                              true, false, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
-                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
-                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              // This kernel computes what the table holds rather than reading it: a lookup from
+              // global memory costs it more than the math. The exact dSiLU table holds util/math.h
+              // itself. The table variant is instantiated only for BF16 inputs of the activations
+              // that have a table.
+              constexpr bool kTableCapable =
+                  activation_table::kHasTable<ParamOP, OP> && std::is_same_v<IType, bf16>;
+              const bool compute_table =
+                  kTableCapable && activation_lut.use == activation_table::kDefaultTable;
 
-                    kernel<<<grid, block_size, dshmem_size, stream>>>(
-                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
-                  });
-                  break;
-                }
-                case ScalingType::COLWISE: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
-                    auto kernel =
-                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                              false, true, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
-                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
-                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(
+                  scaling_type, kScalingType,
+                  {
+                    TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
+                      TRANSFORMER_ENGINE_SWITCH_CONDITION(compute_table, kComputeTable, {
+                        constexpr int kTableUse = (kTableCapable && kComputeTable)
+                                                      ? activation_table::kComputedTable
+                                                      : activation_table::kNoTable;
+                        auto kernel =
+                            quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+                                                  OType, kScalingType != ScalingType::COLWISE,
+                                                  kScalingType != ScalingType::ROWWISE,
+                                                  WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
+                                                  CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling,
+                                                  kTableUse>;
+                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
-                    kernel<<<grid, block_size, dshmem_size, stream>>>(
-                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
+                        kernel<<<grid, block_size, dshmem_size, stream>>>(
+                            tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                            tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
+                            noop_ptr, workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                            scale_stride_colwise, scale_rows_rowwise, scale_rows_colwise,
+                            activation_lut.ptr);
+                      });
+                    });
                   });
-                  break;
-                }
-                case ScalingType::BIDIMENSIONAL: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
-                    auto kernel =
-                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                              true, true, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
-                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
-                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-
-                    kernel<<<grid, block_size, dshmem_size, stream>>>(
-                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
-                  });
-                  break;
-                }
-              } NVTE_CHECK_CUDA(cudaGetLastError());
+              NVTE_CHECK_CUDA(cudaGetLastError());
 
               if constexpr (IS_DBIAS) {
                 common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
