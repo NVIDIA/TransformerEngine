@@ -142,6 +142,8 @@ def bench_e2e(args):
     x = torch.randn(args.seq, args.batch, args.hidden, device="cuda", dtype=torch.bfloat16)
 
     def fwd_bwd():
+        # Zero in place: the captured optimizer step reads the gradients at fixed addresses.
+        optimizer.zero_grad(set_to_none=False)
         out = layers(x)
         out.float().pow(2).mean().backward()
 
