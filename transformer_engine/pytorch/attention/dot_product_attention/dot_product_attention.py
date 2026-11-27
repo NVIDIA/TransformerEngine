@@ -625,7 +625,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Transformer Engine stores the FP8 metadata under a ``._extra_state`` key when checkpointing.
         As the FP8 attention support expands from one backend to multiple backends, the location
-        of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
+        of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/faq.html#fp8-checkpoint-compatibility>`_).
 
     .. rubric:: Fine-grained Linear and attention recipes
 
@@ -1039,7 +1039,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
         metadata is stored under the ``core_attention.fused_attention._extra_state`` key and not the
         ``core_attention._extra_state`` key. Please see `FP8 checkpoint compatibility
-        <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
+        <https://docs.nvidia.com/deeplearning/transformer-engine/faq.html#fp8-checkpoint-compatibility>`_ for more details.
         """
         fused_attn_key = False
         dot_product_attn_key = False
@@ -1998,7 +1998,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             HazyResearch/Dao-AILab's `flash-attn <https://arxiv.org/pdf/2305.13245.pdf>`_
             PyTorch API, 2) FusedAttention which has multiple fused attention implementations
             based on `cuDNN Graph API
-            <https://docs.nvidia.com/deeplearning/cudnn/developer-guide/index.html#op-fusion>`_
+            <https://docs.nvidia.com/deeplearning/cudnn/latest/developer/graph-api.html>`_
             (see :attr:`FusedAttention` for more details on FusedAttention backends), and 3)
             UnfusedDotProductAttention which is the native PyTorch implementation
             with fused scaled masked softmax.
