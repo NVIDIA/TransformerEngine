@@ -15,11 +15,11 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -186,8 +186,10 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "hidden_dim * sizeof(max_token_dtype) exceeds 4 GiB; got ", row_bytes, " bytes");
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
              ") must be divisible by ep_size (", config.ep_size, ")");
-  NVTE_CHECK(config.num_comm_sms >= 0, "num_comm_sms must be >= 0 (0 = auto), got ",
-             config.num_comm_sms);
+  const NVTEEpSmConfig& sm_cfg = config.sm_config;
+  NVTE_CHECK(sm_cfg.dispatch_num_sms >= 0 && sm_cfg.combine_num_sms >= 0 &&
+                 sm_cfg.shuffle_num_sms >= 0 && sm_cfg.preprocess_num_sms >= 0,
+             "sm_config budgets must be >= 0 (0 = auto)");
 
   const int sm = cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
@@ -357,12 +359,13 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
-  // Default the dispatch/combine (comm) kernels to 32 SMs, clamped to the device SM count.
-  constexpr int kDefaultCommSms = 32;
-  const int device_sms = cuda::sm_count();
-  cfg.max_num_sms = group_config.num_comm_sms > 0
-                        ? static_cast<unsigned int>(group_config.num_comm_sms)
-                        : static_cast<unsigned int>(std::min(kDefaultCommSms, device_sms));
+  const NVTEEpSmConfig& sm_cfg = group_config.sm_config;
+  cfg.max_num_sms = NCCL_EP_AUTO;
+  cfg.dispatch_num_sms = sm_cfg.dispatch_num_sms > 0
+                             ? static_cast<unsigned int>(sm_cfg.dispatch_num_sms)
+                             : NCCL_EP_AUTO;
+  cfg.combine_num_sms =
+      sm_cfg.combine_num_sms > 0 ? static_cast<unsigned int>(sm_cfg.combine_num_sms) : NCCL_EP_AUTO;
   // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
@@ -371,16 +374,16 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.overflow_policy =
       group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;
 
-  // Keep the local shuffle/preprocess kernels on all SMs by default (their cost scales inversely
-  // with SM count) so the comm-SM cap above does not throttle them. overwrite=0 respects a
-  // user-set value and only fills in the default when unset.
-  // Set process-wide defaults once before concurrent NCCL EP group creation.
+  // The local shuffle/preprocess SM budgets are process-wide NCCL EP env vars; an unset (0)
+  // budget leaves them to NCCL EP. Set once before concurrent NCCL EP group creation.
   static std::once_flag sm_env_once;
-  std::call_once(sm_env_once, [device_sms]() {
-    char sm_buf[16];
-    std::snprintf(sm_buf, sizeof(sm_buf), "%d", device_sms);
-    setenv("NCCL_EP_SHUFFLE_SMS", sm_buf, /*overwrite=*/0);
-    setenv("NCCL_EP_PREPROCESS_NUM_SMS", sm_buf, /*overwrite=*/0);
+  std::call_once(sm_env_once, [&sm_cfg]() {
+    auto set_sm_env = [](const char* name, int value) {
+      if (value <= 0) return;
+      setenv(name, std::to_string(value).c_str(), /*overwrite=*/1);
+    };
+    set_sm_env("NCCL_EP_SHUFFLE_SMS", sm_cfg.shuffle_num_sms);
+    set_sm_env("NCCL_EP_PREPROCESS_NUM_SMS", sm_cfg.preprocess_num_sms);
   });
 
   NVTE_CHECK_NCCL(nccl_ep::create_group(&ep_group_, ep_comm, &cfg));

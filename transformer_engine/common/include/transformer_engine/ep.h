@@ -40,6 +40,20 @@ extern "C" {
  * zero-defaults the rest; struct_size 0 means the base layout. Append new
  * fields at the end only; never reorder, resize, or remove existing ones. */
 
+/*! \brief Per-kernel SM budgets for the EP group. Each field caps the SMs a
+ *  kernel class may use; 0 leaves the choice to NCCL EP. Embedded as the
+ *  trailing member of NVTEEpGroupConfig; append new budgets at the end only. */
+typedef struct {
+  /*! Dispatch (scatter) kernel SM budget. 0 = auto. */
+  int dispatch_num_sms;
+  /*! Combine (gather) kernel SM budget. 0 = auto. */
+  int combine_num_sms;
+  /*! Local shuffle/permute kernel SM budget. 0 = auto. */
+  int shuffle_num_sms;
+  /*! Dispatch/combine preprocess kernel SM budget. 0 = auto. */
+  int preprocess_num_sms;
+} NVTEEpSmConfig;
+
 /*! \brief Group-level EP configuration (fixed for the EP group lifetime). */
 typedef struct {
   /*! Struct size in bytes, or 0 for the base layout. Set to
@@ -56,8 +70,6 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = default (32, clamped to device SM count). */
-  int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
    *  tensors may use any dtype with element size <= this. */
@@ -72,6 +84,8 @@ typedef struct {
   /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
    *  and continues; 0 (default) traps. Not supported in eager mode. */
   int drop_on_overflow;
+  /*! Per-kernel SM budgets. All-zero (default) leaves every budget to NCCL EP. */
+  NVTEEpSmConfig sm_config;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size,

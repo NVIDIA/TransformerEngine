@@ -5,6 +5,7 @@
 
 import atexit
 import ctypes
+from dataclasses import dataclass, replace
 from functools import partial
 
 import jax
@@ -31,6 +32,7 @@ ep_handle_mem_size = tex.ep_handle_mem_size
 
 __all__ = [
     "EpLayerConfig",
+    "EpSmConfig",
     "ep_bootstrap",
     "ep_finalize",
     "ep_handle_mem_size",
@@ -120,6 +122,19 @@ def _ep_flattened_replica_groups(mesh, ep_resource):
     return groups.reshape(-1), ep_size
 
 
+@dataclass
+class EpSmConfig:
+    """Per-kernel SM budgets for an EP group; 0 leaves the choice to NCCL EP.
+
+    Dispatch/combine budgets left at 0 fall back to max_num_sms of ep_bootstrap.
+    """
+
+    dispatch_num_sms: int = 0
+    combine_num_sms: int = 0
+    shuffle_num_sms: int = 0
+    preprocess_num_sms: int = 0
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -131,6 +146,7 @@ def ep_bootstrap(
     max_num_sms=0,
     drop_on_overflow=False,
     mesh_resource=None,
+    sm_config=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
@@ -152,7 +168,10 @@ def ep_bootstrap(
             at least ep_size * max_tokens_per_rank * top_k to avoid drops.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
-        max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
+        max_num_sms: Shorthand for the dispatch/combine SM budgets not set in sm_config;
+            0 = left to NCCL EP.
+        sm_config: EpSmConfig capping the SMs for each EP kernel class; zero budgets
+            are left to NCCL EP (see EpSmConfig).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
@@ -167,6 +186,13 @@ def ep_bootstrap(
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
+        )
+    sm_config = sm_config or EpSmConfig()
+    if max_num_sms:
+        sm_config = replace(
+            sm_config,
+            dispatch_num_sms=sm_config.dispatch_num_sms or max_num_sms,
+            combine_num_sms=sm_config.combine_num_sms or max_num_sms,
         )
     if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
         raise RuntimeError(
@@ -236,10 +262,13 @@ def ep_bootstrap(
             max_tokens_per_rank,
             recv_capacity_per_rank,
             hidden_dim,
-            max_num_sms=int(max_num_sms),
             max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
             drop_on_overflow=bool(drop_on_overflow),
             borrowed_comm=True,
+            dispatch_num_sms=int(sm_config.dispatch_num_sms),
+            combine_num_sms=int(sm_config.combine_num_sms),
+            shuffle_num_sms=int(sm_config.shuffle_num_sms),
+            preprocess_num_sms=int(sm_config.preprocess_num_sms),
         )
         tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
         # Initialize EPBackend now so trace-time handle_mem_size finds it ready.
@@ -271,9 +300,12 @@ def ep_bootstrap(
         max_tokens_per_rank,
         recv_capacity_per_rank,
         hidden_dim,
-        max_num_sms=int(max_num_sms),
         max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
         drop_on_overflow=bool(drop_on_overflow),
+        dispatch_num_sms=int(sm_config.dispatch_num_sms),
+        combine_num_sms=int(sm_config.combine_num_sms),
+        shuffle_num_sms=int(sm_config.shuffle_num_sms),
+        preprocess_num_sms=int(sm_config.preprocess_num_sms),
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.

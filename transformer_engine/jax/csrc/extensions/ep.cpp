@@ -39,7 +39,10 @@ struct EpBootstrapParams {
   int max_tokens_per_rank = 0;
   int max_recv_tokens_per_rank = 0;
   int hidden_dim = 0;
-  int max_num_sms = 0;
+  int dispatch_num_sms = 0;
+  int combine_num_sms = 0;
+  int shuffle_num_sms = 0;
+  int preprocess_num_sms = 0;
   NVTEDType max_token_dtype = kNVTEBFloat16;
   bool drop_on_overflow = false;
   // When set, EP borrows XLA's comm (see below): no ncclCommInitRank at
@@ -55,10 +58,11 @@ static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
                            .max_tokens_per_rank = p.max_tokens_per_rank,
                            .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
                            .hidden_dim = p.hidden_dim,
-                           .num_comm_sms = p.max_num_sms,
                            .max_token_dtype = p.max_token_dtype,
                            .zero_copy = 0,
-                           .drop_on_overflow = p.drop_on_overflow};
+                           .drop_on_overflow = p.drop_on_overflow,
+                           .sm_config = {p.dispatch_num_sms, p.combine_num_sms, p.shuffle_num_sms,
+                                         p.preprocess_num_sms}};
 }
 
 class EpResources {
@@ -190,8 +194,9 @@ struct EpConfig {
 // synchronize via the UID broadcast).
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int max_token_dtype,
-                          bool drop_on_overflow, bool borrowed_comm) {
+                          int hidden_dim, int max_token_dtype, bool drop_on_overflow,
+                          bool borrowed_comm, int dispatch_num_sms, int combine_num_sms,
+                          int shuffle_num_sms, int preprocess_num_sms) {
   std::string uid_str = unique_id_bytes_obj;
   NVTE_CHECK(static_cast<int>(uid_str.size()) >= 128,
              "unique_id_bytes must be at least 128 bytes (ncclUniqueId size).");
@@ -212,7 +217,10 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int 
     g_ep_params.max_tokens_per_rank = max_tokens_per_rank;
     g_ep_params.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
     g_ep_params.hidden_dim = hidden_dim;
-    g_ep_params.max_num_sms = max_num_sms;
+    g_ep_params.dispatch_num_sms = dispatch_num_sms;
+    g_ep_params.combine_num_sms = combine_num_sms;
+    g_ep_params.shuffle_num_sms = shuffle_num_sms;
+    g_ep_params.preprocess_num_sms = preprocess_num_sms;
     g_ep_params.max_token_dtype = static_cast<NVTEDType>(max_token_dtype);
     g_ep_params.drop_on_overflow = drop_on_overflow;
     g_ep_params.borrowed_comm = borrowed_comm;
