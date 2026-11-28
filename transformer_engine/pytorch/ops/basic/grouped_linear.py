@@ -1349,7 +1349,13 @@ class GroupedLinear(BasicOperation):
         if with_quantized_compute:
             for quantizer in input_quantizers:
                 quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            xs = tex.split_quantize(x, split_sizes_int, input_quantizers)
+            # Bulk-allocated splits share storage, so offloading needs separate buffers
+            xs = tex.split_quantize(
+                x,
+                split_sizes_int,
+                input_quantizers,
+                disable_bulk_allocation=is_cpu_offload_enabled(),
+            )
         else:
             xs = torch.split(x, split_sizes_int)
         if is_cpu_offload_enabled():

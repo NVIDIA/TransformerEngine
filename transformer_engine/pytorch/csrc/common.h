@@ -237,6 +237,16 @@ class Float8CurrentScalingQuantizer : public Quantizer {
       const std::optional<at::Tensor>& precomputed_tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
+  /*! @brief Construct a tensor with pre-initialized buffers
+   *
+   * Buffers the quantizer's usages need but the caller omits are allocated.
+   * The buffers may be views into a larger allocation.
+   */
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
+      std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const;
+
   /*! @brief Construct an unquantized tensor with a freshly allocated amax buffer.
    *
    * The amax is zeroed out. Most TE kernels that output amax expect

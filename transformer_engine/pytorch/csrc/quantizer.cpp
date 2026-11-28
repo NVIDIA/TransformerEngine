@@ -668,37 +668,46 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
     bool pin_memory) const {
-  const auto device = resolve_device(device_opt);
+  return create_tensor(shape, dtype, std::nullopt, std::nullopt, std::nullopt, device_opt,
+                       pin_memory);
+}
+
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
+    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
+    std::optional<at::Device> device_opt, bool pin_memory) const {
+  const auto device = resolve_device(device_opt, data);
   using namespace pybind11::literals;
+  const auto uint8_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
 
   // Initialize data tensor
-  at::Tensor data_tensor;
-  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   const bool with_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
-  if (with_data) {
+  if (with_data && !data) {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    const auto opts =
-        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
-    data_tensor = at::empty(shape_int64, opts);
+    data = at::empty(shape_int64, uint8_opts);
+  } else if (!with_data && data) {
+    data.reset();
   }
 
   // Initialize transpose tensor
-  at::Tensor transpose_tensor;
   const bool with_transpose = columnwise_usage && !is_non_tn_fp8_gemm_supported;
-  if (with_transpose) {
-    const auto transpose_shape = make_transpose_shape<int64_t>(shape);
-    const auto opts =
-        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
-    transpose_tensor = at::empty(transpose_shape, opts);
+  if (with_transpose && !transpose) {
+    transpose = at::empty(make_transpose_shape<int64_t>(shape), uint8_opts);
+  } else if (!with_transpose && transpose) {
+    transpose.reset();
   }
+
   // Initialize scale-inverse tensor
-  at::Tensor scale_inv_tensor;
-  {
-    const std::vector<int64_t> scale_inv_shape = {1};
-    const auto opts =
-        at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
-    scale_inv_tensor = at::empty(scale_inv_shape, opts);
+  if (!scale_inv) {
+    scale_inv = at::empty(
+        {1}, at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory));
   }
+  const at::Tensor data_tensor = with_data ? *data : at::Tensor();
+  const at::Tensor transpose_tensor = with_transpose ? *transpose : at::Tensor();
+  const at::Tensor scale_inv_tensor = *scale_inv;
+
   // Construct Python FP8 tensor
   py::object out_py;
   py::object scale_inv_py = py::cast(scale_inv_tensor);
