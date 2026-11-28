@@ -195,6 +195,67 @@ General
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. envvar:: NVTE_MHA_MEGAUP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable an experimental PyTorch MultiheadAttention path using the
+                 optional external ``mega_up`` package with rectangular
+                 projection support. Set the same value on every
+                 context-parallel rank. This prototype composes one packed QKV
+                 peer-write projection, existing TE CP attention, and an output pull
+                 projection. Backward uses
+                 the complementary kernels and ordinary weight-gradient GEMMs;
+                 parameter-gradient reduction remains the caller's responsibility.
+
+   Supports BF16 BSHD/SBHD and packed THD self-attention on peer-accessible SM100 GPUs,
+   CP=2/4/8 with ``cp_comm_type="a2a"`` and dual-chunk load balancing, TP=1,
+   packed ``fuse_qkv_params=True`` weights, zero dropout, and causal or no-mask
+   attention. Interleaved GQA requires the KV-head count to be divisible by CP;
+   model hidden width may differ from query-head count times head dimension.
+   Non-interleaved QKV weights are supported only for equal Q/K/V head counts;
+   non-interleaved GQA uses the original path.
+   Input LayerNorm, QK normalization, bias, FP8 (including calibration), debug
+   instrumentation, KV caching, checkpointing, CPU offload, fused
+   weight-gradient accumulation, and dense-format sequence metadata
+   use the original path. THD supports ``padding`` and ``padding_causal`` masks
+   with identical logical/padded Q/KV boundaries (CUDA contiguous int32),
+   positive global sequence lengths divisible by ``2*CP``, and no padding gaps.
+   Mixed THD policies, empty sequences, and physical padding use the original path.
+   THD inputs concatenate each sequence's two local CP chunks; global cumulative
+   boundaries describe the complete sequences, not rank-local lengths. Rotary embeddings use full-sequence positions after
+   exchanging Q/K/V. Dual-chunk order is explicitly restored around attention.
+
+   The package must be installed separately; its shape and peer-access
+   requirements still apply. The first supported call allocates arenas sized
+   to its local ``B*S`` per CP group, with widths ``3F`` for packed QKV and ``F``
+   for the output projection. Later calls requiring more capacity or a
+   different hidden width fall back collectively. CUDA graph capture is rejected.
+   Missing dependencies and kernel failures are reported rather than hidden by
+   fallback. No parameters are replaced, and the state-dict keys are unchanged.
+
+   Earlier projection integrations validated the dependency stack with upstream
+   `MegaUP 0.3.0 at 7de94fe <https://github.com/shuailiang1/MegaUP/tree/7de94fe11db3dc15f71fdf26cf9f3edbe300439d>`_,
+   which supports rectangular projections; the earlier rectangular fork is not
+   required. Validation used PyTorch container 26.10, CUTLASS DSL 4.8.1,
+   cuDNN attention, and ``NVTE_FLASH_ATTN=0``. Follow the external package's
+   installation requirements, including a compatible ``apache-tvm-ffi``.
+
+   This opt-in prototype replaces the forward and input-gradient GEMM calls
+   inside TE Linear with projection/exchange hooks, while reusing Linear autograd
+   and weight-gradient GEMMs. MHA keeps its split, global-position RoPE, and
+   existing CP attention/autograd flow. A private external-exchange mode accepts
+   global-sequence tensors with local heads and returns rank-major context to the
+   output projection. CP attention keeps its attention kernels, saved tensors,
+   and output/inverse-gradient reorders while the Linear hooks perform all four
+   exchanges. Dense row maps account for the differing batch/chunk order;
+   THD uses the existing CP permutations. No separate local DPA is constructed.
+   The private hook
+   is eager-only; normal Linear calls and unsupported MHA calls remain unchanged.
+   This frontend calls external Python APIs, not a common-layer kernel integration. Non-interleaved QKV weights are
+   packed into head-major Q/K/V triplets before projection. Weight packing,
+   validation collectives, and buffer copies can outweigh overlap gains.
+
 Transformer Engine attention selects a backend in two stages. First, it filters the available
 backends by environment variables, GPU architecture, installed ``flash-attn`` and cuDNN versions,
 data type and FP8 recipe, training or inference mode, and the provided attention configuration.
@@ -207,6 +268,36 @@ including Blackwell. In JAX, Transformer Engine uses cuDNN fused attention when
 ``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise it falls back to the
 JAX-native implementation. See :doc:`examples/attention/attention` for a longer
 backend-selection overview.
+
+.. envvar:: NVTE_MHA_MEGAUP_TRUSTED
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Experimental fixed-contract optimization for ``NVTE_MHA_MEGAUP``.
+                 Set consistently across CP ranks. The first supported forward retains
+                 both TE rank checks and nested MegaUP validation. Later forwards skip
+                 both TE checks; nested validation is also skipped after a validated
+                 complete forward/backward. Forward-only or frozen-prefix execution may
+                 keep nested validation enabled.
+
+   All ranks must initialize and invoke the same fixed contract in coordinated order.
+   After initialization, changed or unsupported inputs raise locally before payloads;
+   they do not fall back or automatically revalidate. To change contracts, use a new
+   MHA or clear its private ``_megaup_validated_contract`` on **all** ranks between
+   completed steps. Retained graphs capture their own validation state.
+
+   THD boundary values use a bounded one-entry cache keyed by tensor identity,
+   version and metadata. Tensor replacement and version-tracked in-place writes reread
+   the values; equivalent values preserve the fixed contract. Inference tensors without
+   version counters bypass this cache. Writes bypassing the original tensor's version
+   counter (including raw CUDA, ``.data``, or untracked storage-alias writes) are
+   unsupported. Weights, transposes and activations are not cached.
+
+   This mode is a trusted prototype, not production-safe equivalent validation:
+   rank divergence, local contract errors and later setup/allocation failures lose
+   coordinated error handling and can leave peers waiting. Leave disabled when these
+   assumptions are not guaranteed. Before initialization, unsupported inputs still
+   take the native path.
 
 .. envvar:: NVTE_FLASH_ATTN
 
