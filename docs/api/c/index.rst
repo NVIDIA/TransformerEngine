@@ -10,6 +10,11 @@ The C/C++ API allows you to access the custom kernels defined in `libtransformer
 directly from C/C++, without Python.
 
 .. toctree::
+   :caption: Migration
+
+   nvfp4_host_split
+
+.. toctree::
    :caption: Headers
 
    transformer_engine.h <transformer_engine>

@@ -304,7 +304,7 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
  *  For each tensor split, compute the maximum absolute value (amax)
  *  and populate the amax buffers of the corresponding output tensor.
  *  All output tensors must have the same tensor format, and the
- *  tensor format determines which amaxes are computed.
+ *  tensor format determines which amaxes are computed. Split lengths reside on the host.
  *
  *  \param[in]      input            Input tensor.
  *  \param[in,out]  outputs          Array of output tensors. Only amax buffers are updated.
@@ -312,10 +312,18 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
  *  \param[in]      num_tensors      Number of tensor splits.
  *  \param[in]      stream           CUDA stream used for the operation.
  */
+void nvte_group_amax_host_split(const NVTETensor input, NVTETensor *outputs,
+                                const size_t *split_sections, size_t num_tensors,
+                                cudaStream_t stream);
+
+/*! \deprecated Use nvte_group_amax_host_split. The signature and behavior are unchanged. */
 void nvte_group_amax(const NVTETensor input, NVTETensor *outputs, const size_t *split_sections,
                      size_t num_tensors, cudaStream_t stream);
 
 /*! \brief Graph-safe variant of nvte_group_amax for grouped tensors.
+ *
+ *  \deprecated Standalone grouped amax entry. Existing behavior is retained for compatibility;
+ *              quantization paths should use nvte_group_quantize when supported.
  *
  *  This function is experimental and the API is not stable.
  *

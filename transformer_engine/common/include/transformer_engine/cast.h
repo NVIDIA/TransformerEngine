@@ -474,6 +474,10 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 
 /*! \brief Casts grouped input tensor to quantized output tensors.
  *
+ *  \deprecated Legacy host-split rowwise-only NVFP4 quantization with supplied amax.
+ *              Retained for compatibility. Use single-tensor nvte_quantize_v2 for ordinary
+ *              1D quantization; ordinary grouped 2D quantization is not a replacement.
+ *
  *  \param[in]      input           Input tensor to be cast.
  *  \param[in,out]  outputs         Output quantized tensors.
  *  \param[in]      split_sections  Split sections of the input tensor.
@@ -486,7 +490,7 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
 
-/*! \deprecated Use nvte_group_amax instead. */
+/*! \deprecated Use nvte_group_amax_host_split instead. */
 void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, size_t num_tensors,
                                    cudaStream_t stream);
