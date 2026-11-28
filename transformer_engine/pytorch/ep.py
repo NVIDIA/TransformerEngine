@@ -594,7 +594,7 @@ def _(*_args, **_kw):
 
 
 def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
-    """AllGather the routing map; fills ``buffer.handle_mem`` and returns
+    """Compute the routing plan; fills ``buffer.handle_mem`` and returns
     ``buffer.tokens_per_expert`` (int64, shape [num_local_experts]). topk_idx must
     be int32 or int64.
 
