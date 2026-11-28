@@ -141,6 +141,29 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
+def test_capture_preserves_eager_calibration_for_subclass():
+    """Capturing a base and derived layer must preserve later eager calibration."""
+
+    class DerivedLinear(Linear):
+        pass
+
+    kwargs = dict(params_dtype=torch.bfloat16, device="cuda")
+    modules = (Linear(32, 32, **kwargs), DerivedLinear(32, 32, **kwargs))
+    inp = torch.randn(8, 32, device="cuda", dtype=torch.bfloat16)
+    graphs = make_graphed_callables(modules, ((inp,), (inp,)), num_warmup_iters=1)
+    try:
+        for graph in graphs:
+            graph(inp).sum().backward()
+    finally:
+        for graph in graphs:
+            graph.reset()
+
+    eager = DerivedLinear(32, 32, **kwargs)
+    with autocast(enabled=False, calibrating=True, recipe=recipe.DelayedScaling()):
+        eager(inp)
+    assert eager.fp8_calibration
+
+
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Check that two lists of tensors match exactly."""
     assert len(l1) == len(l2), "Unequal number of outputs."
