@@ -3291,7 +3291,7 @@ def fuse_unary_activation_ops(
 # 1. The GLU wrapper returns the pre-activation only with ``generate_c=True``.
 # 2. ``prob_tensor`` is mandatory and float32.
 # 3. The GLU clamp (+/-7.0) and GeGLU alpha (1.702) are fixed in the kernel.
-# 4. ``dprob`` is reduced with atomics, so determinism requests are refused.
+# 4. GLU ``dprob`` uses atomics; sReLU also offers a deterministic reduction.
 
 # Fixed in the BF16 GLU/dGLU kernels; activations asking for other values decline.
 _BF16_GEGLU_ALPHA: float = 1.702
@@ -3313,8 +3313,8 @@ def _bf16_glu_act_funcs(activation_op) -> Optional[tuple[str, str, float]]:
     """Map an activation to BF16 cuDNN ``(act_func, dact_func, linear_offset)``, or ``None``.
 
     SwiGLU always maps. GeGLU maps when its limit and alpha match the kernel's fixed
-    values; its linear offset is a runtime argument. Other activations have no BF16
-    kernel. cuDNN frontend 1.30/1.31 have a wrong BF16 dGeGLU, but its fix (PR #1187)
+    values; its linear offset is a runtime argument. Other activations are not served
+    by the GLU backend. cuDNN frontend 1.30/1.31 have a wrong BF16 dGeGLU, but its fix (PR #1187)
     predates PR #1602, which ``is_supported`` requires.
     """
     if isinstance(activation_op, ScaledClampedQGeGLU):
@@ -3570,7 +3570,7 @@ def _bf16_cudnn_wgrad(
 
 
 def fuse_bf16_grouped_mlp_ops(ops, *, recipe, fused_op_cls=None):
-    """Fuse unquantized GroupedLinear + GLU + GroupedLinear windows (``recipe is None`` only).
+    """Fuse unquantized grouped MLP windows (``recipe is None`` only).
 
     Under a recipe the BF16 kernels would drop the quantization, and a custom recipe
     may enable the block-scaled fusion, so the two matchers never claim the same recipe.
@@ -3579,13 +3579,20 @@ def fuse_bf16_grouped_mlp_ops(ops, *, recipe, fused_op_cls=None):
         fused_op_cls = GroupedMLP_CuTeGEMMGLUBf16
     if recipe is not None:
         return ops
+    if not any(
+        isinstance(fc1, GroupedLinear)
+        and isinstance(fc2, GroupedLinear)
+        and fused_op_cls.supports_activation(fc1, activation, fc2)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    ):
+        return ops
     if not fused_op_cls.is_supported():
         return ops
 
     out = []
     window, ops = ops[:3], ops[3:]
     while len(window) == 3:
-        matches_pattern = _bf16_window_matches(window)
+        matches_pattern = _bf16_window_matches(window, fused_op_cls=fused_op_cls)
         if matches_pattern and (
             window[0].split_alignment % _BF16_M_ALIGNMENT != 0
             or window[2].split_alignment % _BF16_M_ALIGNMENT != 0
@@ -3609,12 +3616,14 @@ def fuse_bf16_grouped_mlp_ops(ops, *, recipe, fused_op_cls=None):
     return out
 
 
-def _bf16_window_matches(window) -> bool:
+def _bf16_window_matches(window, *, fused_op_cls=None) -> bool:
     """Whether a three-op window can be served by the BF16 fused kernels."""
     fc1, activation, fc2 = window
     if not (isinstance(fc1, GroupedLinear) and isinstance(fc2, GroupedLinear)):
         return False
-    if _bf16_glu_act_funcs(activation) is None:
+    if fused_op_cls is None:
+        fused_op_cls = GroupedMLP_CuTeGEMMGLUBf16
+    if not fused_op_cls.supports_activation(fc1, activation, fc2):
         return False
     # Same check as the constructor, so an accepted window always builds.
     try:
@@ -3642,8 +3651,10 @@ def _bf16_window_matches(window) -> bool:
     return True
 
 
-class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
-    """BF16 GroupedLinear + GLU activation + GroupedLinear as one fused op."""
+class _GroupedMLPBf16Base(FusedOperation):
+    """BF16 grouped MLP with activation-specific forward and backward adapters."""
+
+    supports_activation_recompute = False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -3652,22 +3663,6 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         from cudnn import grouped_gemm_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_wrapper_sm100
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_activation_kernel(cls) -> Callable:
-        """Fused BF16 grouped GEMM + GLU activation (FC1 forward)."""
-        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_glu_wrapper_sm100
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_dactivation_kernel(cls) -> Callable:
-        """Fused BF16 grouped GEMM + GLU backward (FC2 dgrad)."""
-        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_dglu_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -3689,20 +3684,13 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         if not _cudnn_frontend_version_at_least(_BF16_MIN_CUDNN_FRONTEND_VERSION):
             return False
         try:
-            kernels = (
-                cls.grouped_gemm_kernel(),
-                cls.grouped_gemm_activation_kernel(),
-                cls.grouped_gemm_dactivation_kernel(),
-                cls.grouped_gemm_wgrad_kernel(),
-            )
+            kernels = (cls.grouped_gemm_kernel(), cls.grouped_gemm_wgrad_kernel())
+            activation_supported = cls.activation_kernels_supported()
         except ImportError:
             return False
-        return all(getattr(k, "supports_bf16_canonical_layouts", False) for k in kernels)
-
-    @classmethod
-    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Never: the BF16 dGLU reduces ``dprob`` with atomics and rejects ``deterministic``."""
-        return False
+        return activation_supported and all(
+            getattr(k, "supports_bf16_canonical_layouts", False) for k in kernels
+        )
 
     def __init__(
         self,
@@ -3719,15 +3707,32 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             self.grouped_gemm_dactivation_kernel()
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, activation, fc2)
-        act_funcs = _bf16_glu_act_funcs(activation)
-        if act_funcs is None:
-            raise RuntimeError(
-                f"{type(activation).__name__} cannot be served by the BF16 grouped MLP "
-                "kernels. The BF16 GLU kernel hardwires clamp=+/-"
-                f"{_BF16_GLU_CLAMP_LIMIT} and alpha={_BF16_GEGLU_ALPHA}, and has no "
-                "SiTU-GLU or SReLU variant."
+        if not self.supports_activation(fc1, activation, fc2):
+            raise ValueError(
+                f"{self.__class__.__name__} does not support this activation or bias configuration."
             )
-        self._cudnn_act_func, self._cudnn_dact_func, self._cudnn_linear_offset = act_funcs
+
+    @classmethod
+    def supports_activation(cls, fc1, activation, fc2) -> bool:
+        """Whether this backend can implement the activation and bias configuration."""
+        raise NotImplementedError
+
+    @classmethod
+    def activation_kernels_supported(cls) -> bool:
+        """Whether the installed cuDNN frontend provides the activation kernels."""
+        raise NotImplementedError
+
+    def activation_options(self) -> dict[str, Any]:
+        """Snapshot the numerical options for one forward/backward pair."""
+        raise NotImplementedError
+
+    def activation_forward(self, x, offsets, prob, weights, options, requires_grad, stream):
+        """Return the saved pre-activation and the actual FC2 input."""
+        raise NotImplementedError
+
+    def activation_backward(self, dy, saved, offsets, prob, weights, options, recompute, stream):
+        """Return dZ, dprob, optional recomputed FC2 input, and optional FC1 dbias."""
+        raise NotImplementedError
 
     def _check_token_alignment(self, num_tokens: int) -> None:
         """The total token count must be 256-aligned; cuDNN checks each group's offsets."""
@@ -3815,6 +3820,10 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
         fc1_weight_requires_grad = requires_grad and fc1_weight_param.requires_grad
         fc2_weight_requires_grad = requires_grad and fc2_weight_param.requires_grad
+        activation_options = self.activation_options()
+        recompute_activation = (
+            self.supports_activation_recompute and activation_op.activation_recompute_in_mlp
+        )
 
         # cuDNN padded offsets (int32) and dbias offsets (int64, leading zero).
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -3862,36 +3871,24 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         # gathered, so the collectives stay in step with the other ranks.
         empty_batch = total_tokens == 0
 
-        # FC1 GEMM + GLU. FC1's pre-activation (M, 2F) is saved for the dGLU.
+        # FC1 GEMM + activation. Backward reloads the saved BF16 pre-activation.
         if empty_batch:
             activation_in = fc1_x.new_empty((0, fc1_weight_shape[0])) if requires_grad else None
             fc2_in = fc1_x.new_empty((0, fc2_weight_shape[1]))
         else:
-            fc1_kernel_out = self.grouped_gemm_activation_kernel()(
-                a_tensor=fc1_x,
-                sfa_tensor=None,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                bias_tensor=_pack_grouped_linear_bias_for_cudnn(fc1_op),
-                prob_tensor=prob_tensor,
-                acc_dtype=torch.float32,
-                c_dtype=dtype,
-                d_dtype=dtype,
-                cd_major="n",
-                act_func=self._cudnn_act_func,
-                linear_offset=self._cudnn_linear_offset,
-                generate_c=requires_grad,  # pre-activation for the dGLU
-                use_dynamic_sched=True,
-                current_stream=current_stream,
-                **_bf16_fprop_weight_kwargs(fc1_op, num_groups, device, fc1_weights),
+            activation_in, fc2_in = self.activation_forward(
+                fc1_x,
+                split_points,
+                prob_tensor,
+                fc1_weights,
+                activation_options,
+                requires_grad,
+                current_stream,
             )
-            activation_in = fc1_kernel_out["c_tensor"] if requires_grad else None
             if requires_grad and activation_in is None:
                 raise RuntimeError(
-                    "The BF16 GLU kernel did not return the pre-activation tensor; "
-                    "generate_c was not honoured."
+                    "The BF16 activation kernel did not return the pre-activation tensor."
                 )
-            fc2_in = fc1_kernel_out["d_tensor"]
 
         # FC2 GEMM. A distributed FC2 is gathered after the FC1 launch, as in the
         # block-scaled op.
@@ -3926,7 +3923,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
 
         if requires_grad:
             saved_fc1_x = fc1_x if fc1_weight_requires_grad else None
-            saved_fc2_x = fc2_in if fc2_weight_requires_grad else None
+            saved_fc2_x = fc2_in if fc2_weight_requires_grad and not recompute_activation else None
             if is_cpu_offload_enabled():
                 offload_tensors = [
                     t for t in (saved_fc1_x, activation_in, saved_fc2_x) if t is not None
@@ -3949,6 +3946,8 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             fc1_ctx.weight_requires_grad = fc1_weight_requires_grad
             fc1_ctx.scales_dtype = scales.dtype
             fc1_ctx.unit_activation_scale = unit_activation_scale
+            fc1_ctx.activation_options = activation_options
+            fc1_ctx.recompute_activation = recompute_activation
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = fc2_weight_requires_grad
@@ -4005,8 +4004,8 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         # the shared wgrad code, so collectives and gradient finalization stay in step.
         empty_batch = total_tokens == 0
 
-        # dprob (dGLU) and FC2 scale_bias dscales are both reduced with atomics; an empty
-        # batch launches neither.
+        # GLU dprob and FC2 scale_bias dscales use atomics; unary dprob has a
+        # deterministic reduction. An empty batch launches neither.
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
         if (
             not empty_batch
@@ -4045,10 +4044,12 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             else:
                 fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
 
-        # FC2 dgrad + dGLU: FC1 grad output, dprob, and optional FC1 dbias.
+        # FC2 dgrad + activation backward, including the router probability gradient.
         fc2_weights = _bf16_materialize_distributed(fc2_op, for_backward=True)
         if empty_batch:
             fc1_dy = fc2_dy.new_empty((0, fc1_weight_shape[0]))
+            if fc1_ctx.recompute_activation and fc2_ctx.weight_requires_grad:
+                saved_fc2_x = fc2_dy.new_empty((0, fc2_weight_shape[1]))
             grad_scales = None
             if not unit_activation_scale:
                 grad_scales = fc2_dy.new_empty((0,), dtype=fc1_ctx.scales_dtype)
@@ -4060,28 +4061,19 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
                 prob_tensor = _bf16_ones_prob(total_tokens, device)
             else:
                 prob_tensor = saved_prob
-            # Required by the BF16 dGLU API even when the grad is discarded below.
-            dprob_tensor = torch.zeros(total_tokens, dtype=torch.float32, device=device)
-            fc2_dgrad_kernel_out = self.grouped_gemm_dactivation_kernel()(
-                a_tensor=fc2_dy,
-                c_tensor=activation_in,
-                sfa_tensor=None,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                beta_tensor=alpha_tensor,
-                prob_tensor=prob_tensor,
-                dprob_tensor=dprob_tensor,
-                generate_dbias=fc1_op.has_bias,
-                acc_dtype=torch.float32,
-                d_dtype=dtype,
-                cd_major="n",
-                act_func=self._cudnn_dact_func,
-                linear_offset=self._cudnn_linear_offset,
-                use_dynamic_sched=True,
-                current_stream=current_stream,
-                **_bf16_dgrad_weight_kwargs(fc2_op, num_groups, device, fc2_weights),
+            fc2_dgrad_kernel_out = self.activation_backward(
+                fc2_dy,
+                activation_in,
+                split_points,
+                prob_tensor,
+                fc2_weights,
+                fc1_ctx.activation_options,
+                fc1_ctx.recompute_activation and fc2_ctx.weight_requires_grad,
+                current_stream,
             )
             fc1_dy = fc2_dgrad_kernel_out["d_row_tensor"]
+            if fc1_ctx.recompute_activation and fc2_ctx.weight_requires_grad:
+                saved_fc2_x = fc2_dgrad_kernel_out["d_srelu_tensor"]
             grad_scales = None
             if not unit_activation_scale:
                 grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
@@ -4216,30 +4208,224 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         )
 
 
+class GroupedMLP_CuTeGEMMGLUBf16(_GroupedMLPBf16Base):
+    """BF16 GroupedLinear + GLU activation + GroupedLinear as one fused op."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_activation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + GLU activation."""
+        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_glu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + GLU backward."""
+        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_dglu_wrapper_sm100
+
+    @classmethod
+    def supports_activation(cls, fc1, activation, fc2) -> bool:
+        return _bf16_glu_act_funcs(activation) is not None
+
+    @classmethod
+    def activation_kernels_supported(cls) -> bool:
+        return all(
+            getattr(k, "supports_bf16_canonical_layouts", False)
+            for k in (cls.grouped_gemm_activation_kernel(), cls.grouped_gemm_dactivation_kernel())
+        )
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """The BF16 dGLU reduces dprob with atomics."""
+        return False
+
+    def activation_options(self) -> dict[str, Any]:
+        act_func, dact_func, linear_offset = _bf16_glu_act_funcs(self.basic_ops[1])
+        return {"act_func": act_func, "dact_func": dact_func, "linear_offset": linear_offset}
+
+    def activation_forward(self, x, offsets, prob, weights, options, requires_grad, stream):
+        fc1, _, _ = self.basic_ops
+        out = self.grouped_gemm_activation_kernel()(
+            a_tensor=x,
+            sfa_tensor=None,
+            padded_offsets=offsets,
+            alpha_tensor=get_cached_ones_tensor(fc1.num_groups, torch.float32, x.device),
+            bias_tensor=_pack_grouped_linear_bias_for_cudnn(fc1),
+            prob_tensor=prob,
+            acc_dtype=torch.float32,
+            c_dtype=x.dtype,
+            d_dtype=x.dtype,
+            cd_major="n",
+            act_func=options["act_func"],
+            linear_offset=options["linear_offset"],
+            generate_c=requires_grad,
+            use_dynamic_sched=True,
+            current_stream=stream,
+            **_bf16_fprop_weight_kwargs(fc1, fc1.num_groups, x.device, weights),
+        )
+        return out["c_tensor"] if requires_grad else None, out["d_tensor"]
+
+    def activation_backward(self, dy, saved, offsets, prob, weights, options, recompute, stream):
+        fc1, _, fc2 = self.basic_ops
+        alpha = get_cached_ones_tensor(fc2.num_groups, torch.float32, dy.device)
+        return self.grouped_gemm_dactivation_kernel()(
+            a_tensor=dy,
+            c_tensor=saved,
+            sfa_tensor=None,
+            padded_offsets=offsets,
+            alpha_tensor=alpha,
+            beta_tensor=alpha,
+            prob_tensor=prob,
+            dprob_tensor=torch.zeros(dy.size(0), dtype=torch.float32, device=dy.device),
+            generate_dbias=fc1.has_bias,
+            acc_dtype=torch.float32,
+            d_dtype=dy.dtype,
+            cd_major="n",
+            act_func=options["dact_func"],
+            linear_offset=options["linear_offset"],
+            use_dynamic_sched=True,
+            current_stream=stream,
+            **_bf16_dgrad_weight_kwargs(fc2, fc2.num_groups, dy.device, weights),
+        )
+
+
+class GroupedMLP_CuTeGEMMUnaryBf16(_GroupedMLPBf16Base):
+    """BF16 grouped MLP with weighted squared ReLU, optionally tanh-clamped."""
+
+    supports_activation_recompute = True
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_activation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + sReLU forward."""
+        from cudnn import grouped_gemm_srelu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_srelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + sReLU backward."""
+        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_dsrelu_wrapper_sm100
+
+    @classmethod
+    def supports_activation(cls, fc1, activation, fc2) -> bool:
+        return (
+            isinstance(activation, (ScaledSReLU, ScaledTanhSReLU))
+            and not fc1.has_bias
+            and not fc2.has_bias
+        )
+
+    @classmethod
+    def activation_kernels_supported(cls) -> bool:
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            return False
+        try:
+            if PkgVersion(get_pkg_version("nvidia-cutlass-dsl")) < PkgVersion("4.8.0"):
+                return False
+        except PackageNotFoundError:
+            return False
+        # These appended options identify the BF16-capable sReLU facades. They use
+        # kernel-facing layouts rather than the canonical-layout marker on GLU.
+        try:
+            forward = inspect.signature(cls.grouped_gemm_activation_kernel()).parameters
+            backward = inspect.signature(cls.grouped_gemm_dactivation_kernel()).parameters
+        except (TypeError, ValueError):
+            return False
+        return {"act_input", "tanh_mode"} <= forward.keys() and {
+            "tanh_mode",
+            "generate_d_srelu",
+            "deterministic",
+        } <= backward.keys()
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """BF16 dSReLU offers a fixed-order dprob reduction."""
+        return True
+
+    def activation_options(self) -> dict[str, Any]:
+        activation = self.basic_ops[1]
+        return {
+            "act_input": activation.bf16_act_input,
+            "tanh_mode": activation.bf16_tanh_mode,
+            "tanh_clamp_scale": getattr(activation, "tanh_clamp_scale", None),
+        }
+
+    def activation_forward(self, x, offsets, prob, weights, options, requires_grad, stream):
+        fc1, _, _ = self.basic_ops
+        weight_kwargs = _bf16_fprop_weight_kwargs(fc1, fc1.num_groups, x.device, weights)
+        if "b_tensor" in weight_kwargs:
+            # (experts, N, K) -> (N, K, experts), without copying the weights.
+            weight_kwargs["b_tensor"] = weight_kwargs["b_tensor"].permute(1, 2, 0)
+        out = self.grouped_gemm_activation_kernel()(
+            a_tensor=x.unsqueeze(-1),
+            padded_offsets=offsets,
+            prob_tensor=prob.view(-1, 1, 1),
+            use_dynamic_sched=True,
+            current_stream=stream,
+            **options,
+            **weight_kwargs,
+        )
+        saved = out["c_tensor"].squeeze(-1) if requires_grad else None
+        return saved, out["d_tensor"].squeeze(-1)
+
+    def activation_backward(self, dy, saved, offsets, prob, weights, options, recompute, stream):
+        _, _, fc2 = self.basic_ops
+        weight_kwargs = _bf16_dgrad_weight_kwargs(fc2, fc2.num_groups, dy.device, weights)
+        if "b_tensor" in weight_kwargs:
+            # (experts, D, N) -> (N, D, experts); N-major reads the original FC2 weight.
+            weight_kwargs["b_tensor"] = weight_kwargs["b_tensor"].permute(2, 1, 0)
+        out = self.grouped_gemm_dactivation_kernel()(
+            a_tensor=dy.unsqueeze(-1),
+            c_tensor=saved.unsqueeze(-1),
+            padded_offsets=offsets,
+            prob_tensor=prob.view(-1, 1, 1),
+            generate_d_srelu=recompute,
+            tanh_clamp_scale=options["tanh_clamp_scale"],
+            tanh_mode=options["tanh_mode"],
+            deterministic=_deterministic_algorithms_required(),
+            use_dynamic_sched=True,
+            current_stream=stream,
+            **weight_kwargs,
+        )
+        return {
+            "d_row_tensor": out["d_row_tensor"].squeeze(-1),
+            "dprob_tensor": out["dprob_tensor"].view(-1),
+            "d_srelu_tensor": out["d_srelu_tensor"].squeeze(-1) if recompute else None,
+            "dbias_tensor": None,
+        }
+
+
 def fuse_bf16_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
     **_unused,
 ) -> list[FusibleOperation]:
-    """Apply joint BF16 GroupedLinear + scaled GLU + GroupedLinear fusion."""
+    """Apply joint BF16 GroupedLinear + scaled activation + GroupedLinear fusion."""
 
     # Keep capability probes out of tracing for unrelated operation sequences.
     if recipe is not None:
         return ops
     if not any(
         isinstance(fc1, GroupedLinear)
-        and is_glu_activation(activation)
+        and (
+            is_glu_activation(activation) or isinstance(activation, (ScaledSReLU, ScaledTanhSReLU))
+        )
         and isinstance(fc2, GroupedLinear)
         for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
     ):
         return ops
 
-    return fuse_bf16_grouped_mlp_ops(
-        ops,
-        recipe=recipe,
-        fused_op_cls=GroupedMLP_CuTeGEMMGLUBf16,
-    )
+    for fused_op_cls in (GroupedMLP_CuTeGEMMGLUBf16, GroupedMLP_CuTeGEMMUnaryBf16):
+        ops = fuse_bf16_grouped_mlp_ops(ops, recipe=recipe, fused_op_cls=fused_op_cls)
+    return ops
 
 
 register_forward_backward_fusion(fuse_glu_ops, prepend=True)

@@ -1277,8 +1277,10 @@ class TestGroupedMLPFusedOp:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if not activation_is_glu and quantization not in ["mxfp8"] + list(nvfp4_variant_names):
-            pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
+        if not activation_is_glu and quantization not in [None, "mxfp8"] + list(
+            nvfp4_variant_names
+        ):
+            pytest.skip("Scaled unary grouped MLP requires BF16, MXFP8 or NVFP4")
         if not activation_is_glu and glu_interleave_size is not None:
             pytest.skip("Unary activations do not use GLU interleaving")
         if quantization == "nvfp4_4over6":
@@ -1619,13 +1621,20 @@ class TestGroupedMLPFusedOp:
         # Unquantized BF16 must fuse on Blackwell (including FC1 bias and FC2
         # scale_bias), so these cases cannot pass on the unfused path. Custom GeGLU
         # constants have no BF16 kernel and decline.
-        bf16_fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLUBf16
+        bf16_fused_cls = (
+            grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+            if activation_is_glu
+            else grouped_mlp_module.GroupedMLP_CuTeGEMMUnaryBf16
+        )
         if (
             enable_fusion
             and quantization is None
             and split_alignment % 256 == 0
             and dtype == torch.bfloat16
-            and activation in ("scaled_swiglu", "scaled_clamped_qgeglu")
+            and (
+                activation in ("scaled_swiglu", "scaled_clamped_qgeglu")
+                or (activation in ("scaled_srelu", "scaled_tanh_srelu") and not bias)
+            )
             and bf16_fused_cls.is_supported()
         ):
             forward_ops = module._module_groups[0]._forward_ops
@@ -4395,11 +4404,13 @@ def _bf16_mlp_ops(
     fc2_scale_bias: bool = False,
     **linear_kwargs,
 ):
-    """Build a GroupedLinear + GLU + GroupedLinear triple."""
+    """Build a GroupedLinear + scaled activation + GroupedLinear triple."""
+    if activation is None:
+        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
     fc1 = te.ops.GroupedLinear(
         num_groups,
         in_features,
-        2 * ffn_hidden,
+        (2 if is_glu_activation(activation) else 1) * ffn_hidden,
         bias=bias,
         device="cuda",
         dtype=dtype,
@@ -4407,8 +4418,6 @@ def _bf16_mlp_ops(
         scale_bias=fc1_scale_bias,
         **linear_kwargs,
     )
-    if activation is None:
-        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
     fc2 = te.ops.GroupedLinear(
         num_groups,
         ffn_hidden,
@@ -5198,3 +5207,391 @@ class TestGroupedMLPBf16FusedOp:
                 rtol=0,
                 atol=0,
             )
+
+
+def _bf16_srelu_weight(fc, *, grad=False):
+    """Dense views used only by the independent numerical reference."""
+    if fc.single_grouped_weight:
+        tensor = fc.weight.grad if grad else fc.weight
+        data = tensor.rowwise_data if isinstance(tensor, GroupedTensor) else tensor
+        return data.view(fc.num_groups, fc.out_features, fc.in_features)
+    return torch.stack(
+        [
+            getattr(fc, f"weight{i}").grad if grad else getattr(fc, f"weight{i}")
+            for i in range(fc.num_groups)
+        ]
+    )
+
+
+def _bf16_srelu_reference(x, prob, dy, w1, w2, sizes, *, clamp, act_input, recompute):
+    """Reference with explicit BF16 boundaries and FP32 FC2 dgrad accumulation.
+
+    Backward reloads the BF16 pre-activation even for act_input="acc".
+    The wgrad input is the sole boundary affected by activation recomputation.
+    """
+    outputs, dxs, dprobs, dw1s, dw2s = [], [], [], [], []
+    start = 0
+    for idx, size in enumerate(sizes):
+        xg, pg, dyg = (
+            x[start : start + size],
+            prob[start : start + size, None],
+            dy[start : start + size],
+        )
+        z = xg.float() @ w1[idx].float().T
+        saved = z.bfloat16().float()
+
+        def act(tensor):
+            positive = tensor.relu()
+            if clamp is not None:
+                positive = clamp * torch.tanh(positive / clamp)
+            return positive.square()
+
+        h = (pg * act(z if act_input == "acc" else saved)).bfloat16()
+        hw = (pg * act(saved)).bfloat16() if recompute else h
+        dh = dyg.float() @ w2[idx].float()
+        if clamp is None:
+            derivative = 2 * saved.relu()
+        else:
+            t = torch.tanh(saved.relu() / clamp)
+            derivative = 2 * clamp * t * (1 - t.square())
+        dz = (dh * pg * derivative).bfloat16()
+        outputs.append((h.float() @ w2[idx].float().T).bfloat16())
+        dxs.append((dz.float() @ w1[idx].float()).bfloat16())
+        dprobs.append((dh * act(saved)).sum(dim=-1))
+        dw1s.append((dz.float().T @ xg.float()).bfloat16())
+        dw2s.append((dyg.float().T @ hw.float()).bfloat16())
+        start += size
+    return (
+        torch.cat(outputs),
+        torch.cat(dxs),
+        torch.cat(dprobs),
+        torch.stack(dw1s),
+        torch.stack(dw2s),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+class TestGroupedMLPBf16SReLU:
+    """BF16 unary fusion: numerical modes, tensor lifetime, and reduction policy."""
+
+    @staticmethod
+    def _require_backend():
+        cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnaryBf16
+        if not cls.is_supported():
+            pytest.skip("BF16 sReLU requires SM100/103, CuTe DSL >=4.8 and cuDNN BF16 sReLU APIs")
+        return cls
+
+    @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu"))
+    @pytest.mark.parametrize("act_input", ("acc", "saved"))
+    @pytest.mark.parametrize("tanh_mode", ("approx", "accurate"))
+    @pytest.mark.parametrize("recompute", (False, True))
+    @pytest.mark.parametrize("deterministic", (False, True))
+    @pytest.mark.parametrize("packed", (False, True))
+    def test_numerical_modes(
+        self, monkeypatch, activation, act_input, tanh_mode, recompute, deterministic, packed
+    ):
+        """All 32 modes, in both weight layouts, include an empty expert and a partial N tile."""
+        cls = self._require_backend()
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0" if deterministic else "1")
+        old_deterministic = torch.are_deterministic_algorithms_enabled()
+        old_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        torch.use_deterministic_algorithms(False)
+        try:
+            torch.manual_seed(123)
+            ops = _bf16_mlp_ops(
+                num_groups=3,
+                ffn_hidden=320,
+                single_grouped_weight=packed,
+                activation=_make_scaled_activation(
+                    activation,
+                    bf16_act_input=act_input,
+                    bf16_tanh_mode=tanh_mode,
+                    activation_recompute_in_mlp=recompute,
+                ),
+            )
+            sizes = [256, 0, 512]
+            splits = torch.tensor(sizes, dtype=torch.int32, device="cuda")
+            x0 = torch.randn(sum(sizes), 64, dtype=torch.bfloat16, device="cuda")
+            p0 = torch.rand(sum(sizes), dtype=torch.float32, device="cuda")
+            dy = torch.randn_like(x0)
+            w1, w2 = (_bf16_srelu_weight(fc).detach().clone() for fc in (ops[0], ops[2]))
+            reference = _bf16_srelu_reference(
+                x0,
+                p0,
+                dy,
+                w1,
+                w2,
+                sizes,
+                clamp=_TANH_SRELU_CLAMP_SCALE if activation == "scaled_tanh_srelu" else None,
+                act_input=act_input,
+                recompute=recompute,
+            )
+
+            captured = {}
+            original_forward = cls.activation_forward
+            original_backward = cls.activation_backward
+
+            def forward(self, *args, **kwargs):
+                saved, h = original_forward(self, *args, **kwargs)
+                captured["forward_h"] = h.detach().clone()
+                return saved, h
+
+            def backward(self, *args, **kwargs):
+                result = original_backward(self, *args, **kwargs)
+                if result["d_srelu_tensor"] is not None:
+                    captured["recomputed_h"] = result["d_srelu_tensor"].detach().clone()
+                return result
+
+            monkeypatch.setattr(cls, "activation_forward", forward)
+            monkeypatch.setattr(cls, "activation_backward", backward)
+            model = te.ops.Sequential(*ops)
+            x, prob = x0.clone().requires_grad_(), p0.clone().requires_grad_()
+            out = model(x, splits, prob, splits)
+            assert isinstance(model._module_groups[0]._forward_ops[0][0], cls)
+            out.backward(dy)
+            actual = (
+                out,
+                x.grad,
+                prob.grad,
+                _bf16_srelu_weight(ops[0], grad=True),
+                _bf16_srelu_weight(ops[2], grad=True),
+            )
+            # BF16 rounding at the activation/dZ boundaries differs from an unfused
+            # BF16 MLP. Two percent RMS allows a few bin changes, not FP8-size error.
+            for got, want in zip(actual, reference):
+                assert_close_rms(got, want, rtol=0.02)
+            assert ("recomputed_h" in captured) is recompute
+            if act_input == "saved" and recompute:
+                assert torch.equal(
+                    captured["forward_h"].view(torch.int16),
+                    captured["recomputed_h"].view(torch.int16),
+                )
+            # Check the exact source of FC2 wgrad independently of tanh approximation.
+            h = captured["recomputed_h" if recompute else "forward_h"]
+            expected_dw2, start = [], 0
+            for size in sizes:
+                expected_dw2.append(
+                    (
+                        dy[start : start + size].float().T @ h[start : start + size].float()
+                    ).bfloat16()
+                )
+                start += size
+            assert_close_rms(actual[-1], torch.stack(expected_dw2), rtol=0.01)
+        finally:
+            torch.use_deterministic_algorithms(old_deterministic, warn_only=old_warn_only)
+
+    def test_determinism_policy_changes_in_process(self, monkeypatch):
+        """Either TE or PyTorch can require determinism, without rebuilding the fuser."""
+        cls = self._require_backend()
+        ops = _bf16_mlp_ops(ffn_hidden=320, activation=te.ops.ScaledSReLU())
+        model = te.ops.Sequential(*ops)
+        splits, x0, p0 = _bf16_mlp_inputs(ops, 1)
+        p0 = p0.float()
+        kernel = cls.grouped_gemm_dactivation_kernel()
+        seen = []
+
+        def record(**kwargs):
+            seen.append(kwargs["deterministic"])
+            return kernel(**kwargs)
+
+        monkeypatch.setattr(cls, "grouped_gemm_dactivation_kernel", classmethod(lambda cls: record))
+        old = torch.are_deterministic_algorithms_enabled()
+        old_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        try:
+            for allow, torch_deterministic in (
+                ("1", False),
+                ("0", False),
+                ("1", True),
+                ("0", True),
+            ):
+                monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", allow)
+                torch.use_deterministic_algorithms(torch_deterministic)
+                grads = []
+                for _ in range(3):
+                    model.zero_grad(set_to_none=True)
+                    x, prob = x0.clone().requires_grad_(), p0.clone().requires_grad_()
+                    model(x, splits, prob, splits).sum().backward()
+                    grads.append(prob.grad.clone())
+                required = allow == "0" or torch_deterministic
+                assert seen[-3:] == [required] * 3
+                if required:
+                    for grad in grads[1:]:
+                        assert torch.equal(grad.view(torch.int32), grads[0].view(torch.int32))
+                else:
+                    for grad in grads[1:]:
+                        torch.testing.assert_close(grad, grads[0], rtol=1e-5, atol=1e-6)
+                assert isinstance(model._module_groups[0]._forward_ops[0][0], cls)
+        finally:
+            torch.use_deterministic_algorithms(old, warn_only=old_warn_only)
+
+    @pytest.mark.parametrize("clamp", (None, 2.0))
+    @pytest.mark.parametrize("tanh_mode", ("approx", "accurate"))
+    @pytest.mark.parametrize("recompute", (False, True))
+    def test_acc_recompute_keeps_forward_mode(self, monkeypatch, clamp, tanh_mode, recompute):
+        """A rounding-sensitive dot product makes acc and saved produce different H."""
+        cls = self._require_backend()
+        activation = (
+            te.ops.ScaledSReLU(bf16_tanh_mode=tanh_mode, activation_recompute_in_mlp=recompute)
+            if clamp is None
+            else te.ops.ScaledTanhSReLU(
+                tanh_clamp_scale=clamp,
+                bf16_tanh_mode=tanh_mode,
+                activation_recompute_in_mlp=recompute,
+            )
+        )
+        ops = _bf16_mlp_ops(activation=activation)
+        with torch.no_grad():
+            ops[0].weight0.fill_(0)
+            ops[0].weight0[:, 0] = 1
+            ops[0].weight0[:, 1] = 0.00390625
+        x = torch.zeros(256, 64, dtype=torch.bfloat16, device="cuda")
+        x[:, :2] = 1
+        prob = torch.ones(256, dtype=torch.float32, device="cuda")
+        offsets = torch.tensor([256], dtype=torch.int32, device="cuda")
+        fused = cls(fc1=ops[0], activation=ops[1], fc2=ops[2])
+        options = fused.activation_options()
+        saved, h_acc = fused.activation_forward(x, offsets, prob, None, options, True, None)
+        result = fused.activation_backward(
+            torch.ones_like(x), saved, offsets, prob, None, options, True, None
+        )
+        _, h_saved = fused.activation_forward(
+            x, offsets, prob, None, {**options, "act_input": "saved"}, True, None
+        )
+        assert options["act_input"] == activation.bf16_act_input == "acc"
+        assert not torch.equal(h_acc, h_saved)
+        assert torch.equal(h_saved.view(torch.int16), result["d_srelu_tensor"].view(torch.int16))
+
+        captured = []
+        original_forward = cls.activation_forward
+
+        def record_forward(self, *args, **kwargs):
+            saved, h = original_forward(self, *args, **kwargs)
+            captured.append(h.detach().clone())
+            return saved, h
+
+        monkeypatch.setattr(cls, "activation_forward", record_forward)
+        model = te.ops.Sequential(*ops)
+        out = model(x.clone().requires_grad_(), offsets, prob.clone().requires_grad_(), offsets)
+        out.backward(torch.ones_like(out))
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], cls)
+        assert torch.equal(captured[0].view(torch.int16), h_acc.view(torch.int16))
+        # Every token has the same H: summing 256 identical BF16 values is exact.
+        # Thus even a one-bin error in the choice of wgrad input is observable.
+        h_wgrad = h_saved if recompute else h_acc
+        expected = h_wgrad.float().sum(dim=0).bfloat16().expand_as(ops[2].weight0)
+        torch.testing.assert_close(ops[2].weight0.grad, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("recompute", (False, True))
+    def test_plain_srelu_ignores_tanh_mode(self, recompute):
+        cls = self._require_backend()
+        torch.manual_seed(4)
+        ops = _bf16_mlp_ops(activation=te.ops.ScaledSReLU(activation_recompute_in_mlp=recompute))
+        splits, x, prob = _bf16_mlp_inputs(ops, 1)
+        fused = cls(fc1=ops[0], activation=ops[1], fc2=ops[2])
+        outputs = []
+        for mode in ("approx", "accurate"):
+            options = {**fused.activation_options(), "tanh_mode": mode}
+            saved, h = fused.activation_forward(x, splits, prob.float(), None, options, True, None)
+            result = fused.activation_backward(
+                x, saved, splits, prob.float(), None, options, recompute, None
+            )
+            outputs.append((h, result["d_row_tensor"], result["d_srelu_tensor"]))
+        for left, right in zip(*outputs):
+            if left is not None:
+                assert torch.equal(left.view(torch.int16), right.view(torch.int16))
+
+    @pytest.mark.parametrize("recompute", (False, True))
+    @pytest.mark.parametrize("delay_wgrad", (False, True))
+    @pytest.mark.parametrize("empty", (False, True))
+    def test_main_grad_and_delayed_wgrad(self, recompute, delay_wgrad, empty):
+        """Regenerated H remains alive until delayed wgrad; empty ranks add zero."""
+        self._require_backend()
+        torch.manual_seed(5)
+        kwargs = dict(
+            num_groups=2,
+            delay_wgrad_compute=delay_wgrad,
+        )
+        ops = _bf16_mlp_ops(
+            **kwargs,
+            accumulate_into_main_grad=True,
+            activation=te.ops.ScaledSReLU(activation_recompute_in_mlp=recompute),
+        )
+        ref = _bf16_mlp_ops(
+            **kwargs, activation=te.ops.ScaledSReLU(activation_recompute_in_mlp=recompute)
+        )
+        for fc, reference_fc in ((ops[0], ref[0]), (ops[2], ref[2])):
+            reference_fc.load_state_dict(fc.state_dict())
+            MegatronTrainingHelper.init_main_grad_buffers(
+                [fc.weight0, fc.weight1], fill_value=0.5, overwrite_main_grad=False
+            )
+        splits, x, p = _bf16_mlp_inputs(ops, 2, tokens_per_group=0 if empty else 256)
+        dy = torch.ones_like(x)
+        for triple in (ops, ref):
+            model = te.ops.Sequential(*triple)
+            model(x.clone().requires_grad_(), splits, p.clone().requires_grad_(), splits).backward(
+                dy
+            )
+            if delay_wgrad:
+                triple[0].backward_dw()
+                triple[2].backward_dw()
+        for fc, reference_fc in ((ops[0], ref[0]), (ops[2], ref[2])):
+            expected = [getattr(reference_fc, f"weight{i}").grad.float() + 0.5 for i in range(2)]
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                [fc.weight0, fc.weight1], expected_main_grads=expected, rtol=0.02, atol=0.01
+            )
+
+    @pytest.mark.parametrize("recompute", (False, True))
+    @pytest.mark.parametrize("deterministic", (False, True))
+    def test_cuda_graph_on_side_stream(self, monkeypatch, recompute, deterministic):
+        """The sReLU wrapper's scratch and deterministic reduction are capture-safe."""
+        cls = self._require_backend()
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0" if deterministic else "1")
+        ops = _bf16_mlp_ops(
+            activation=te.ops.ScaledTanhSReLU(
+                tanh_clamp_scale=2.0, activation_recompute_in_mlp=recompute
+            )
+        )
+        model = te.ops.Sequential(*ops)
+        splits, x, prob = _bf16_mlp_inputs(ops, 1)
+        x.requires_grad_()
+        prob = prob.float().requires_grad_()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+
+        def run():
+            model.zero_grad(set_to_none=True)
+            x.grad = prob.grad = None
+            y = model(x, splits, prob, splits)
+            y.sum().backward()
+            return y
+
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            y = run()
+        graph.replay()
+        torch.cuda.synchronize()
+        expected = [t.detach().clone() for t in (y, x.grad, prob.grad)]
+        for _ in range(2):
+            graph.replay()
+            torch.cuda.synchronize()
+            for got, want in zip((y, x.grad, prob.grad), expected):
+                torch.testing.assert_close(got, want, rtol=0 if deterministic else 1e-5, atol=0)
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], cls)
+
+    @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu"))
+    def test_matching_and_invalid_options(self, monkeypatch, activation):
+        cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnaryBf16
+        monkeypatch.setattr(cls, "is_supported", classmethod(lambda cls: True))
+        for bias in (False, True):
+            ops = _bf16_mlp_ops(activation=_make_scaled_activation(activation), bias=bias)
+            selected = grouped_mlp_module.fuse_bf16_grouped_mlp_ops(
+                ops, recipe=None, fused_op_cls=cls
+            )
+            assert (len(selected) == 1 and isinstance(selected[0], cls)) is (not bias)
+        for option in ("bf16_act_input", "bf16_tanh_mode"):
+            with pytest.raises(ValueError, match=option):
+                _make_scaled_activation(activation, **{option: "invalid"})
