@@ -1103,7 +1103,7 @@ def moe_unpermute(
         )
     if map_type == "mask":
         if restore_shape is None:
-            restore_shape = inp.shape
+            restore_shape = (row_id_map.shape[0], inp.shape[1])
         num_tokens, hidden_size = restore_shape
         num_experts = (row_id_map.size(1) - 1) // 2 if row_id_map.dim() > 1 else 0
 

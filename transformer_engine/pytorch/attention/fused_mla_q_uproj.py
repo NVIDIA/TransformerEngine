@@ -75,7 +75,7 @@ class FusedMLAQUpProjRopeQuant:
             return False
         if not _cudnn_frontend_version_supported():
             return False
-        if get_device_compute_capability()[0] < 10:
+        if get_device_compute_capability()[0] != 10:
             return False
         if cls._kernel() is None:
             return False

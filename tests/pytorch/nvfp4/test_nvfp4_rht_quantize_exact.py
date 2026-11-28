@@ -155,7 +155,9 @@ def check_quantization_nvfp4_versus_reference(
                 else:
                     os.environ[env_name] = old_value
             qx_t_ref = unpack_fp4(native._columnwise_data.view(dtype=torch.uint8))
-            sx_t_ref = native._columnwise_scale_inv.view(dtype=torch.uint8)
+            sx_t_ref = native._columnwise_scale_inv.view(dtype=torch.uint8)[
+                : sx_t_ref.shape[0], : sx_t_ref.shape[1]
+            ]
             ref_amax_colwise_t = native._amax_columnwise
     else:
         qx_t_ref = None

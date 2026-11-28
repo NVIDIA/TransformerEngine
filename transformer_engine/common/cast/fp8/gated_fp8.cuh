@@ -333,7 +333,7 @@ void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   using namespace kernel;
   checkCuDriverContext(stream);
 
-  NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
+  NVTE_CHECK(output->has_data(), "Row-wise output data must be allocated.");
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_BWD ? 2 : 1) * cols;

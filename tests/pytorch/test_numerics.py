@@ -276,6 +276,22 @@ def disable_bf16_reduced_precision_reduction():
         yield
 
 
+@contextmanager
+def _enable_tf32_matmul():
+    original_value = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_value
+
+
+@pytest.fixture(autouse=True)
+def enable_tf32_matmul():
+    with _enable_tf32_matmul():
+        yield
+
+
 class TorchScaledMaskedSoftmax(nn.Module):
     def __init__(self) -> None:
         super().__init__()
