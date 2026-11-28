@@ -1002,7 +1002,6 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
-
   // Compute amax
   if (compute_amax) {
     NVTE_SCOPED_GIL_RELEASE(
@@ -1050,6 +1049,8 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
   this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
+  this->rowwise_scale_option = quantizer.attr("rowwise_scale_layout")
+                                   .cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
 }
@@ -1124,6 +1125,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
@@ -1150,6 +1152,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["block_scaling_rowwise_scale_layout"] = py::cast(static_cast<int>(rowwise_scale_option));
     kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
@@ -1232,8 +1235,10 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
                                      getTensorShape(*columnwise_scale_inv));
   }
-  // FP8 block-scaling grouped GEMM reads compact scales; never swizzle.
+  // Block-scaled FP8 GEMM uses per-expert block-major scales without an MXFP8-style swizzle.
   out_cpp.set_with_gemm_swizzled_scales(false);
+  out_cpp.set_block_scaling_rowwise_scale_layout(static_cast<uint8_t>(
+      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -1267,6 +1272,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
+  kwargs["block_scaling_rowwise_scale_layout"] = py::cast(
+      static_cast<int>(transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1431,6 +1438,7 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
+  quant_config.set_block_scaling_1d_rowwise_option(static_cast<uint8_t>(rowwise_scale_option));
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -1459,9 +1467,14 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       sinv0 = ceildiv(m_dim, kBlockLen);
       sinv1 = roundup(ceildiv(k_dim, kBlockLen), 4);
     } else if (block_scaling_dim == 1) {
-      // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
-      sinv0 = ceildiv(k_dim, kBlockLen);
-      sinv1 = roundup(m_dim, 4);
+      if (rowwise_scale_option ==
+          transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
+        sinv0 = m_dim;
+        sinv1 = ceildiv(k_dim, kBlockLen);
+      } else {
+        sinv0 = ceildiv(k_dim, kBlockLen);
+        sinv1 = roundup(m_dim, 4);
+      }
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor rowwise."

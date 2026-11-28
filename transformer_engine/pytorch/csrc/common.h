@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "c10/util/ArrayRef.h"
+#include "common/common.h"
 #include "common/util/logging.h"
 #include "extensions/pybind_dtype_caster.h"
 
@@ -273,6 +274,8 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
+  detail::FP8BlockwiseRowwiseOption rowwise_scale_option =
+      detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
 
  private:
   int block_scaling_dim = 2;

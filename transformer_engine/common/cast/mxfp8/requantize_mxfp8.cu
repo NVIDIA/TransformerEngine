@@ -11,7 +11,6 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
 
 #include <algorithm>
 
@@ -21,6 +20,7 @@
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/grouped_tma.cuh"
+#include "requantize_mxfp8.h"
 #include "specialized/swizzle.cuh"
 #include "swizzle.cuh"
 
@@ -915,15 +915,3 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
-
-void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                           NVTETensor dequantized, const NVTEQuantizationConfig /*quant_config*/,
-                           cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_requantize);
-  using namespace transformer_engine;
-  const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
-  GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
-  dispatch::mxfp8::group_requantize(
-      *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
-      stream);
-}

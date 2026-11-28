@@ -45,6 +45,14 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 
 namespace transformer_engine {
 
+namespace detail {
+enum class FP8BlockwiseRowwiseOption : uint8_t {
+  NONE = 0,
+  ROWWISE_GEMM_READY = 1,
+  ROWWISE_COMPACT = 2,
+};
+}  // namespace detail
+
 inline std::string to_string(const DType type) {
   switch (type) {
     case DType::kByte:
@@ -544,6 +552,13 @@ struct GroupedTensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
+  /*! \brief Physical rowwise scale layout for block-scaled FP8.
+   *
+   * Unlike GEMM swizzling, GEMM-ready block scales have a distinct physical
+   * layout from compact wire scales and therefore need separate metadata.
+   */
+  detail::FP8BlockwiseRowwiseOption block_scaling_rowwise_scale_layout =
+      detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
 
   /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
   bool row_scaled_nvfp4 = false;
@@ -561,7 +576,8 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
       sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
-      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
+      sizeof(uint8_t),          // kNVTEGroupedRowScaledNVFP4
+      sizeof(uint8_t)           // kNVTEGroupedBlockScalingRowwiseScaleLayout
   };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -580,6 +596,7 @@ struct GroupedTensor {
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
         with_gemm_swizzled_scales(false),
+        block_scaling_rowwise_scale_layout(detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY),
         row_scaled_nvfp4(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
@@ -633,6 +650,7 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
+    block_scaling_rowwise_scale_layout = detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
     row_scaled_nvfp4 = false;
   }
 };
@@ -648,6 +666,8 @@ struct QuantizationConfig {
   NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
   bool nvfp4_4over6_err_use_fast_math = false;
   bool mxfp8_2d_quantization = false;
+  detail::FP8BlockwiseRowwiseOption block_scaling_1d_rowwise_option =
+      detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -660,7 +680,8 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6_mode
       sizeof(uint8_t),                       // nvfp4_4over6_err_use_fast_math
-      sizeof(uint8_t)                        // mxfp8_2d_quantization
+      sizeof(uint8_t),                       // mxfp8_2d_quantization
+      sizeof(uint8_t)                        // block_scaling_1d_rowwise_option
   };
 };
 

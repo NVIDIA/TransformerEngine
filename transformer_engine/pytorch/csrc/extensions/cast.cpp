@@ -24,6 +24,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/activation.h"
+#include "transformer_engine/ep.h"
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
@@ -1020,6 +1021,12 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   const bool has_columnwise = !grouped_x.attr("columnwise_data").is_none() &&
                               !grouped_x.attr("columnwise_scale_inv").is_none();
   const bool swizzled = grouped_x.attr("_with_gemm_swizzled_scales").cast<bool>();
+  const auto block_scaling_rowwise_scale_layout =
+      static_cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>(
+          grouped_x.attr("_block_scaling_rowwise_scale_layout").cast<int>());
+  const bool compact_block_scaling_rowwise_scale_layout =
+      block_scaling_rowwise_scale_layout ==
+      transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
   const DType op_dtype = quantizer.attr("dtype").cast<DType>();
 
   NVTE_CHECK(has_rowwise, "Grouped input has no rowwise data and scales for the GEMM to consume.");
@@ -1038,7 +1045,14 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // before the usage is overridden below.
   const bool need_columnwise = quantizer.attr("columnwise_usage").cast<bool>();
 
-  if (swizzled) {
+  const bool is_block_scale_1d = detail::IsFloat8BlockwiseQuantizers(quantizer.ptr());
+  if (is_block_scale_1d) {
+    NVTE_CHECK(quantizer.attr("block_scaling_dim").cast<int>() == 1 &&
+                   input_quantizer.attr("block_scaling_dim").cast<int>() == 1,
+               "Block128 grouped requantization requires 1D block scaling.");
+  }
+
+  if (swizzled && !is_block_scale_1d) {
     // Already GEMM-ready. Nothing can be derived from here, since dequantization requires scales
     // in compact format, so the input must already carry everything that will be consumed. No
     // quantization kernel runs, which makes this path format-agnostic.
@@ -1051,26 +1065,54 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     return py::none();
   }
 
-  NVTE_CHECK(!has_columnwise,
+  NVTE_CHECK(is_block_scale_1d || !has_columnwise,
              "Grouped input already has columnwise data but unswizzled scales; requantizing "
              "from it is not supported.");
 
-  // Everything below runs quantization kernels, so it is MXFP8-only.
-  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
-             "Requantizing a grouped input is only supported for MXFP8.");
+  NVTE_CHECK(is_block_scale_1d || detail::IsMXFP8Quantizers(quantizer.ptr()),
+             "Grouped requantization requires MXFP8 or block128 FP8.");
+  if (is_block_scale_1d && !compact_block_scaling_rowwise_scale_layout &&
+      (!need_columnwise || has_columnwise) && !return_dequantized) {
+    return py::none();
+  }
+  const bool build_columnwise = need_columnwise && !has_columnwise;
 
   const auto logical_shape = grouped_x.attr("logical_shape").cast<py::tuple>();
   const auto total_tokens = logical_shape[0].cast<size_t>();
   const auto hidden_dim = logical_shape[1].cast<size_t>();
+  NVTE_CHECK(grouped_x.attr("last_dims").is_none(),
+             "Grouped requantization requires a common last dimension.");
+  const py::object input_first_dims = grouped_x.attr("first_dims");
+  if (!first_dims.has_value() && !input_first_dims.is_none()) {
+    first_dims = input_first_dims.cast<at::Tensor>();
+  }
+  // Explicit offsets may describe unequal groups even without first_dims.
+  const bool same_both_dims = !first_dims.has_value() && !tensor_offsets.has_value();
+  if (same_both_dims && num_tensors != 0) {
+    NVTE_CHECK(total_tokens % num_tensors == 0,
+               "SAME_BOTH_DIMS requires an integral row count per tensor.");
+  }
   // Each group's token count must be a multiple of 128 too, so that every group's scales start
   // on a swizzle-tile boundary. Those counts live on the device (host reads would break CUDA
   // graph capture), so that half is the caller's contract rather than an assertion.
-  NVTE_CHECK(total_tokens % 128 == 0 && hidden_dim % 128 == 0,
-             "Requantizing a grouped input requires dims that are multiples of 128, but got (",
-             total_tokens, ", ", hidden_dim, ").");
+  NVTE_CHECK(
+      (is_block_scale_1d || total_tokens % 128 == 0) && hidden_dim > 0 && hidden_dim % 128 == 0,
+      "Grouped requantization requires hidden divisible by 128 and MXFP8 rows divisible by 128, "
+      "got (",
+      total_tokens, ", ", hidden_dim, ").");
 
   // The common API selects the faster requantization kernel when no BF16 output
   // is requested. Its BF16 intermediate reproduces the unfused chain's numerics.
+  if (is_block_scale_1d && tensor_offsets.has_value()) {
+    const auto data = rowwise_data_py.cast<at::Tensor>();
+    NVTE_CHECK(tensor_offsets->is_cuda() && tensor_offsets->scalar_type() == at::kLong &&
+                   tensor_offsets->device() == data.device(),
+               "Block128 tensor offsets must be CUDA int64 on the input device.");
+    NVTE_CHECK(tensor_offsets->dim() == 1 && tensor_offsets->is_contiguous(),
+               "Block128 tensor offsets must be a contiguous vector.");
+    NVTE_CHECK(tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1,
+               "Block128 tensor offsets must contain num_tensors + 1 elements.");
+  }
   const bool tensor_offsets_usable =
       tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
       tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1;
@@ -1079,83 +1121,131 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // unfused chain's dedicated empty-input handling accepts and the kernel's pointer
   // validation (correctly) rejects.
   const bool use_fused_kernel =
-      transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true) && need_columnwise &&
-      has_usable_offsets && total_tokens > 0 && otype == DType::kBFloat16 &&
-      op_dtype == DType::kFloat8E4M3 && transformer_engine::cuda::sm_arch() >= 100;
+      (is_block_scale_1d ||
+       transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true)) &&
+      (is_block_scale_1d || need_columnwise) && (same_both_dims || has_usable_offsets) &&
+      (is_block_scale_1d || total_tokens > 0) && otype == DType::kBFloat16 &&
+      op_dtype == DType::kFloat8E4M3 &&
+      transformer_engine::cuda::sm_arch() >= (is_block_scale_1d ? 90 : 100);
   if (use_fused_kernel) {
     const auto rowwise_data = rowwise_data_py.cast<at::Tensor>();
     const auto rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
     const auto options = rowwise_data.options().dtype(at::kByte);
     const auto tokens_i64 = static_cast<int64_t>(total_tokens);
     const auto hidden_i64 = static_cast<int64_t>(hidden_dim);
-    const size_t num_scales = total_tokens * hidden_dim / 32;
+    const size_t num_scales = total_tokens * (hidden_dim / (is_block_scale_1d ? 128 : 32));
+    const size_t columnwise_num_scales =
+        is_block_scale_1d ? ((total_tokens + 127) / 128) * hidden_dim : num_scales;
+    const auto scale_options =
+        rowwise_data.options().dtype(is_block_scale_1d ? at::kFloat : at::kByte);
+    const auto scale_dtype = is_block_scale_1d ? DType::kFloat32 : DType::kFloat8E8M0;
+    const auto scaling_mode = is_block_scale_1d ? NVTE_BLOCK_SCALING_1D : NVTE_MXFP8_1D_SCALING;
+    NVTE_CHECK(rowwise_data.scalar_type() == at::kByte &&
+                   rowwise_data.numel() == tokens_i64 * hidden_i64 &&
+                   rowwise_data.is_contiguous() && rowwise_scale_inv.is_contiguous(),
+               "Grouped requantization requires contiguous FP8 data and scales.");
+    NVTE_CHECK(rowwise_scale_inv.scalar_type() == (is_block_scale_1d ? at::kFloat : at::kByte),
+               "Grouped requantization input scale dtype does not match its format.");
 
     // Element-based exclusive-cumsum offsets ([num_tensors + 1], device) for the
     // per-group columnwise scale bases and the live-row bound.
     at::Tensor element_offsets;
-    if (tensor_offsets_usable) {
+    if (!same_both_dims && tensor_offsets_usable) {
       element_offsets = *tensor_offsets;
-    } else {
+    } else if (!same_both_dims) {
       const at::Tensor first_dims_i64 =
           first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong);
       element_offsets = splits_to_offsets(first_dims_i64, static_cast<int64_t>(hidden_dim));
     }
 
     // Grouped tensors carry data and scales as flat 1D buffers.
-    at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
-    at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
-    at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
-    const at::Tensor first_dims_i64 =
-        first_dims.has_value()
-            ? (first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong))
-            : at::floor_divide(element_offsets.slice(0, 1, num_tensors + 1) -
-                                   element_offsets.slice(0, 0, num_tensors),
-                               hidden_i64);
+    at::Tensor columnwise_data, columnwise_scale_inv;
+    if (build_columnwise) {
+      columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
+      columnwise_scale_inv =
+          at::empty({static_cast<int64_t>(columnwise_num_scales)}, scale_options);
+    }
+    at::Tensor swizzled_rowwise_scale_inv =
+        is_block_scale_1d && !compact_block_scaling_rowwise_scale_layout
+            ? rowwise_scale_inv
+            : at::empty({static_cast<int64_t>(num_scales)}, scale_options);
+    at::Tensor first_dims_i64;
+    if (!same_both_dims) {
+      first_dims_i64 =
+          first_dims.has_value()
+              ? (first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong))
+              : at::floor_divide(element_offsets.slice(0, 1, num_tensors + 1) -
+                                     element_offsets.slice(0, 0, num_tensors),
+                                 hidden_i64);
+    }
     const std::vector<size_t> grouped_shape = {total_tokens, hidden_dim};
     const std::vector<size_t> flat_data_shape = {total_tokens * hidden_dim};
     const std::vector<size_t> scale_shape = {num_scales};
     const std::vector<size_t> dims_shape = {num_tensors};
     const std::vector<size_t> offsets_shape = {num_tensors + 1};
 
-    GroupedTensorWrapper input_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
+    GroupedTensorWrapper input_nvte(num_tensors, grouped_shape, scaling_mode);
     input_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
-    input_nvte.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+    input_nvte.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), scale_dtype,
                                      getTensorShape(rowwise_scale_inv));
-    input_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
-    input_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+    if (!same_both_dims) {
+      input_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
+      input_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+    }
+    input_nvte.set_with_gemm_swizzled_scales(swizzled);
+    input_nvte.set_block_scaling_rowwise_scale_layout(
+        static_cast<uint8_t>(block_scaling_rowwise_scale_layout));
 
-    GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
+    GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, scaling_mode);
     output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
-    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), scale_dtype,
                                       scale_shape);
-    output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
-                                    flat_data_shape);
-    output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                         scale_shape);
-    output_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
-    output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+    if (build_columnwise) {
+      output_nvte.set_columnwise_data(columnwise_data.data_ptr(), op_dtype, flat_data_shape);
+      output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), scale_dtype,
+                                           std::vector<size_t>{columnwise_num_scales});
+    }
+    if (!same_both_dims) {
+      output_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
+      output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+    }
     output_nvte.set_with_gemm_swizzled_scales(true);
+    output_nvte.set_block_scaling_rowwise_scale_layout(static_cast<uint8_t>(
+        transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
 
     at::Tensor dequantized;
     TensorWrapper dequantized_nvte;
     if (return_dequantized) {
       dequantized =
           at::empty({tokens_i64, hidden_i64}, rowwise_data.options().dtype(at::kBFloat16));
-      dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16, grouped_shape);
+      dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), otype, grouped_shape);
     }
 
+    QuantizationConfigWrapper config;
+    if (is_block_scale_1d) {
+      config.set_amax_epsilon(quantizer.attr("amax_epsilon").cast<float>());
+      config.set_force_pow_2_scales(quantizer.attr("force_pow_2_scales").cast<bool>());
+    }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_group_requantize(input_nvte.data(), output_nvte.data(),
-                            return_dequantized ? dequantized_nvte.data() : nullptr, nullptr,
+                            return_dequantized ? dequantized_nvte.data() : nullptr, config,
                             at::cuda::getCurrentCUDAStream());
     });
 
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
-    grouped_x.attr("columnwise_data") = columnwise_data;
-    grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
+    if (build_columnwise) {
+      grouped_x.attr("columnwise_data") = columnwise_data;
+      grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
+    }
     grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
+    grouped_x.attr("_block_scaling_rowwise_scale_layout") = py::cast(static_cast<int>(
+        transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY));
     return return_dequantized ? py::cast(dequantized) : py::none();
   }
+
+  NVTE_CHECK(!is_block_scale_1d,
+             "Block128 grouped requantization requires Hopper or newer, E4M3 input, BF16 output, "
+             "and group offsets.");
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
   // undefined when nothing consumes it, which skips the pass entirely.

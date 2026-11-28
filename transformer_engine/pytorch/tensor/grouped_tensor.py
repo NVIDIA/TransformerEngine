@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch.utils._pytree import tree_map
+import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.device import te_device_type
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -94,6 +95,9 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
         with_gemm_swizzled_scales: bool = False,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 0,
@@ -170,6 +174,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            block_scaling_rowwise_scale_layout=block_scaling_rowwise_scale_layout,
             row_scaled_nvfp4=row_scaled_nvfp4,
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
@@ -205,6 +210,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.logical_shape = src.logical_shape
             dst.quantized_tensors = src.quantized_tensors
             dst._with_gemm_swizzled_scales = src._with_gemm_swizzled_scales
+            dst._block_scaling_rowwise_scale_layout = src._block_scaling_rowwise_scale_layout
             dst.row_scaled_nvfp4 = src.row_scaled_nvfp4
             dst.nvfp4_use_4over6 = src.nvfp4_use_4over6
             dst.nvfp4_e4m3_max = src.nvfp4_e4m3_max

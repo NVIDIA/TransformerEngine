@@ -436,6 +436,8 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   /*! Whether to use 2D block scaling for MXFP8 */
   kNVTEQuantizationConfigMXFP82DQuantization = 10,
+  /*! Rowwise scale layout for 1D block scaling: 1 = GEMM_READY, 2 = COMPACT */
+  kNVTEQuantizationConfigBlockScaling1DRowwiseOption = 11,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -585,6 +587,8 @@ enum NVTEGroupedTensorParam {
       10, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTEGroupedRowScaledNVFP4 =
       11, /*!< Whether NVFP4 data uses row scaling instead of tensor scaling */
+  kNVTEGroupedBlockScalingRowwiseScaleLayout =
+      12, /*!< FP8 blockwise rowwise scale layout: 1 = GEMM-ready, 2 = compact */
   kNVTENumGroupedTensorParams
 };
 
@@ -1322,6 +1326,12 @@ class GroupedTensorWrapper {
     nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_block_scaling_rowwise_scale_layout(uint8_t block_scaling_rowwise_scale_layout) {
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedBlockScalingRowwiseScaleLayout,
+                                  &block_scaling_rowwise_scale_layout,
+                                  sizeof(block_scaling_rowwise_scale_layout));
+  }
+
   // Parameter getters
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
     NVTEBasicTensor ret;
@@ -1372,6 +1382,13 @@ class GroupedTensorWrapper {
     uint8_t val = 0;
     nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
+  }
+
+  uint8_t get_block_scaling_rowwise_scale_layout() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedBlockScalingRowwiseScaleLayout, &val,
+                                  sizeof(val), nullptr);
+    return val;
   }
 
   /*! \brief Get an underlying NVTEGroupedTensor.
@@ -1524,6 +1541,13 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! Set the rowwise scale layout for 1D block scaling. */
+  void set_block_scaling_1d_rowwise_option(uint8_t option) {
+    const auto val = option;
+    nvte_set_quantization_config_attribute(
+        config_, kNVTEQuantizationConfigBlockScaling1DRowwiseOption, &val, sizeof(val));
   }
 
   /*! \brief Set NVFP4 4over6 candidate-selection mode */

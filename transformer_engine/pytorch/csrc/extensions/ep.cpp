@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "transformer_engine/comm_window.h"
+#include "transformer_engine/swizzle.h"
 
 // torch's NCCL symm-mem headers (zero-copy path) exist only since torch 2.11;
 // without them NCCL_HAS_SYMMEM_SUPPORT stays undefined and zero-copy is compiled out.
@@ -144,21 +145,30 @@ DType get_contiguous_topk_idx_te_dtype(at::Tensor topk_idx) {
 
 using Shape = std::vector<size_t>;
 
-// EP block scaling supports only E4M3 MXFP8 today. A future block-scaled recipe (e.g. NVFP4)
-// would also set is_scaled but carry a non-FP8 token dtype, so key the guard on the FP8 dtype.
-bool is_mxfp8_scaled(bool is_scaled, const at::Tensor& data) {
+// EP block scaling supports E4M3 payloads with either MXFP8 (uint8 E8M0 scales) or
+// 1D block128 (FP32 scales). A future block-scaled recipe (e.g. NVFP4) would also set
+// is_scaled but carry a non-FP8 token dtype, so key the guard on the FP8 dtype.
+bool is_fp8_scaled(bool is_scaled, const at::Tensor& data) {
   return is_scaled && data.scalar_type() == at::kFloat8_e4m3fn;
 }
 
+// Map a scale-inverse dtype to its TE scaling mode: FP32 -> 1D block128,
+// uint8 -> MXFP8.
+NVTEScalingMode scaling_mode_for_scale_dtype(at::ScalarType st) {
+  if (st == at::kFloat) return NVTE_BLOCK_SCALING_1D;
+  if (st == at::kByte) return NVTE_MXFP8_1D_SCALING;
+  NVTE_CHECK(false, "EP scales must use FP32 (block128) or uint8 (MXFP8) storage");
+}
+
 // Validate the scale-inverse pair of a block-scaled EP op and return the scale column count
-// (hidden/block). Both scales must be 2D contiguous with matching cols dividing H and numels
-// equal to their row counts times cols; the recv scale must be symm-mem-backed under zero-copy.
-size_t check_mxfp8_scale_pair(const at::Tensor& send_scale, const at::Tensor& recv_scale,
+// (hidden/block). Both scales must be contiguous with matching cols dividing H and numels equal
+// to their row counts times cols; the recv scale must be symm-mem-backed under zero-copy.
+size_t check_block_scale_pair(const at::Tensor& send_scale, const at::Tensor& recv_scale,
                               size_t send_rows, size_t recv_rows, size_t H, const char* recv_name) {
-  NVTE_CHECK(send_scale.dim() >= 2 && recv_scale.dim() >= 2,
-             "scale-inverses must be at least 2D [., H/block]");
   NVTE_CHECK(send_scale.is_contiguous() && recv_scale.is_contiguous(),
              "scale-inverses must be contiguous");
+  NVTE_CHECK(send_scale.scalar_type() == recv_scale.scalar_type(),
+             "send/recv scale dtypes must match");
   const size_t sc_cols = static_cast<size_t>(send_scale.size(-1));
   NVTE_CHECK(sc_cols > 0 && H % sc_cols == 0, "scale cols (", sc_cols,
              ") must be a non-zero divisor of hidden (", H, ")");
@@ -286,8 +296,8 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
                   total_recv_tokens_te.data(), &layer_cfg, stream);
 }
 
-// tokens_scale_inv / recv_scale_inv are set only for block-scaled dispatch (for
-// now MXFP8): tokens/recv_tokens carry e4m3 data and the scale tensors carry the
+// tokens_scale_inv / recv_scale_inv are set only for block-scaled dispatch:
+// tokens/recv_tokens carry e4m3 data and the scale tensors carry the
 // unswizzled e8m0 scale-inverses [T, H/block]. Both null => bf16/fp16/fp32.
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
@@ -324,19 +334,18 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   check_symm_mem_required(recv_tokens, "recv_tokens");
   check_symm_mem_required(recv_topk_weights, "recv_topk_weights");
 
-  // Block-scaled dispatch: tokens carry e4m3 data and the scale tensors carry
-  // unswizzled e8m0 scale-inverses [T, H/block]. Scales ride in the tensor; the
-  // backend keys on the tensor's scaling mode. is_mxfp8 is split from is_scaled
-  // so future block-scaled recipes can reuse the scale-routing plumbing while
-  // building their own TE tensors; only MXFP8 is supported for now.
+  // Block-scaled dispatch: tokens carry e4m3 data and the scale tensors carry the
+  // scale-inverses [T, H/block] (E8M0 for MXFP8, FP32 for 1D block128). Scales ride
+  // in the tensor; the backend keys on the tensor's scaling mode.
   const bool is_scaled = tokens_scale_inv.has_value();
-  const bool is_mxfp8 = is_mxfp8_scaled(is_scaled, tokens);
+  NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   size_t sc_cols = 0;
   if (is_scaled) {
     NVTE_CHECK(recv_scale_inv.has_value(),
                "recv_scale_inv must be provided together with tokens_scale_inv");
-    NVTE_CHECK(is_mxfp8, "EP dispatch currently supports only E4M3 MXFP8 block scaling");
-    sc_cols = check_mxfp8_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
+    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens), "EP scaled dispatch requires E4M3 FP8 tokens");
+    scaling_mode = scaling_mode_for_scale_dtype(tokens_scale_inv->scalar_type());
+    sc_cols = check_block_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
                                      "recv_scale_inv");
   }
 
@@ -346,17 +355,19 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto tokens_te =
-      is_mxfp8 ? makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype,
-                                             nullptr, nullptr, tokens_scale_inv->data_ptr(),
-                                             Shape{T_flat, sc_cols}, NVTE_MXFP8_1D_SCALING)
-               : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
+      is_scaled ? makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype,
+                                              nullptr, nullptr, tokens_scale_inv->data_ptr(),
+                                              Shape{T_flat, sc_cols}, scaling_mode)
+                : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
+  const size_t recv_scale_cols =
+      is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D ? H / 128 : sc_cols;
   auto recv_tokens_te =
-      is_mxfp8 ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
-                                             nullptr, nullptr, recv_scale_inv->data_ptr(),
-                                             Shape{recv_pr, sc_cols}, NVTE_MXFP8_1D_SCALING)
-               : makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
+      is_scaled ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
+                                              nullptr, nullptr, recv_scale_inv->data_ptr(),
+                                              Shape{recv_pr, recv_scale_cols}, scaling_mode)
+                : makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
   auto recv_topk_w_te =
       makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
 
@@ -436,13 +447,14 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
   check_symm_mem_required(recv_topk_weights, "recv_topk_weights");
 
   const bool is_scaled = tokens_scale_inv.has_value();
-  const bool is_mxfp8 = is_mxfp8_scaled(is_scaled, tokens);
+  NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   size_t sc_cols = 0;
   if (is_scaled) {
     NVTE_CHECK(recv_scale_inv.has_value(),
                "recv_scale_inv must be provided together with tokens_scale_inv");
-    NVTE_CHECK(is_mxfp8, "EP dispatch currently supports only E4M3 MXFP8 block scaling");
-    sc_cols = check_mxfp8_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
+    NVTE_CHECK(is_fp8_scaled(is_scaled, tokens), "EP scaled dispatch requires E4M3 FP8 tokens");
+    scaling_mode = scaling_mode_for_scale_dtype(tokens_scale_inv->scalar_type());
+    sc_cols = check_block_scale_pair(*tokens_scale_inv, *recv_scale_inv, T_flat, recv_pr, H,
                                      "recv_scale_inv");
   }
 
@@ -452,17 +464,19 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto tokens_te =
-      is_mxfp8 ? makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype,
-                                             nullptr, nullptr, tokens_scale_inv->data_ptr(),
-                                             Shape{T_flat, sc_cols}, NVTE_MXFP8_1D_SCALING)
-               : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
+      is_scaled ? makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype,
+                                              nullptr, nullptr, tokens_scale_inv->data_ptr(),
+                                              Shape{T_flat, sc_cols}, scaling_mode)
+                : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
+  const size_t recv_scale_cols =
+      is_scaled && scaling_mode == NVTE_BLOCK_SCALING_1D ? H / 128 : sc_cols;
   auto recv_tokens_te =
-      is_mxfp8 ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
-                                             nullptr, nullptr, recv_scale_inv->data_ptr(),
-                                             Shape{recv_pr, sc_cols}, NVTE_MXFP8_1D_SCALING)
-               : makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
+      is_scaled ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
+                                              nullptr, nullptr, recv_scale_inv->data_ptr(),
+                                              Shape{recv_pr, recv_scale_cols}, scaling_mode)
+                : makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
   auto recv_topk_w_te =
       makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
   auto tokens_per_expert_te = makeTransformerEngineTensor(
@@ -542,8 +556,16 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
     const int64_t H = tokens.size(-1);
     rt = at::empty({num_recv, H}, tokens.options());
     rw = at::empty({num_recv}, topk_weights.options());
-    if (is_scaled)
-      rsi = at::empty({num_recv, tokens_scale_inv->size(-1)}, tokens_scale_inv->options());
+    if (is_scaled) {
+      const int64_t scale_cols = tokens_scale_inv->size(-1);
+      const size_t hidden = static_cast<size_t>(tokens.size(-1));
+      NVTE_CHECK(scale_cols > 0 && hidden % scale_cols == 0,
+                 "tokens_scale_inv columns must divide the hidden dimension");
+      const auto scale_options = tokens_scale_inv->options();
+      const int64_t output_scale_cols =
+          tokens_scale_inv->scalar_type() == at::kFloat ? hidden / 128 : scale_cols;
+      rsi = at::empty({num_recv, output_scale_cols}, scale_options);
+    }
   } else {
     rt = *recv_tokens;
     rw = *recv_topk_weights;
@@ -661,34 +683,34 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   // EpBuffer-owned scatter target and must be symm-mem in zero-copy mode.
   check_symm_mem_required(grad_expert_out, "grad_expert_out");
 
-  // Block-scaled (MXFP8) backward: grad/grad_expert_out carry e4m3 data and the scale
-  // tensors carry the unswizzled e8m0 scale-inverses [., H/block]; the reverse-direction
-  // dispatch forwards them like the forward path. is_mxfp8 is split from is_scaled so
-  // future block-scaled recipes can reuse the plumbing; only MXFP8 is supported for now.
+  // Block-scaled backward: grad/grad_expert_out carry e4m3 data and the scale
+  // tensors carry the scale-inverses [., H/block] (E8M0 for MXFP8, FP32 for 1D
+  // block128); the reverse-direction dispatch forwards them like the forward path.
   const bool is_scaled = grad_scale_inv.has_value();
-  const bool is_mxfp8 = is_mxfp8_scaled(is_scaled, grad);
+  NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   size_t sc_cols = 0;
   if (is_scaled) {
     NVTE_CHECK(grad_expert_out_scale_inv.has_value(),
                "grad_expert_out_scale_inv must be provided together with grad_scale_inv");
-    NVTE_CHECK(is_mxfp8, "EP combine backward currently supports only E4M3 MXFP8 block scaling");
-    sc_cols = check_mxfp8_scale_pair(*grad_scale_inv, *grad_expert_out_scale_inv, T_flat, recv_pr,
+    NVTE_CHECK(is_fp8_scaled(is_scaled, grad), "EP scaled combine backward requires E4M3 FP8 grad");
+    scaling_mode = scaling_mode_for_scale_dtype(grad_scale_inv->scalar_type());
+    sc_cols = check_block_scale_pair(*grad_scale_inv, *grad_expert_out_scale_inv, T_flat, recv_pr,
                                      H, "grad_expert_out_scale_inv");
   }
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
-  auto grad_te = is_mxfp8
+  auto grad_te = is_scaled
                      ? makeTransformerEngineTensor(grad.data_ptr(), Shape{T_flat, H}, g_dtype,
                                                    nullptr, nullptr, grad_scale_inv->data_ptr(),
-                                                   Shape{T_flat, sc_cols}, NVTE_MXFP8_1D_SCALING)
+                                                   Shape{T_flat, sc_cols}, scaling_mode)
                      : makeTransformerEngineTensor(grad.data_ptr(), Shape{T_flat, H}, g_dtype);
   auto grad_expert_out_te =
-      is_mxfp8
+      is_scaled
           ? makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype,
                                         nullptr, nullptr, grad_expert_out_scale_inv->data_ptr(),
-                                        Shape{recv_pr, sc_cols}, NVTE_MXFP8_1D_SCALING)
+                                        Shape{recv_pr, sc_cols}, scaling_mode)
           : makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype);
 
   // grad is autograd-allocated (staged); grad_expert_out resolves to a symm-mem

@@ -17,6 +17,8 @@
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
+#include "fp8_blockwise/requantize_fp8_blockwise.h"
+#include "mxfp8/requantize_mxfp8.h"
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
@@ -25,6 +27,25 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
 
   constexpr bool IS_ACT = false;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
+}
+
+void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           NVTETensor dequantized, const NVTEQuantizationConfig quant_config,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_requantize);
+  using namespace transformer_engine;
+  const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
+  if (input_cu->scaling_mode == NVTE_BLOCK_SCALING_1D) {
+    requantize::group_requantize_block_scaling(
+        *input_cu, output_cu,
+        dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
+        reinterpret_cast<const QuantizationConfig *>(quant_config), stream);
+    return;
+  }
+  dispatch::mxfp8::group_requantize(
+      *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
+      stream);
 }
 
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,

@@ -126,6 +126,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool
+    _block_scaling_rowwise_scale_layout: int
 
     def __new__(
         cls,
@@ -137,6 +138,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
@@ -152,6 +156,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._block_scaling_rowwise_scale_layout = int(block_scaling_rowwise_scale_layout)
 
         return instance
 
@@ -194,6 +199,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "block_scaling_rowwise_scale_layout": self._block_scaling_rowwise_scale_layout,
             "fake_dtype": self._dtype,
         }
 
@@ -257,6 +263,23 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 q_K = q.shape[-1]
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
+            if self._block_scaling_rowwise_scale_layout == int(
+                tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT
+            ):
+                orig_shape = q.shape
+                q = q.reshape(q_M, q_K)
+                scale_inv = scale_inv.reshape(q_M, -1)
+                k_pad_amount = (block_len - q_K % block_len) % block_len
+                if k_pad_amount:
+                    q = torch.nn.functional.pad(q, (0, k_pad_amount)).contiguous()
+                    scale_inv = torch.nn.functional.pad(scale_inv, (0, 1)).contiguous()
+                q_tiled = q.reshape(q_M, scale_inv.shape[-1], block_len)
+                result = q_tiled.view(TE_DType_To_Torch[self._fp8_dtype]).to(torch.float32)
+                result = result * scale_inv.unsqueeze(-1)
+                result = result.reshape(q.shape)[:, :q_K].to(dtype)
+                if len(orig_shape) == 0:
+                    return result.reshape([])
+                return result.reshape(*orig_shape).contiguous()
             inner_q_dimension_tiled = True
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
         else:
@@ -379,6 +402,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             self._fp8_dtype,
             self._quantizer,
             self._is_2D_scaled,
+            block_scaling_rowwise_scale_layout=self._block_scaling_rowwise_scale_layout,
             fake_dtype=self._dtype,
         )
 

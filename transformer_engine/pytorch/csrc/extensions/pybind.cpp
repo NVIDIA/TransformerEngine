@@ -228,6 +228,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
+  py::enum_<transformer_engine::detail::FP8BlockwiseRowwiseOption>(m, "FP8BlockwiseRowwiseOption")
+      .value("ROWWISE_GEMM_READY",
+             transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY)
+      .value("ROWWISE_COMPACT",
+             transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT);
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("create_empty_quantized_tensor",

@@ -41,6 +41,7 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
+    rowwise_scale_layout_value: int
 
     def __init__(
         self,
@@ -51,6 +52,9 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
+        rowwise_scale_layout: tex.FP8BlockwiseRowwiseOption = (
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp8_dtype)
@@ -58,6 +62,21 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
+        if rowwise_scale_layout not in (
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY,
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
+        ):
+            raise ValueError("rowwise_scale_layout must be GEMM_READY or COMPACT")
+        self.rowwise_scale_layout = int(rowwise_scale_layout)
+
+    @property
+    def rowwise_scale_layout(self):
+        """Public pybind enum, backed by a compile-safe integer value field."""
+        return tex.FP8BlockwiseRowwiseOption(self.rowwise_scale_layout_value)
+
+    @rowwise_scale_layout.setter
+    def rowwise_scale_layout(self, value):
+        self.rowwise_scale_layout_value = int(value)
 
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
@@ -69,6 +88,7 @@ class Float8BlockQuantizer(Quantizer):
             block_scaling_dim=self.block_scaling_dim,
             amax_epsilon=self.amax_epsilon,
             force_pow_2_scales=self.force_pow_2_scales,
+            rowwise_scale_layout=self.rowwise_scale_layout,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -84,6 +104,7 @@ class Float8BlockQuantizer(Quantizer):
                 "fp8_dtype": self.dtype,
                 "quantizer": self,
                 "is_2D_scaled": self.block_scaling_dim == 2,
+                "block_scaling_rowwise_scale_layout": self.rowwise_scale_layout_value,
                 "fake_dtype": fake_dtype,
             },
         }
@@ -207,6 +228,8 @@ class Float8BlockQuantizer(Quantizer):
                 (dim0 + self.block_len - 1) // self.block_len,
                 round_up_to_nearest_multiple(dim1, 4),
             )
+        if self.rowwise_scale_layout == tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT:
+            return (dim0, (dim1 + self.block_len - 1) // self.block_len)
         return (
             (dim1 + self.block_len - 1) // self.block_len,
             round_up_to_nearest_multiple(dim0, 4),
@@ -469,6 +492,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 self._quantizer,
                 self._is_2D_scaled,
                 None,  # data_format
+                self._block_scaling_rowwise_scale_layout,
             ),
         )
 
@@ -485,6 +509,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         data_format: Any = None,
+        block_scaling_rowwise_scale_layout: int = int(
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
     ) -> Float8BlockwiseQTensor:
         """This classmethod is kept for backward compatibility only.
         ``__reduce_ex__`` used to point at this classmethod, but bound
@@ -509,6 +536,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             quantizer,
             is_2D_scaled,
             data_format,
+            block_scaling_rowwise_scale_layout,
         )
 
     def _get_data(self) -> Float8BlockwiseQTensor:
@@ -713,6 +741,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     quantizer: Quantizer,
     is_2D_scaled: bool,
     data_format: Any = None,  # pylint: disable=unused-argument
+    block_scaling_rowwise_scale_layout: int = int(tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY),
 ) -> Float8BlockwiseQTensor:
     """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from inner buffers so the wrapper subclass stays
@@ -732,6 +761,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
         dtype=dtype,
         quantizer=quantizer,
         is_2D_scaled=is_2D_scaled,
+        block_scaling_rowwise_scale_layout=block_scaling_rowwise_scale_layout,
         device=device,
     )
 
@@ -816,6 +846,7 @@ class _ViewFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            block_scaling_rowwise_scale_layout=tensor._block_scaling_rowwise_scale_layout,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -846,6 +877,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                block_scaling_rowwise_scale_layout=grad._block_scaling_rowwise_scale_layout,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )
@@ -932,6 +964,7 @@ class _ReshapeFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            block_scaling_rowwise_scale_layout=tensor._block_scaling_rowwise_scale_layout,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -961,6 +994,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                block_scaling_rowwise_scale_layout=grad._block_scaling_rowwise_scale_layout,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )
