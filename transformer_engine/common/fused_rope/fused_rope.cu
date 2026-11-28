@@ -11,6 +11,7 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../utils.cuh"
+#include "fused_qkv_rope_vec.cuh"
 
 namespace transformer_engine {
 
@@ -697,6 +698,20 @@ void fused_qkv_rope_forward_launcher(const scalar_t *qkv_input, const float *q_f
                                      const int h, const int d, const int d2,
                                      const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
                                      const int qkv_split_arg_list_2, cudaStream_t stream) {
+  if constexpr (sizeof(scalar_t) == 2) {
+    // 16-byte accesses; same per-element math as the scalar kernel below.
+    if (fused_qkv_rope_vec::can_use(sizeof(scalar_t), interleaved, h, d, d2, qkv_split_arg_list_0,
+                                    qkv_split_arg_list_1, qkv_split_arg_list_2) &&
+        q_freqs != nullptr && k_freqs != nullptr && fused_qkv_rope_vec::aligned16(qkv_input) &&
+        fused_qkv_rope_vec::aligned16(q_out) && fused_qkv_rope_vec::aligned16(k_out) &&
+        fused_qkv_rope_vec::aligned16(v_out)) {
+      NVTE_CHECK_CUDA(fused_qkv_rope_vec::launch_fwd(
+          qkv_input, q_freqs, k_freqs, start_positions, q_out, k_out, v_out,
+          qkv_format == NVTE_QKV_Format::NVTE_SBHD, cp_size, cp_rank, s, b, h, d, d2,
+          qkv_split_arg_list_0, qkv_split_arg_list_1, qkv_split_arg_list_2, stream));
+      return;
+    }
+  }
   const int THREADS_PER_WARP = 32;
   int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
@@ -720,6 +735,20 @@ void fused_qkv_rope_backward_launcher(const scalar_t *q_grad_out, const scalar_t
                                       const int qkv_split_arg_list_0,
                                       const int qkv_split_arg_list_1,
                                       const int qkv_split_arg_list_2, cudaStream_t stream) {
+  if constexpr (sizeof(scalar_t) == 2) {
+    // 16-byte accesses; same per-element math as the scalar kernel below.
+    if (fused_qkv_rope_vec::can_use(sizeof(scalar_t), interleaved, h, d, d2, qkv_split_arg_list_0,
+                                    qkv_split_arg_list_1, qkv_split_arg_list_2) &&
+        q_freqs != nullptr && k_freqs != nullptr && fused_qkv_rope_vec::aligned16(q_grad_out) &&
+        fused_qkv_rope_vec::aligned16(k_grad_out) && fused_qkv_rope_vec::aligned16(v_grad_out) &&
+        fused_qkv_rope_vec::aligned16(qkv_grad_input)) {
+      NVTE_CHECK_CUDA(fused_qkv_rope_vec::launch_bwd(
+          q_grad_out, k_grad_out, v_grad_out, q_freqs, k_freqs, qkv_grad_input,
+          qkv_format == NVTE_QKV_Format::NVTE_SBHD, cp_size, cp_rank, s, b, h, d, d2,
+          qkv_split_arg_list_0, qkv_split_arg_list_1, qkv_split_arg_list_2, stream));
+      return;
+    }
+  }
   const int THREADS_PER_WARP = 32;
   const int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
